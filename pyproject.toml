@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py2sess"
+version = "0.1.0"
+description = "Standalone Python implementation of the optimized 2S-ESS forward model."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
+authors = [
+  {name = "Tianhao Le"},
+]
+keywords = ["radiative transfer", "atmospheric science", "remote sensing", "two-stream", "pytorch"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Natural Language :: English",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Atmospheric Science",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+  "numpy",
+  "scipy",
+]
+
+[project.optional-dependencies]
+torch = [
+  "torch",
+]
+speed = [
+  "numba",
+]
+dev = [
+  "build",
+  "numba",
+  "pre-commit",
+  "ruff",
+  "torch",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["py2sess*"]
+
+[tool.setuptools.package-data]
+py2sess = ["data/benchmark/*.npz"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+cache-dir = "/tmp/py2sess_ruff_cache"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]

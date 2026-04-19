@@ -1,0 +1,355 @@
+"""Benchmark a full-spectrum TIR bundle with NumPy and optional PyTorch."""
+
+from __future__ import annotations
+
+import argparse
+import time
+from pathlib import Path
+
+import numpy as np
+
+from _full_spectrum_benchmark_common import (
+    accuracy_summary,
+    BenchmarkRow,
+    load_bundle,
+    print_problem_header,
+    print_rows,
+    recommended_chunk_size,
+    require_keys,
+    scalar_value,
+)
+from py2sess.core import precompute_fo_thermal_geometry_numpy
+from py2sess.core.backend import has_torch
+from py2sess.core.thermal_batch_numpy import _fo_thermal_toa, _two_stream_thermal_toa
+
+
+def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
+    """Returns one spectral chunk from a TIR benchmark bundle."""
+    chunk = {
+        "tau_arr": bundle["tau_arr"][start:stop],
+        "omega_arr": bundle["omega_arr"][start:stop],
+        "asymm_arr": bundle["asymm_arr"][start:stop],
+        "d2s_scaling": bundle["d2s_scaling"][start:stop],
+        "thermal_bb_input": bundle["thermal_bb_input"][start:stop],
+        "surfbb": bundle["surfbb"][start:stop],
+        "albedo": bundle["albedo"][start:stop],
+    }
+    if "ref_total" in bundle:
+        chunk["ref_total"] = bundle["ref_total"][start:stop]
+    return chunk
+
+
+def benchmark_numpy(
+    bundle: dict[str, np.ndarray],
+    *,
+    wavelengths: int,
+    chunk_size: int,
+    numpy_bvp_engine: str,
+) -> BenchmarkRow:
+    """Runs the NumPy TIR full-spectrum benchmark."""
+    wall_start = time.perf_counter()
+    heights = np.asarray(bundle["heights"], dtype=float)
+    user_angle = scalar_value(bundle["user_angle"])
+    geometry = precompute_fo_thermal_geometry_numpy(
+        heights=heights,
+        user_angle_degrees=user_angle,
+        earth_radius=6371.0,
+        nfine=3,
+    )
+    user_stream = float(np.cos(np.deg2rad(user_angle)))
+    fo_seconds = 0.0
+    two_stream_seconds = 0.0
+    checksum = 0.0
+    max_abs_diff = None
+    max_rel_diff_pct = None
+    for start in range(0, wavelengths, chunk_size):
+        stop = min(start + chunk_size, wavelengths)
+        chunk = _slice_rows(bundle, start, stop)
+        t0 = time.perf_counter()
+        two_stream = _two_stream_thermal_toa(
+            tau=chunk["tau_arr"],
+            omega=chunk["omega_arr"],
+            asymm=chunk["asymm_arr"],
+            scaling=chunk["d2s_scaling"],
+            thermal_bb_input=chunk["thermal_bb_input"],
+            surfbb=chunk["surfbb"],
+            emissivity=1.0 - chunk["albedo"],
+            albedo=chunk["albedo"],
+            stream_value=0.5,
+            user_stream=user_stream,
+            thermal_tcutoff=1.0e-8,
+            bvp_engine=numpy_bvp_engine,
+        )
+        two_stream_seconds += time.perf_counter() - t0
+        t0 = time.perf_counter()
+        fo = _fo_thermal_toa(
+            tau=chunk["tau_arr"],
+            omega=chunk["omega_arr"],
+            scaling=chunk["d2s_scaling"],
+            thermal_bb_input=chunk["thermal_bb_input"],
+            surfbb=chunk["surfbb"],
+            emissivity=1.0 - chunk["albedo"],
+            heights=heights,
+            user_angle_degrees=user_angle,
+            earth_radius=6371.0,
+            nfine=3,
+            geometry=geometry,
+        )
+        fo_seconds += time.perf_counter() - t0
+        total = two_stream + fo
+        checksum += float(np.sum(total))
+        if "ref_total" in chunk:
+            chunk_abs_diff, chunk_rel_diff_pct = accuracy_summary(total, chunk["ref_total"])
+            max_abs_diff = (
+                chunk_abs_diff if max_abs_diff is None else max(max_abs_diff, chunk_abs_diff)
+            )
+            max_rel_diff_pct = (
+                chunk_rel_diff_pct
+                if max_rel_diff_pct is None
+                else max(max_rel_diff_pct, chunk_rel_diff_pct)
+            )
+    wall_seconds = time.perf_counter() - wall_start
+    rt_seconds = fo_seconds + two_stream_seconds
+    _ = checksum
+    return BenchmarkRow(
+        backend="numpy",
+        wavelengths=wavelengths,
+        layers=int(bundle["tau_arr"].shape[1]),
+        chunk_size=chunk_size,
+        wall_seconds=wall_seconds,
+        rt_seconds=rt_seconds,
+        setup_seconds=wall_seconds - rt_seconds,
+        fo_seconds=fo_seconds,
+        two_stream_seconds=two_stream_seconds,
+        max_abs_diff=max_abs_diff,
+        max_rel_diff_pct=max_rel_diff_pct,
+    )
+
+
+def benchmark_torch(
+    bundle: dict[str, np.ndarray],
+    *,
+    wavelengths: int,
+    chunk_size: int,
+    torch_dtype_name: str,
+    torch_device_name: str,
+    torch_threads: int,
+    torch_bvp_engine: str,
+) -> BenchmarkRow:
+    """Runs the PyTorch TIR full-spectrum benchmark."""
+    if not has_torch():
+        raise RuntimeError("PyTorch is not installed")
+    import torch
+
+    from py2sess.core.thermal_batch_torch import (
+        _as_tensor,
+        _fo_thermal_toa_batch,
+        _two_stream_thermal_toa_batch,
+    )
+
+    wall_start = time.perf_counter()
+    device = torch.device(torch_device_name)
+    dtype = {"float64": torch.float64, "float32": torch.float32}[torch_dtype_name]
+    torch.set_num_threads(torch_threads)
+    with torch.no_grad():
+        probe = torch.ones(16, dtype=dtype, device=device)
+        _ = (probe + 1.0).sum().item()
+
+    heights = np.asarray(bundle["heights"], dtype=float)
+    user_angle = scalar_value(bundle["user_angle"])
+    geometry = precompute_fo_thermal_geometry_numpy(
+        heights=heights,
+        user_angle_degrees=user_angle,
+        earth_radius=6371.0,
+        nfine=3,
+    )
+    user_stream = float(np.cos(np.deg2rad(user_angle)))
+    fo_seconds = 0.0
+    two_stream_seconds = 0.0
+    checksum = 0.0
+    max_abs_diff = None
+    max_rel_diff_pct = None
+    for start in range(0, wavelengths, chunk_size):
+        stop = min(start + chunk_size, wavelengths)
+        chunk = _slice_rows(bundle, start, stop)
+        with torch.no_grad():
+            tau_t = _as_tensor(chunk["tau_arr"], dtype=dtype, device=device)
+            omega_t = _as_tensor(chunk["omega_arr"], dtype=dtype, device=device)
+            asymm_t = _as_tensor(chunk["asymm_arr"], dtype=dtype, device=device)
+            scaling_t = _as_tensor(chunk["d2s_scaling"], dtype=dtype, device=device)
+            bb_t = _as_tensor(chunk["thermal_bb_input"], dtype=dtype, device=device)
+            surfbb_t = _as_tensor(chunk["surfbb"], dtype=dtype, device=device)
+            albedo_t = _as_tensor(chunk["albedo"], dtype=dtype, device=device)
+            emissivity_t = 1.0 - albedo_t
+            t0 = time.perf_counter()
+            two_stream = _two_stream_thermal_toa_batch(
+                tau=tau_t,
+                omega=omega_t,
+                asymm=asymm_t,
+                scaling=scaling_t,
+                thermal_bb_input=bb_t,
+                surfbb=surfbb_t,
+                emissivity=emissivity_t,
+                albedo=albedo_t,
+                stream_value=0.5,
+                user_stream=user_stream,
+                pxsq=0.25,
+                thermal_tcutoff=1.0e-8,
+                bvp_device=None,
+                bvp_dtype=dtype,
+                bvp_engine=torch_bvp_engine,
+            )
+            two_stream_seconds += time.perf_counter() - t0
+            t0 = time.perf_counter()
+            fo = _fo_thermal_toa_batch(
+                tau=tau_t,
+                omega=omega_t,
+                scaling=scaling_t,
+                thermal_bb_input=bb_t,
+                surfbb=surfbb_t,
+                emissivity=emissivity_t,
+                heights=heights,
+                user_angle_degrees=user_angle,
+                earth_radius=6371.0,
+                nfine=3,
+                fo_geometry=geometry,
+            )
+            fo_seconds += time.perf_counter() - t0
+            total = two_stream + fo
+            checksum += float(total.sum().item())
+            if "ref_total" in chunk:
+                chunk_abs_diff, chunk_rel_diff_pct = accuracy_summary(
+                    total.detach().cpu().numpy(),
+                    np.asarray(chunk["ref_total"], dtype=float),
+                )
+                max_abs_diff = (
+                    chunk_abs_diff if max_abs_diff is None else max(max_abs_diff, chunk_abs_diff)
+                )
+                max_rel_diff_pct = (
+                    chunk_rel_diff_pct
+                    if max_rel_diff_pct is None
+                    else max(max_rel_diff_pct, chunk_rel_diff_pct)
+                )
+    wall_seconds = time.perf_counter() - wall_start
+    rt_seconds = fo_seconds + two_stream_seconds
+    _ = checksum
+    return BenchmarkRow(
+        backend=f"torch-{torch_device_name}-{torch_dtype_name}",
+        wavelengths=wavelengths,
+        layers=int(bundle["tau_arr"].shape[1]),
+        chunk_size=chunk_size,
+        wall_seconds=wall_seconds,
+        rt_seconds=rt_seconds,
+        setup_seconds=wall_seconds - rt_seconds,
+        fo_seconds=fo_seconds,
+        two_stream_seconds=two_stream_seconds,
+        max_abs_diff=max_abs_diff,
+        max_rel_diff_pct=max_rel_diff_pct,
+    )
+
+
+def main() -> None:
+    """Runs the full-spectrum TIR benchmark example."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "bundle", type=Path, help="Path to a full-spectrum TIR benchmark bundle (.npz)."
+    )
+    parser.add_argument("--backend", choices=["numpy", "torch", "both"], default="both")
+    parser.add_argument("--limit", type=int, default=None, help="Optional spectral-row limit.")
+    parser.add_argument(
+        "--chunk-size", type=int, default=None, help="Optional chunk size override."
+    )
+    parser.add_argument("--numpy-bvp-engine", choices=["auto", "block"], default="auto")
+    parser.add_argument(
+        "--torch-bvp-engine", choices=["auto", "block", "pentadiagonal"], default="auto"
+    )
+    parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
+    parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
+    parser.add_argument("--torch-threads", type=int, default=1)
+    args = parser.parse_args()
+
+    load_start = time.perf_counter()
+    bundle = load_bundle(args.bundle)
+    require_keys(
+        bundle,
+        (
+            "wavelengths",
+            "heights",
+            "user_angle",
+            "tau_arr",
+            "omega_arr",
+            "asymm_arr",
+            "d2s_scaling",
+            "thermal_bb_input",
+            "surfbb",
+            "albedo",
+        ),
+        label="TIR",
+    )
+    total_rows = int(bundle["tau_arr"].shape[0])
+    wavelengths = total_rows if args.limit is None else min(int(args.limit), total_rows)
+    bundle = dict(bundle)
+    bundle["wavelengths"] = bundle["wavelengths"][:wavelengths]
+    bundle["tau_arr"] = bundle["tau_arr"][:wavelengths]
+    bundle["omega_arr"] = bundle["omega_arr"][:wavelengths]
+    bundle["asymm_arr"] = bundle["asymm_arr"][:wavelengths]
+    bundle["d2s_scaling"] = bundle["d2s_scaling"][:wavelengths]
+    bundle["thermal_bb_input"] = bundle["thermal_bb_input"][:wavelengths]
+    bundle["surfbb"] = bundle["surfbb"][:wavelengths]
+    bundle["albedo"] = bundle["albedo"][:wavelengths]
+    if "ref_total" in bundle:
+        bundle["ref_total"] = bundle["ref_total"][:wavelengths]
+    load_seconds = time.perf_counter() - load_start
+
+    print_problem_header(
+        title="TIR full-spectrum benchmark",
+        bundle_path=args.bundle,
+        wavelengths=wavelengths,
+        layers=int(bundle["tau_arr"].shape[1]),
+        load_seconds=load_seconds,
+        note=(
+            "RT time is FO + 2S. wall time (s) excludes bundle load but includes "
+            "backend-local setup such as FO geometry precompute, tensor conversion, "
+            "PyTorch warmup, and checksum reduction."
+        ),
+    )
+
+    rows: list[BenchmarkRow] = []
+    if args.backend in {"numpy", "both"}:
+        chunk_size = args.chunk_size or recommended_chunk_size(
+            total_rows=wavelengths,
+            nlayers=int(bundle["tau_arr"].shape[1]),
+            backend="numpy",
+            workload="thermal",
+        )
+        rows.append(
+            benchmark_numpy(
+                bundle,
+                wavelengths=wavelengths,
+                chunk_size=chunk_size,
+                numpy_bvp_engine=args.numpy_bvp_engine,
+            )
+        )
+    if args.backend in {"torch", "both"}:
+        chunk_size = args.chunk_size or recommended_chunk_size(
+            total_rows=wavelengths,
+            nlayers=int(bundle["tau_arr"].shape[1]),
+            backend="torch",
+            workload="thermal",
+        )
+        rows.append(
+            benchmark_torch(
+                bundle,
+                wavelengths=wavelengths,
+                chunk_size=chunk_size,
+                torch_dtype_name=args.torch_dtype,
+                torch_device_name=args.torch_device,
+                torch_threads=args.torch_threads,
+                torch_bvp_engine=args.torch_bvp_engine,
+            )
+        )
+    print_rows(rows)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,320 @@
+"""Utilities for building thermal source inputs from temperature profiles.
+
+The thermal solvers in :mod:`py2sess` consume blackbody source terms directly
+through ``thermal_bb_input`` and ``surfbb``. This module provides small helper
+functions that convert temperatures into those Planck-function values.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+
+_PLANCK_CONSTANT = 6.62607015e-34
+_LIGHT_SPEED = 2.99792458e8
+_BOLTZMANN_CONSTANT = 1.380649e-23
+_MICRONS_TO_METERS = 1.0e-6
+_CM_TO_METERS = 1.0e-2
+
+_FORTRAN_C2 = 1.438786
+_FORTRAN_SIGMA_OVER_PI = 1.80491891383e-8
+_FORTRAN_PLANCK_CONC = 1.5398973382e-1
+_FORTRAN_PLANCK_EPSIL = 1.0e-8
+_FORTRAN_PLANCK_VMAX = 32.0
+_FORTRAN_PLANCK_NSIMPSON = 25
+_FORTRAN_PLANCK_CRITERION = 1.0e-10
+_FORTRAN_PLANCK_VCUT = 1.5
+_FORTRAN_PLANCK_VCP = (10.25, 5.7, 3.9, 2.9, 2.3, 1.9, 0.0)
+
+
+@dataclass(frozen=True)
+class ThermalSourceInputs:
+    """Blackbody source inputs derived from a temperature profile.
+
+    Attributes
+    ----------
+    thermal_bb_input
+        Planck-function values at atmospheric model levels.
+    surfbb
+        Planck-function value for the surface temperature.
+    """
+
+    thermal_bb_input: np.ndarray
+    surfbb: float
+
+
+def _as_float_array(name: str, values: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
+    """Convert input values to a finite one-dimensional float array."""
+
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must be finite")
+    return array
+
+
+def _validate_temperature(
+    name: str,
+    temperature_k: np.ndarray | list[float] | tuple[float, ...] | float,
+) -> np.ndarray:
+    """Validate temperature inputs in Kelvin."""
+
+    array = np.asarray(temperature_k, dtype=np.float64)
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must be finite")
+    if np.any(array <= 0.0):
+        raise ValueError(f"{name} must be strictly positive in Kelvin")
+    return array
+
+
+def planck_radiance_wavelength(temperature_k, wavelength_microns: float) -> np.ndarray:
+    """Evaluate the Planck function in wavelength form.
+
+    Parameters
+    ----------
+    temperature_k
+        Scalar or array of temperatures in Kelvin.
+    wavelength_microns
+        Wavelength in microns.
+
+    Returns
+    -------
+    numpy.ndarray
+        Spectral radiance values in SI wavelength units.
+    """
+
+    if not np.isfinite(wavelength_microns) or wavelength_microns <= 0.0:
+        raise ValueError("wavelength_microns must be positive and finite")
+
+    temperature = _validate_temperature("temperature_k", temperature_k)
+    wavelength_m = wavelength_microns * _MICRONS_TO_METERS
+    exponent = (_PLANCK_CONSTANT * _LIGHT_SPEED) / (
+        wavelength_m * _BOLTZMANN_CONSTANT * temperature
+    )
+    numerator = 2.0 * _PLANCK_CONSTANT * _LIGHT_SPEED**2
+    denominator = wavelength_m**5 * np.expm1(exponent)
+    return numerator / denominator
+
+
+def planck_radiance_wavenumber(temperature_k, wavenumber_cm_inv: float) -> np.ndarray:
+    """Evaluate the Planck function in wavenumber form.
+
+    Parameters
+    ----------
+    temperature_k
+        Scalar or array of temperatures in Kelvin.
+    wavenumber_cm_inv
+        Wavenumber in inverse centimeters.
+
+    Returns
+    -------
+    numpy.ndarray
+        Spectral radiance values in SI wavenumber units.
+    """
+
+    if not np.isfinite(wavenumber_cm_inv) or wavenumber_cm_inv <= 0.0:
+        raise ValueError("wavenumber_cm_inv must be positive and finite")
+
+    temperature = _validate_temperature("temperature_k", temperature_k)
+    wavenumber_m_inv = wavenumber_cm_inv / _CM_TO_METERS
+    exponent = (_PLANCK_CONSTANT * _LIGHT_SPEED * wavenumber_m_inv) / (
+        _BOLTZMANN_CONSTANT * temperature
+    )
+    numerator = 2.0 * _PLANCK_CONSTANT * _LIGHT_SPEED**2 * wavenumber_m_inv**3
+    denominator = np.expm1(exponent)
+    return numerator / denominator
+
+
+def _fortran_planck_polynomial(x_value: float) -> float:
+    """Evaluate the low-wavenumber polynomial used by 2S-ESS Fortran."""
+
+    a1 = 3.33333333333e-1
+    a2 = -1.25e-1
+    a3 = 1.66666666667e-2
+    a4 = -1.98412698413e-4
+    a5 = 3.67430922986e-6
+    a6 = -7.51563251563e-8
+    x_sq = x_value * x_value
+    return (
+        _FORTRAN_PLANCK_CONC
+        * x_sq
+        * x_value
+        * (a1 + x_value * (a2 + x_value * (a3 + x_sq * (a4 + x_sq * (a5 + x_sq * a6)))))
+    )
+
+
+def _fortran_planck_exponential(x_value: float) -> float:
+    """Evaluate the high-wavenumber exponential series used by 2S-ESS Fortran."""
+
+    max_terms = 0
+    while True:
+        max_terms += 1
+        if x_value >= _FORTRAN_PLANCK_VCP[max_terms - 1]:
+            break
+    exp_minus_x = np.exp(-x_value)
+    factor = 1.0
+    total = 0.0
+    for term in range(1, max_terms + 1):
+        mv = term * x_value
+        factor *= exp_minus_x
+        total += factor * (6.0 + mv * (6.0 + mv * (3.0 + mv))) * float(term) ** -4.0
+    return total * _FORTRAN_PLANCK_CONC
+
+
+def _fortran_planck_band_scalar(
+    temperature_k: float,
+    wavenumber_low_cm_inv: float,
+    wavenumber_high_cm_inv: float,
+) -> float:
+    """Evaluate the Fortran 2S-ESS band-integrated Planck helper for one temperature."""
+
+    gamma = _FORTRAN_C2 / temperature_k
+    x_low = gamma * wavenumber_low_cm_inv
+    x_high = gamma * wavenumber_high_cm_inv
+    scaling = _FORTRAN_SIGMA_OVER_PI * temperature_k**4
+
+    if (
+        x_low > _FORTRAN_PLANCK_EPSIL
+        and x_high < _FORTRAN_PLANCK_VMAX
+        and (wavenumber_high_cm_inv - wavenumber_low_cm_inv) / wavenumber_high_cm_inv < 1.0e-2
+    ):
+        interval = x_high - x_low
+        planck_low = x_low**3 / np.expm1(x_low)
+        planck_high = x_high**3 / np.expm1(x_high)
+        endpoints = planck_low + planck_high
+        previous = endpoints * 0.5 * interval
+        for n in range(1, _FORTRAN_PLANCK_NSIMPSON + 1):
+            step = 0.5 * interval / float(n)
+            value = endpoints
+            for k in range(1, 2 * n):
+                x_current = x_low + float(k) * step
+                factor = float(2 * (1 + (k % 2)))
+                value += factor * x_current**3 / np.expm1(x_current)
+            value *= step / 3.0
+            if abs((value - previous) / value) <= _FORTRAN_PLANCK_CRITERION:
+                return float(scaling * value * _FORTRAN_PLANCK_CONC)
+            previous = value
+        raise RuntimeError("Fortran-compatible Simpson Planck integration did not converge")
+
+    small_values = 0
+    polynomial = [0.0, 0.0]
+    exponential = [0.0, 0.0]
+    for index, x_value in enumerate((x_low, x_high)):
+        if x_value < _FORTRAN_PLANCK_VCUT:
+            small_values += 1
+            polynomial[index] = _fortran_planck_polynomial(x_value)
+        else:
+            exponential[index] = _fortran_planck_exponential(x_value)
+
+    if small_values == 2:
+        value = polynomial[1] - polynomial[0]
+    elif small_values == 1:
+        value = 1.0 - polynomial[0] - exponential[1]
+    else:
+        value = exponential[0] - exponential[1]
+    return float(scaling * value)
+
+
+def planck_radiance_wavenumber_band(
+    temperature_k,
+    wavenumber_low_cm_inv: float,
+    wavenumber_high_cm_inv: float,
+) -> np.ndarray:
+    """Evaluate the Fortran-compatible band-integrated Planck function.
+
+    Parameters
+    ----------
+    temperature_k
+        Scalar or array of temperatures in Kelvin.
+    wavenumber_low_cm_inv
+        Lower band limit in inverse centimeters.
+    wavenumber_high_cm_inv
+        Upper band limit in inverse centimeters.
+
+    Returns
+    -------
+    numpy.ndarray
+        Planck radiance integrated over the wavenumber band, matching the
+        ``get_planckfunction`` helper in the original 2S-ESS Fortran.
+    """
+
+    if not np.isfinite(wavenumber_low_cm_inv) or wavenumber_low_cm_inv < 0.0:
+        raise ValueError("wavenumber_low_cm_inv must be non-negative and finite")
+    if not np.isfinite(wavenumber_high_cm_inv) or wavenumber_high_cm_inv <= wavenumber_low_cm_inv:
+        raise ValueError(
+            "wavenumber_high_cm_inv must be finite and greater than wavenumber_low_cm_inv"
+        )
+
+    temperature = _validate_temperature("temperature_k", temperature_k)
+    result = np.empty_like(temperature, dtype=np.float64)
+    flat_temperature = np.ravel(temperature)
+    flat_result = np.ravel(result)
+    for index, temp in enumerate(flat_temperature):
+        flat_result[index] = _fortran_planck_band_scalar(
+            float(temp),
+            float(wavenumber_low_cm_inv),
+            float(wavenumber_high_cm_inv),
+        )
+    return result
+
+
+def thermal_source_from_temperature_profile(
+    level_temperature_k,
+    surface_temperature_k: float,
+    *,
+    wavelength_microns: float | None = None,
+    wavenumber_cm_inv: float | None = None,
+    wavenumber_band_cm_inv: tuple[float, float] | None = None,
+) -> ThermalSourceInputs:
+    """Build ``thermal_bb_input`` and ``surfbb`` from temperatures.
+
+    Exactly one spectral coordinate must be provided.
+
+    Parameters
+    ----------
+    level_temperature_k
+        One-dimensional model-level temperatures in Kelvin.
+    surface_temperature_k
+        Surface temperature in Kelvin.
+    wavelength_microns
+        Wavelength in microns for the Planck evaluation.
+    wavenumber_cm_inv
+        Wavenumber in inverse centimeters for the Planck evaluation.
+    wavenumber_band_cm_inv
+        Two-element ``(low, high)`` wavenumber band in inverse centimeters for
+        the Fortran-compatible band-integrated Planck evaluation.
+
+    Returns
+    -------
+    ThermalSourceInputs
+        Thermal source inputs suitable for ``py2sess`` thermal forward calls.
+    """
+
+    level_temperature = _as_float_array("level_temperature_k", level_temperature_k)
+    _validate_temperature("level_temperature_k", level_temperature)
+    surface_temperature = float(
+        _validate_temperature("surface_temperature_k", surface_temperature_k)
+    )
+
+    provided = sum(
+        value is not None
+        for value in (wavelength_microns, wavenumber_cm_inv, wavenumber_band_cm_inv)
+    )
+    if provided != 1:
+        raise ValueError("Specify exactly one spectral coordinate")
+
+    if wavelength_microns is not None:
+        thermal_bb_input = planck_radiance_wavelength(level_temperature, wavelength_microns)
+        surfbb = float(planck_radiance_wavelength(surface_temperature, wavelength_microns))
+    elif wavenumber_cm_inv is not None:
+        thermal_bb_input = planck_radiance_wavenumber(level_temperature, wavenumber_cm_inv)
+        surfbb = float(planck_radiance_wavenumber(surface_temperature, wavenumber_cm_inv))
+    else:
+        low, high = wavenumber_band_cm_inv
+        thermal_bb_input = planck_radiance_wavenumber_band(level_temperature, low, high)
+        surfbb = float(planck_radiance_wavenumber_band(surface_temperature, low, high))
+
+    return ThermalSourceInputs(thermal_bb_input=thermal_bb_input, surfbb=surfbb)
