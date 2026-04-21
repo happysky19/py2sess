@@ -8,6 +8,7 @@ from py2sess import (
     load_tir_benchmark_case,
     load_uv_benchmark_case,
     thermal_source_from_temperature_profile,
+    thermal_source_from_temperature_profile_torch,
 )
 
 
@@ -15,6 +16,7 @@ class ApiTests(unittest.TestCase):
     def test_package_exports_are_available(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(n_layers=3))
         self.assertEqual(solver.options.n_layers, 3)
+        self.assertTrue(callable(thermal_source_from_temperature_profile_torch))
 
     def test_reference_case_loaders_return_expected_dimensions(self) -> None:
         tir = load_tir_benchmark_case()

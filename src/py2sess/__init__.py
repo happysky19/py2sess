@@ -25,6 +25,12 @@ if TYPE_CHECKING:  # pragma: no cover
         planck_radiance_wavenumber_band,
         thermal_source_from_temperature_profile,
     )
+    from .core.thermal_source_torch import (
+        ThermalSourceTorchInputs,
+        planck_radiance_wavelength_torch,
+        planck_radiance_wavenumber_torch,
+        thermal_source_from_temperature_profile_torch,
+    )
     from .reference_cases import (
         TirBenchmarkCase,
         UvBenchmarkCase,
@@ -39,10 +45,14 @@ __all__ = [
     "FoSolarObsResult",
     "FoThermalResult",
     "ThermalSourceInputs",
+    "ThermalSourceTorchInputs",
     "planck_radiance_wavelength",
+    "planck_radiance_wavelength_torch",
     "planck_radiance_wavenumber",
+    "planck_radiance_wavenumber_torch",
     "planck_radiance_wavenumber_band",
     "thermal_source_from_temperature_profile",
+    "thermal_source_from_temperature_profile_torch",
     "TirBenchmarkCase",
     "UvBenchmarkCase",
     "load_tir_benchmark_case",
@@ -66,14 +76,29 @@ def __getattr__(name: str):
         from .core.fo_thermal import FoThermalResult as value
     elif name in {
         "ThermalSourceInputs",
+        "ThermalSourceTorchInputs",
         "planck_radiance_wavelength",
+        "planck_radiance_wavelength_torch",
         "planck_radiance_wavenumber",
+        "planck_radiance_wavenumber_torch",
         "planck_radiance_wavenumber_band",
         "thermal_source_from_temperature_profile",
+        "thermal_source_from_temperature_profile_torch",
     }:
-        from .core import thermal_source
+        from importlib import import_module
 
-        value = getattr(thermal_source, name)
+        torch_names = {
+            "ThermalSourceTorchInputs",
+            "planck_radiance_wavelength_torch",
+            "planck_radiance_wavenumber_torch",
+            "thermal_source_from_temperature_profile_torch",
+        }
+        module = import_module(
+            ".core.thermal_source_torch" if name in torch_names else ".core.thermal_source",
+            __name__,
+        )
+
+        value = getattr(module, name)
     elif name in {
         "TirBenchmarkCase",
         "UvBenchmarkCase",

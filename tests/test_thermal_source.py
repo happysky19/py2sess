@@ -4,7 +4,13 @@ import unittest
 
 import numpy as np
 
-from py2sess import planck_radiance_wavenumber_band, thermal_source_from_temperature_profile
+from py2sess import (
+    planck_radiance_wavelength,
+    planck_radiance_wavenumber,
+    planck_radiance_wavenumber_band,
+    thermal_source_from_temperature_profile,
+)
+from py2sess.core.backend import has_torch
 
 
 class ThermalSourceTests(unittest.TestCase):
@@ -39,6 +45,71 @@ class ThermalSourceTests(unittest.TestCase):
             source.thermal_bb_input, np.full(4, expected, dtype=float), rtol=0.0, atol=1.0e-12
         )
         self.assertAlmostEqual(source.surfbb, float(expected), places=12)
+
+    def test_torch_planck_matches_numpy_helpers(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        from py2sess import planck_radiance_wavelength_torch, planck_radiance_wavenumber_torch
+
+        temperature = torch.tensor([220.0, 250.0, 280.0], dtype=torch.float64)
+        wavelength = torch.tensor([9.0, 10.0, 11.0], dtype=torch.float64)
+        wavenumber = torch.tensor([700.0, 800.0, 900.0], dtype=torch.float64)
+        wavelength_expected = np.array(
+            [
+                planck_radiance_wavelength(float(temp), float(wave))
+                for temp, wave in zip(temperature.detach().numpy(), wavelength.detach().numpy())
+            ],
+            dtype=float,
+        )
+        wavenumber_expected = np.array(
+            [
+                planck_radiance_wavenumber(float(temp), float(wave))
+                for temp, wave in zip(temperature.detach().numpy(), wavenumber.detach().numpy())
+            ],
+            dtype=float,
+        )
+        np.testing.assert_allclose(
+            planck_radiance_wavelength_torch(temperature, wavelength).detach().numpy(),
+            wavelength_expected,
+            rtol=1.0e-12,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            planck_radiance_wavenumber_torch(temperature, wavenumber).detach().numpy(),
+            wavenumber_expected,
+            rtol=1.0e-12,
+            atol=0.0,
+        )
+
+    def test_torch_profile_builder_preserves_temperature_gradients(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        from py2sess import thermal_source_from_temperature_profile_torch
+
+        level_temperature = torch.tensor(
+            [220.0, 230.0, 240.0, 250.0],
+            dtype=torch.float64,
+            requires_grad=True,
+        )
+        surface_temperature = torch.tensor(280.0, dtype=torch.float64, requires_grad=True)
+        wavenumber = torch.tensor([700.0, 800.0, 900.0], dtype=torch.float64)
+        source = thermal_source_from_temperature_profile_torch(
+            level_temperature,
+            surface_temperature,
+            wavenumber_cm_inv=wavenumber,
+        )
+        self.assertEqual(tuple(source.thermal_bb_input.shape), (3, 4))
+        self.assertEqual(tuple(source.surfbb.shape), (3,))
+        loss = source.thermal_bb_input.sum() + source.surfbb.sum()
+        loss.backward()
+        self.assertIsNotNone(level_temperature.grad)
+        self.assertIsNotNone(surface_temperature.grad)
+        self.assertTrue(bool(torch.all(level_temperature.grad > 0.0)))
+        self.assertGreater(float(surface_temperature.grad), 0.0)
 
 
 if __name__ == "__main__":
