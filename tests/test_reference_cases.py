@@ -6,6 +6,10 @@ import numpy as np
 
 from py2sess import load_tir_benchmark_case, load_uv_benchmark_case
 from py2sess.core.backend import has_torch, to_numpy
+from py2sess.core.fo_solar_obs_batch_numpy import (
+    fo_solar_obs_batch_precompute,
+    solve_fo_solar_obs_eps_batch_numpy,
+)
 from py2sess.core.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
 from py2sess.core.thermal_batch_numpy import solve_thermal_batch_numpy
 
@@ -24,7 +28,7 @@ def _assert_max_rel(
 
 
 class ReferenceCaseTests(unittest.TestCase):
-    def test_tir_fixture_matches_saved_total_and_fo(self) -> None:
+    def test_tir_fixture_matches_saved_components_and_total(self) -> None:
         case = load_tir_benchmark_case()
         result = solve_thermal_batch_numpy(
             tau_arr=case.tau_arr,
@@ -40,6 +44,7 @@ class ReferenceCaseTests(unittest.TestCase):
             stream_value=case.stream_value,
         )
         total = result.two_stream_toa + result.fo_total_up_toa
+        _assert_max_rel(self, result.two_stream_toa, case.ref_2s, 1.0e-5)
         _assert_max_rel(self, result.fo_total_up_toa, case.ref_fo, 1.0e-5)
         _assert_max_rel(self, total, case.ref_total, 5.0e-4)
 
@@ -83,8 +88,23 @@ class ReferenceCaseTests(unittest.TestCase):
         )
         np.testing.assert_allclose(fo, numpy_result.fo_total_up_toa, rtol=1.0e-12, atol=1.0e-12)
 
-    def test_uv_fixture_matches_saved_2s(self) -> None:
+    def test_uv_fixture_matches_saved_components_and_total(self) -> None:
         case = load_uv_benchmark_case()
+        fo_precomputed = fo_solar_obs_batch_precompute(
+            user_obsgeom=case.user_obsgeom,
+            heights=case.heights,
+            earth_radius=6371.0,
+            nfine=3,
+        )
+        fo = solve_fo_solar_obs_eps_batch_numpy(
+            tau=case.tau,
+            omega=case.omega,
+            scaling=case.scaling,
+            albedo=case.albedo,
+            flux_factor=case.flux_factor,
+            exact_scatter=case.fo_exact_scatter,
+            precomputed=fo_precomputed,
+        )
         two_stream = solve_solar_obs_batch_numpy(
             tau=case.tau,
             omega=case.omega,
@@ -104,6 +124,8 @@ class ReferenceCaseTests(unittest.TestCase):
             ulp=case.ulp,
         )
         _assert_max_rel(self, two_stream, case.ref_2s, 2.0e-6)
+        _assert_max_rel(self, fo, case.ref_fo, 3.0e-6)
+        _assert_max_rel(self, two_stream + fo, case.ref_total, 3.0e-6)
 
     def test_uv_torch_matches_numpy_2s(self) -> None:
         if not has_torch():

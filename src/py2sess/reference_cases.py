@@ -8,7 +8,8 @@ from importlib.resources import as_file, files
 import numpy as np
 
 
-_STREAM_VALUE = 1.0 / np.sqrt(3.0)
+_TIR_STREAM_VALUE = 0.5
+_UV_STREAM_VALUE = 1.0 / np.sqrt(3.0)
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,7 @@ class TirBenchmarkCase:
     ref_2s: np.ndarray
     ref_fo: np.ndarray
     ref_total: np.ndarray
-    stream_value: float = _STREAM_VALUE
+    stream_value: float = _TIR_STREAM_VALUE
 
     @property
     def n_layers(self) -> int:
@@ -57,6 +58,7 @@ class UvBenchmarkCase:
     scaling: np.ndarray
     albedo: np.ndarray
     flux_factor: np.ndarray
+    fo_exact_scatter: np.ndarray
     chapman: np.ndarray
     x0: float
     user_stream: float
@@ -69,7 +71,7 @@ class UvBenchmarkCase:
     ref_2s: np.ndarray
     ref_fo: np.ndarray
     ref_total: np.ndarray
-    stream_value: float = _STREAM_VALUE
+    stream_value: float = _UV_STREAM_VALUE
 
     @property
     def n_layers(self) -> int:
@@ -126,6 +128,7 @@ def load_uv_benchmark_case() -> UvBenchmarkCase:
         scaling=data["scaling"],
         albedo=data["albedo"],
         flux_factor=data["flux_factor"],
+        fo_exact_scatter=data["fo_exact_scatter"],
         chapman=data["chapman"],
         x0=float(data["x0"][0]),
         user_stream=float(data["user_stream"][0]),

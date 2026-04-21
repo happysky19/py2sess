@@ -22,10 +22,13 @@ They are not intended to replace the full-spectrum benchmark datasets used durin
   - optical properties
   - thermal blackbody inputs
   - surface terms
-  - saved Fortran reference outputs for FO and total TOA intensity
+  - saved Fortran reference outputs for 2S, FO, and total TOA intensity
 
-For this packaged case, the total TOA radiance is the stable saved-file comparison target. The internal 2S/FO split can depend on the wrapper convention used around the thermal delta-M handling, so the standalone regression suite checks:
+For this packaged case, the two-stream quadrature stream is `0.5`, matching the
+full-spectrum TIR benchmark bundle from which the sampled rows were taken. The
+standalone regression suite checks:
 
+- saved-file parity for 2S
 - saved-file parity for FO
 - saved-file parity for total
 - NumPy versus torch parity for the internal component split
@@ -38,6 +41,7 @@ For this packaged case, the total TOA radiance is the stable saved-file comparis
 - packaged fields:
   - optical properties
   - precomputed 2S geometry factors
+  - precomputed FO exact-scatter terms
   - saved Fortran reference outputs for 2S, FO, and total TOA intensity
 
 ## Why these fixtures exist
@@ -50,7 +54,10 @@ The packaged fixtures keep the new repository self-contained:
 - no external dump parsing is required
 - the same small cases are available to tests and examples
 
-For the packaged UV fixture, the standalone regression suite uses the saved 2S radiance as the direct benchmark target. FO behavior is covered separately by the analytic tests bundled with the package.
+For the packaged UV fixture, the standalone regression suite checks saved-file
+parity for 2S, FO, and total radiance. The packaged FO path uses the same
+`fo_exact_scatter` input and batched EPS solver as the full-spectrum UV
+benchmark.
 
 ## Runtime dimensions
 
