@@ -8,7 +8,8 @@ It provides:
 - thermal observation-geometry forward calculations
 - NumPy and torch execution backends
 - packaged benchmark fixtures for regression testing
-- utility helpers for thermal source construction and surface-leaving inputs
+- NumPy and differentiable torch helpers for thermal source construction
+- surface-leaving input helpers
 
 This repository is intentionally independent of the original Fortran codebase. It does not build or invoke Fortran code, and it does not retain the mixed-repository porting history.
 
@@ -71,6 +72,17 @@ python3 examples/run_tir_reference_case.py
 python3 examples/run_uv_reference_case.py
 python3 examples/run_analytic_cases.py
 python3 examples/build_thermal_source_from_temperature.py
+python3 examples/retrieve_synthetic_spectra.py
+```
+
+The retrieval example defaults to a zero-noise/no-prior sanity check. For a
+noisy, weakly regularized demonstration, run:
+
+```bash
+python3 examples/retrieve_synthetic_spectra.py \
+  --prior-mode weak \
+  --thermal-noise 0.003 \
+  --solar-noise 0.002
 ```
 
 Full-spectrum benchmark examples are included for local or external `.npz`
@@ -91,6 +103,7 @@ PYTHONPATH=src python3 examples/run_tir_reference_case.py
 PYTHONPATH=src python3 examples/run_uv_reference_case.py
 PYTHONPATH=src python3 examples/run_analytic_cases.py
 PYTHONPATH=src python3 examples/build_thermal_source_from_temperature.py
+PYTHONPATH=src python3 examples/retrieve_synthetic_spectra.py
 PYTHONPATH=src python3 examples/benchmark_tir_full_spectrum.py /path/to/tir_full_bundle.npz
 PYTHONPATH=src python3 examples/benchmark_uv_full_spectrum.py /path/to/uv_full_bundle.npz
 ```
@@ -135,6 +148,7 @@ author-provided benchmark outputs and saved-file reference cases.
 - `examples`: runnable demos
 - `docs/benchmark_cases.md`: packaged benchmark notes
 - `docs/full_spectrum_benchmarks.md`: full-spectrum benchmark bundle notes
+- `docs/retrieval_examples.md`: synthetic autograd retrieval examples
 - `docs/pypi_release.md`: PyPI release checklist
 
 ## Development Checks
