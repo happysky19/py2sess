@@ -29,6 +29,7 @@ Optional extras:
 ```bash
 python3 -m pip install -e ".[torch]"
 python3 -m pip install -e ".[speed]"
+python3 -m pip install -e ".[plot]"
 python3 -m pip install -e ".[dev]"
 ```
 
@@ -82,8 +83,21 @@ noisy, weakly regularized demonstration, run:
 python3 examples/retrieve_synthetic_spectra.py \
   --prior-mode weak \
   --thermal-noise 0.003 \
-  --solar-noise 0.002
+  --solar-noise 0.002 \
+  --uv-noise 0.002 \
+  --plot-dir outputs/retrieval_plots
 ```
+
+The retrieval example uses a Rodgers-style optimal-estimation residual with
+torch Jacobians and SciPy least-squares. It prints Jacobian, Gauss-Newton
+Hessian, posterior-covariance, averaging-kernel, and DFS diagnostics. In
+zero-noise/no-prior mode, the thermal, solar, and UV benchmark retrievals
+recover the generating truth.
+
+The optional `--plot-dir` argument saves one spectrum PNG per retrieval, each
+with pre-noise clean, post-noise observed, and fitted spectra on a log radiance
+scale, plus a signed post-noise-minus-fitted residual panel. The post-noise
+observed spectrum is the measurement used by the retrieval.
 
 Full-spectrum benchmark examples are included for local or external `.npz`
 bundles that follow the documented schema:

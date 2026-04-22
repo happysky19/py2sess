@@ -35,8 +35,12 @@ torch = [
 speed = [
   "numba",
 ]
+plot = [
+  "matplotlib",
+]
 dev = [
   "build",
+  "matplotlib",
   "numba",
   "pre-commit",
   "ruff",
