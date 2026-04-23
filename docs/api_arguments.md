@@ -11,9 +11,11 @@ closest original Fortran/internal variables.
 `forward()` accepts either a single atmosphere with shape `(nlyr,)` or leading
 batch dimensions such as `(nwave, nlyr)` and `(ncol, nwave, nlyr)`. Batch
 dimensions are preserved in `result.radiance`; multiple solar or thermal
-geometries append one final geometry axis. The batched path is endpoint-only:
-it returns TOA `radiance_2s`, optional `radiance_fo`, and `radiance_total`, but
-not BOA fluxes or level profiles.
+geometries append one final geometry axis. The default batched path returns TOA
+`radiance_2s`, optional `radiance_fo`, and `radiance_total`, but not BOA fluxes.
+Set `TwoStreamEssOptions(output_levels=True)` when you need
+upwelling radiance profiles; profile arrays use the final axis for levels,
+ordered from TOA to BOA.
 
 | New API name | Meaning | Shape | Default | Old Python name | Fortran/internal name |
 |---|---|---:|---|---|---|
@@ -65,3 +67,6 @@ not BOA fluxes or level profiles.
 - `result.radiance_total` returns the best available total radiance. For solar and thermal
   `include_fo=True`, this is `2S + FO`; otherwise it falls back to the primary
   2S output available for the requested method.
+- Batched profile results are available as `result.radiance_profile_2s`,
+  `result.radiance_profile_fo`, and `result.radiance_profile_total` when
+  `output_levels=True`.

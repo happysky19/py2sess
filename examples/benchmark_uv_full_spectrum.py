@@ -174,11 +174,12 @@ def benchmark_numpy_forward(
     if "ref_total" in bundle:
         max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
     _ = checksum
+    chunk_size = min(wavelengths, 30_000)
     return BenchmarkRow(
         backend="numpy-forward-levels" if output_levels else "numpy-forward",
         wavelengths=wavelengths,
         layers=int(bundle["tau"].shape[1]),
-        chunk_size=wavelengths,
+        chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=wall_seconds,
         setup_seconds=0.0,
@@ -358,6 +359,7 @@ def benchmark_torch_forward(
     if "ref_total" in bundle:
         max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
     _ = checksum
+    chunk_size = min(wavelengths, 30_000)
     return BenchmarkRow(
         backend=(
             f"torch-{torch_device_name}-{torch_dtype_name}-forward-levels"
@@ -366,7 +368,7 @@ def benchmark_torch_forward(
         ),
         wavelengths=wavelengths,
         layers=int(bundle["tau"].shape[1]),
-        chunk_size=wavelengths,
+        chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=wall_seconds,
         setup_seconds=0.0,

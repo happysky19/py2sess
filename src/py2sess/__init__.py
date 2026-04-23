@@ -37,6 +37,24 @@ if TYPE_CHECKING:  # pragma: no cover
         load_tir_benchmark_case,
         load_uv_benchmark_case,
     )
+    from .retrieval import (
+        NoiseMode,
+        PriorMode,
+        RetrievalDiagnostics,
+        RetrievalResult,
+        RodgersObjective,
+        RodgersPrior,
+        SpectrumComparison,
+        add_noise,
+        finite_difference_jacobian,
+        forward_value_and_jacobian,
+        measurement_error,
+        noise_std,
+        optimal_estimation_least_squares,
+        relative_jacobian_error,
+        save_retrieval_chart,
+        spectrum_comparison,
+    )
 
 __all__ = [
     "TwoStreamEss",
@@ -62,6 +80,22 @@ __all__ = [
     "morcasiwat_reflectance",
     "seawater_refractive_index",
     "surface_leaving_from_water",
+    "NoiseMode",
+    "PriorMode",
+    "RetrievalDiagnostics",
+    "RetrievalResult",
+    "RodgersObjective",
+    "RodgersPrior",
+    "SpectrumComparison",
+    "add_noise",
+    "finite_difference_jacobian",
+    "forward_value_and_jacobian",
+    "measurement_error",
+    "noise_std",
+    "optimal_estimation_least_squares",
+    "relative_jacobian_error",
+    "save_retrieval_chart",
+    "spectrum_comparison",
 ]
 
 
@@ -123,6 +157,27 @@ def __getattr__(name: str):
         from .core import surface_leaving
 
         value = getattr(surface_leaving, name)
+    elif name in {
+        "NoiseMode",
+        "PriorMode",
+        "RetrievalDiagnostics",
+        "RetrievalResult",
+        "RodgersObjective",
+        "RodgersPrior",
+        "SpectrumComparison",
+        "add_noise",
+        "finite_difference_jacobian",
+        "forward_value_and_jacobian",
+        "measurement_error",
+        "noise_std",
+        "optimal_estimation_least_squares",
+        "relative_jacobian_error",
+        "save_retrieval_chart",
+        "spectrum_comparison",
+    }:
+        from . import retrieval
+
+        value = getattr(retrieval, name)
     else:
         raise AttributeError(f"module 'py2sess' has no attribute {name!r}")
     globals()[name] = value

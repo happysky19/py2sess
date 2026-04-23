@@ -62,6 +62,21 @@ result = solver.forward_fo(
 print(result.radiance)
 ```
 
+For the normal 2S forward model, use `forward()`:
+
+```python
+result = solver.forward(
+    tau=np.full(3, 0.02),
+    ssa=np.full(3, 0.2),
+    g=np.full(3, 0.1),
+    z=np.array([3.0, 2.0, 1.0, 0.0]),
+    angles=[30.0, 20.0, 0.0],
+    albedo=0.3,
+)
+
+print(result.radiance)
+```
+
 ## Public API Names
 
 The public API uses one canonical set of short radiative-transfer names while
@@ -77,7 +92,8 @@ For full-spectrum or multi-column work, pass leading batch dimensions on
 `emissivity`, and `fbeam`. For example, `(nwave, nlyr)` returns
 `result.radiance.shape == (nwave,)` for one geometry, while multiple requested
 geometries append a final geometry axis. Batched `forward()` uses the optimized
-endpoint kernels and does not return BOA fluxes or level profiles.
+endpoint kernels by default. Set `output_levels=True` to request upwelling
+radiance profiles; the final profile axis is ordered from TOA to BOA.
 
 | New API name | Meaning | Shape | Default | Old Python name | Fortran/internal name |
 |---|---|---:|---|---|---|
@@ -99,6 +115,83 @@ endpoint kernels and does not return BOA fluxes or level profiles.
 
 See [`docs/api_arguments.md`](docs/api_arguments.md) for the fuller argument
 table and notes on advanced thermal and lattice inputs.
+
+## Common Calls
+
+Solar:
+
+```python
+solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar"))
+result = solver.forward(
+    tau=np.full(3, 0.02),
+    ssa=np.full(3, 0.2),
+    g=np.full(3, 0.1),
+    z=np.array([3.0, 2.0, 1.0, 0.0]),
+    angles=[30.0, 20.0, 0.0],
+    albedo=0.3,
+)
+```
+
+Thermal:
+
+```python
+solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="thermal"))
+result = solver.forward(
+    tau=np.full(3, 0.1),
+    ssa=np.zeros(3),
+    g=np.zeros(3),
+    z=np.array([3.0, 2.0, 1.0, 0.0]),
+    angles=20.0,
+    planck=np.array([1.0, 1.1, 1.2, 1.3]),
+    surface_planck=1.4,
+    emissivity=1.0,
+)
+```
+
+Batched wavelengths:
+
+```python
+solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar"))
+tau = np.full((100, 3), 0.02)
+result = solver.forward(
+    tau=tau,
+    ssa=np.zeros_like(tau),
+    g=np.zeros_like(tau),
+    z=np.array([3.0, 2.0, 1.0, 0.0]),
+    angles=[30.0, 20.0, 0.0],
+)
+print(result.radiance.shape)  # (100,)
+```
+
+Torch CPU float64:
+
+```python
+solver = TwoStreamEss(
+    TwoStreamEssOptions(nlyr=3, mode="solar", backend="torch", torch_dtype="float64")
+)
+```
+
+Level profiles:
+
+```python
+solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="thermal", output_levels=True))
+result = solver.forward(
+    tau=np.full(3, 0.1),
+    ssa=np.zeros(3),
+    g=np.zeros(3),
+    z=np.array([3.0, 2.0, 1.0, 0.0]),
+    angles=20.0,
+    planck=np.ones(4),
+    surface_planck=1.0,
+    emissivity=1.0,
+)
+print(result.radiance_profile_2s.shape)  # (..., nlyr + 1), TOA to BOA
+```
+
+Unsupported in the current public API: combined solar+thermal source terms in
+one call, gradients with respect to geometry (`angles` or `z`), and batched
+thermal `forward_fo()` as an FO-only public path. MPS/float32 is useful for
+development speed studies but CPU float64 is the validation path.
 
 Run the bundled examples from the repository root after the editable install:
 
@@ -122,11 +215,12 @@ python3 examples/retrieve_synthetic_spectra.py \
   --plot-dir outputs/retrieval_plots
 ```
 
-The retrieval example uses a Rodgers-style optimal-estimation residual with
-torch Jacobians and SciPy least-squares. It prints Jacobian, Gauss-Newton
-Hessian, posterior-covariance, averaging-kernel, and DFS diagnostics. In
-zero-noise/no-prior mode, the thermal, solar, and UV benchmark retrievals
-recover the generating truth.
+The retrieval example uses the reusable `py2sess.retrieval` helpers for a
+Rodgers-style optimal-estimation residual with torch Jacobians and SciPy
+least-squares. It prints Jacobian, Gauss-Newton Hessian,
+posterior-covariance, averaging-kernel, and DFS diagnostics. In
+zero-noise/no-prior mode, the well-posed thermal, solar, and UV benchmark
+retrievals recover the generating truth.
 
 The optional `--plot-dir` argument saves one spectrum PNG per retrieval, each
 with pre-noise clean, post-noise observed, and fitted spectra on a log radiance
@@ -199,6 +293,8 @@ author-provided benchmark outputs and saved-file reference cases.
 - `docs/full_spectrum_benchmarks.md`: full-spectrum benchmark bundle notes
 - `docs/retrieval_examples.md`: synthetic autograd retrieval examples
 - `docs/pypi_release.md`: PyPI release checklist
+- Generated benchmark reports, plots, and paper tables should stay in ignored
+  local directories such as `outputs/`, `local_outputs/`, or `paper_outputs/`.
 
 ## Development Checks
 

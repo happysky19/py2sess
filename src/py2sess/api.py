@@ -729,6 +729,18 @@ class TwoStreamEss:
         return min(n_rows, 30_000)
 
     @staticmethod
+    def _thermal_batch_chunk_size(n_rows: int, n_layers: int, *, backend: str) -> int:
+        """Returns the same memory-friendly thermal chunk size used by benchmarks."""
+        if n_rows <= 0:
+            return 1
+        row_floats = (6 if backend == "torch" else 4) * max(int(n_layers), 1) + 32
+        target_bytes = 384 * 1024 * 1024
+        granularity = 2000 if backend == "torch" else 1000
+        chunk = max(granularity, int(target_bytes // (8 * row_floats)))
+        chunk = min(n_rows, ((chunk + granularity - 1) // granularity) * granularity)
+        return max(1, chunk)
+
+    @staticmethod
     def _reshape_endpoint(
         values_by_geometry: list[np.ndarray],
         *,
@@ -1793,57 +1805,83 @@ class TwoStreamEss:
         fo_by_geometry: list[np.ndarray] = []
         two_stream_profile_by_geometry: list[np.ndarray] = []
         fo_profile_by_geometry: list[np.ndarray] = []
+        n_rows = tau.shape[0]
+        chunk_size = self._thermal_batch_chunk_size(n_rows, n_layers, backend="numpy")
+        height_grid = None
+        if include_fo:
+            if mapped["height_grid"] is None:
+                raise ValueError("z is required for batched thermal include_fo=True")
+            height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
         for angle in angles:
             user_stream = float(np.cos(np.deg2rad(float(angle))))
-            two_stream = _two_stream_thermal_toa(
-                tau=tau,
-                omega=omega,
-                asymm=asymm,
-                scaling=scaling,
-                thermal_bb_input=planck,
-                surfbb=surfbb,
-                emissivity=emissivity_rows,
-                albedo=albedo_rows,
-                stream_value=mapped["stream_value"],
-                user_stream=user_stream,
-                thermal_tcutoff=self.options.thermal_tcutoff,
-                bvp_engine=self._batch_bvp_engine(),
-                return_profile=want_profiles,
+            two_stream_rows = np.empty(n_rows, dtype=float)
+            fo_rows = np.empty(n_rows, dtype=float) if include_fo else None
+            two_stream_profile_rows = (
+                np.empty((n_rows, n_layers + 1), dtype=float) if want_profiles else None
             )
-            if want_profiles:
-                two_stream_profile_by_geometry.append(two_stream)
-                two_stream_by_geometry.append(two_stream[:, 0])
-            else:
-                two_stream_by_geometry.append(two_stream)
+            fo_profile_rows = (
+                np.empty((n_rows, n_layers + 1), dtype=float)
+                if include_fo and want_profiles
+                else None
+            )
+            fo_geometry = None
             if include_fo:
-                if mapped["height_grid"] is None:
-                    raise ValueError("z is required for batched thermal include_fo=True")
-                height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
                 fo_geometry = precompute_fo_thermal_geometry_numpy(
                     heights=height_grid,
                     user_angle_degrees=float(angle),
                     earth_radius=earth_radius,
                     nfine=fo_nfine,
                 )
-                fo = _fo_thermal_toa(
-                    tau=tau,
-                    omega=omega,
-                    scaling=scaling,
-                    thermal_bb_input=planck,
-                    surfbb=surfbb,
-                    emissivity=emissivity_rows,
-                    heights=height_grid,
-                    user_angle_degrees=float(angle),
-                    earth_radius=earth_radius,
-                    nfine=fo_nfine,
-                    geometry=fo_geometry,
+            for start in range(0, n_rows, chunk_size):
+                stop = min(start + chunk_size, n_rows)
+                row_slice = slice(start, stop)
+                two_stream = _two_stream_thermal_toa(
+                    tau=tau[row_slice],
+                    omega=omega[row_slice],
+                    asymm=asymm[row_slice],
+                    scaling=scaling[row_slice],
+                    thermal_bb_input=planck[row_slice],
+                    surfbb=surfbb[row_slice],
+                    emissivity=emissivity_rows[row_slice],
+                    albedo=albedo_rows[row_slice],
+                    stream_value=mapped["stream_value"],
+                    user_stream=user_stream,
+                    thermal_tcutoff=self.options.thermal_tcutoff,
+                    bvp_engine=self._batch_bvp_engine(),
                     return_profile=want_profiles,
                 )
                 if want_profiles:
-                    fo_profile_by_geometry.append(fo)
-                    fo_by_geometry.append(fo[:, 0])
+                    two_stream_profile_rows[row_slice] = two_stream
+                    two_stream_rows[row_slice] = two_stream[:, 0]
                 else:
-                    fo_by_geometry.append(fo)
+                    two_stream_rows[row_slice] = two_stream
+                if include_fo:
+                    fo = _fo_thermal_toa(
+                        tau=tau[row_slice],
+                        omega=omega[row_slice],
+                        scaling=scaling[row_slice],
+                        thermal_bb_input=planck[row_slice],
+                        surfbb=surfbb[row_slice],
+                        emissivity=emissivity_rows[row_slice],
+                        heights=height_grid,
+                        user_angle_degrees=float(angle),
+                        earth_radius=earth_radius,
+                        nfine=fo_nfine,
+                        geometry=fo_geometry,
+                        return_profile=want_profiles,
+                    )
+                    if want_profiles:
+                        fo_profile_rows[row_slice] = fo
+                        fo_rows[row_slice] = fo[:, 0]
+                    else:
+                        fo_rows[row_slice] = fo
+            two_stream_by_geometry.append(two_stream_rows)
+            if want_profiles:
+                two_stream_profile_by_geometry.append(two_stream_profile_rows)
+            if include_fo:
+                fo_by_geometry.append(fo_rows)
+                if want_profiles:
+                    fo_profile_by_geometry.append(fo_profile_rows)
         radiance_2s, geometry_shape = self._reshape_endpoint(
             two_stream_by_geometry, batch_shape=batch_shape
         )
@@ -1984,30 +2022,47 @@ class TwoStreamEss:
         fo_by_geometry = []
         two_stream_profile_by_geometry = []
         fo_profile_by_geometry = []
+        n_rows = int(tau.shape[0])
+        chunk_size = self._thermal_batch_chunk_size(n_rows, n_layers, backend="torch")
+        keep_graph = self.options.torch_enable_grad
         with self._torch_grad_context():
             for angle in angles:
                 user_stream = float(np.cos(np.deg2rad(float(angle))))
-                two_stream = _two_stream_thermal_toa_batch(
-                    tau=tau,
-                    omega=omega,
-                    asymm=asymm,
-                    scaling=scaling,
-                    thermal_bb_input=planck,
-                    surfbb=surfbb,
-                    emissivity=emissivity_rows,
-                    albedo=albedo_rows,
-                    stream_value=mapped["stream_value"],
-                    user_stream=user_stream,
-                    pxsq=mapped["stream_value"] * mapped["stream_value"],
-                    thermal_tcutoff=self.options.thermal_tcutoff,
-                    bvp_engine=self._torch_batch_bvp_engine(),
-                    return_profile=want_profiles,
-                )
-                if want_profiles:
-                    two_stream_profile_by_geometry.append(two_stream)
-                    two_stream_by_geometry.append(two_stream[:, 0])
+                two_stream_chunks = []
+                two_stream_profile_chunks = []
+                fo_chunks = []
+                fo_profile_chunks = []
+                if keep_graph:
+                    two_stream_rows = None
+                    two_stream_profile_rows = None
+                    fo_rows = None
+                    fo_profile_rows = None
                 else:
-                    two_stream_by_geometry.append(two_stream)
+                    two_stream_rows = torch.empty(n_rows, dtype=tau.dtype, device=tau.device)
+                    two_stream_profile_rows = (
+                        torch.empty(
+                            (n_rows, n_layers + 1),
+                            dtype=tau.dtype,
+                            device=tau.device,
+                        )
+                        if want_profiles
+                        else None
+                    )
+                    fo_rows = (
+                        torch.empty(n_rows, dtype=tau.dtype, device=tau.device)
+                        if include_fo
+                        else None
+                    )
+                    fo_profile_rows = (
+                        torch.empty(
+                            (n_rows, n_layers + 1),
+                            dtype=tau.dtype,
+                            device=tau.device,
+                        )
+                        if include_fo and want_profiles
+                        else None
+                    )
+                fo_geometry = None
                 if include_fo:
                     fo_geometry = precompute_fo_thermal_geometry_numpy(
                         heights=height_grid,
@@ -2015,25 +2070,85 @@ class TwoStreamEss:
                         earth_radius=earth_radius,
                         nfine=fo_nfine,
                     )
-                    fo = _fo_thermal_toa_batch(
-                        tau=tau,
-                        omega=omega,
-                        scaling=scaling,
-                        thermal_bb_input=planck,
-                        surfbb=surfbb,
-                        emissivity=emissivity_rows,
-                        heights=height_grid,
-                        user_angle_degrees=float(angle),
-                        earth_radius=earth_radius,
-                        nfine=fo_nfine,
-                        fo_geometry=fo_geometry,
+                for start in range(0, n_rows, chunk_size):
+                    stop = min(start + chunk_size, n_rows)
+                    row_slice = slice(start, stop)
+                    two_stream = _two_stream_thermal_toa_batch(
+                        tau=tau[row_slice],
+                        omega=omega[row_slice],
+                        asymm=asymm[row_slice],
+                        scaling=scaling[row_slice],
+                        thermal_bb_input=planck[row_slice],
+                        surfbb=surfbb[row_slice],
+                        emissivity=emissivity_rows[row_slice],
+                        albedo=albedo_rows[row_slice],
+                        stream_value=mapped["stream_value"],
+                        user_stream=user_stream,
+                        pxsq=mapped["stream_value"] * mapped["stream_value"],
+                        thermal_tcutoff=self.options.thermal_tcutoff,
+                        bvp_engine=self._torch_batch_bvp_engine(),
                         return_profile=want_profiles,
                     )
                     if want_profiles:
-                        fo_profile_by_geometry.append(fo)
-                        fo_by_geometry.append(fo[:, 0])
+                        if keep_graph:
+                            two_stream_profile_chunks.append(two_stream)
+                            two_stream_chunks.append(two_stream[:, 0])
+                        else:
+                            two_stream_profile_rows[row_slice] = two_stream
+                            two_stream_rows[row_slice] = two_stream[:, 0]
                     else:
-                        fo_by_geometry.append(fo)
+                        if keep_graph:
+                            two_stream_chunks.append(two_stream)
+                        else:
+                            two_stream_rows[row_slice] = two_stream
+                    if include_fo:
+                        fo = _fo_thermal_toa_batch(
+                            tau=tau[row_slice],
+                            omega=omega[row_slice],
+                            scaling=scaling[row_slice],
+                            thermal_bb_input=planck[row_slice],
+                            surfbb=surfbb[row_slice],
+                            emissivity=emissivity_rows[row_slice],
+                            heights=height_grid,
+                            user_angle_degrees=float(angle),
+                            earth_radius=earth_radius,
+                            nfine=fo_nfine,
+                            fo_geometry=fo_geometry,
+                            return_profile=want_profiles,
+                        )
+                        if want_profiles:
+                            if keep_graph:
+                                fo_profile_chunks.append(fo)
+                                fo_chunks.append(fo[:, 0])
+                            else:
+                                fo_profile_rows[row_slice] = fo
+                                fo_rows[row_slice] = fo[:, 0]
+                        else:
+                            if keep_graph:
+                                fo_chunks.append(fo)
+                            else:
+                                fo_rows[row_slice] = fo
+                if keep_graph:
+                    two_stream_by_geometry.append(torch.cat(two_stream_chunks, dim=0))
+                else:
+                    two_stream_by_geometry.append(two_stream_rows)
+                if want_profiles:
+                    if keep_graph:
+                        two_stream_profile_by_geometry.append(
+                            torch.cat(two_stream_profile_chunks, dim=0)
+                        )
+                    else:
+                        two_stream_profile_by_geometry.append(two_stream_profile_rows)
+                if include_fo:
+                    if keep_graph:
+                        fo_by_geometry.append(torch.cat(fo_chunks, dim=0))
+                    else:
+                        fo_by_geometry.append(fo_rows)
+                    if want_profiles:
+                        if keep_graph:
+                            fo_profile_by_geometry.append(torch.cat(fo_profile_chunks, dim=0))
+                        else:
+                            fo_profile_by_geometry.append(fo_profile_rows)
             radiance_2s, geometry_shape = self._reshape_endpoint_torch(
                 two_stream_by_geometry,
                 batch_shape=batch_shape,

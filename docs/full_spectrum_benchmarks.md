@@ -23,9 +23,21 @@ The benchmark table reports:
 - `max abs diff`, `max rel (%)`: optional total-radiance accuracy relative to
   bundled saved Fortran outputs when `ref_total` is present
 
+Each script prints low-level optimized rows (`numpy`, `torch-*`) and public API
+rows (`numpy-forward`, `torch-*-forward`). The low-level rows keep separate
+`fo (s)` and `2s (s)` timings. The public rows show the end-to-end
+`TwoStreamEss.forward()` endpoint path.
+
 By design, `wall (s)` excludes opening the `.npz` bundle itself. It does
 include backend-local setup within the benchmark path, such as geometry
 precompute, PyTorch warmup, tensor conversion, and checksum reduction.
+
+Use `--output-levels` only when timing profile output. Profile timing is not
+the endpoint performance target because it allocates and returns
+`radiance_profile_*` arrays.
+
+Generated benchmark reports should stay local, for example under `outputs/`,
+`local_outputs/`, or `paper_outputs/`, which are ignored by git.
 
 ## TIR bundle schema
 

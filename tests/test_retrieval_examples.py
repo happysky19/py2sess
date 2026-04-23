@@ -22,16 +22,17 @@ if has_torch():
     import torch
 
     from examples.retrieve_synthetic_spectra import (
-        _noise_std,
         retrieve_solar_synthetic,
         retrieve_thermal_synthetic,
         retrieve_uv_benchmark_synthetic,
-        save_retrieval_chart,
     )
+    from py2sess.retrieval import RodgersObjective, noise_std, save_retrieval_chart
 else:  # pragma: no cover
     retrieve_solar_synthetic = None
     retrieve_thermal_synthetic = None
     retrieve_uv_benchmark_synthetic = None
+    RodgersObjective = None
+    noise_std = None
     save_retrieval_chart = None
     torch = None
 
@@ -40,15 +41,46 @@ else:  # pragma: no cover
 class RetrievalExampleTests(unittest.TestCase):
     def test_noise_models_are_positive_and_distinct(self) -> None:
         spectrum = torch.tensor([1.0, 2.0, 4.0], dtype=torch.float64)
-        absolute = _noise_std(spectrum, 0.01, "absolute").numpy()
-        relative = _noise_std(spectrum, 0.01, "relative").numpy()
-        hybrid = _noise_std(spectrum, 0.01, "hybrid").numpy()
+        absolute = noise_std(spectrum, 0.01, "absolute").numpy()
+        relative = noise_std(spectrum, 0.01, "relative").numpy()
+        hybrid = noise_std(spectrum, 0.01, "hybrid").numpy()
         self.assertTrue(np.all(absolute > 0.0))
         self.assertTrue(np.all(relative > 0.0))
         self.assertTrue(np.all(hybrid > 0.0))
         np.testing.assert_allclose(absolute, absolute[0])
         self.assertFalse(np.allclose(relative, relative[0]))
         self.assertTrue(np.all(hybrid > absolute))
+
+    def test_noise_models_accept_numpy_arrays(self) -> None:
+        spectrum = np.array([1.0, 2.0, 4.0], dtype=float)
+        absolute = noise_std(spectrum, 0.01, "absolute")
+        relative = noise_std(spectrum, 0.01, "relative")
+        hybrid = noise_std(spectrum, 0.01, "hybrid")
+        self.assertIsInstance(absolute, np.ndarray)
+        self.assertTrue(np.all(absolute > 0.0))
+        self.assertTrue(np.all(relative > 0.0))
+        self.assertTrue(np.all(hybrid > absolute))
+
+    def test_rodgers_objective_exposes_residual_jacobian_and_diagnostics(self) -> None:
+        matrix = torch.tensor([[1.0, 2.0], [0.5, -1.0], [2.0, 0.25]], dtype=torch.float64)
+        observed = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float64)
+        objective = RodgersObjective.from_observation(
+            observed=observed,
+            measurement_error=np.ones(3),
+            forward_model=lambda state: matrix @ state,
+        )
+        state = np.array([0.2, -0.1], dtype=float)
+        self.assertEqual(objective.residual(state).shape, (3,))
+        self.assertEqual(objective.jacobian(state).shape, (3, 2))
+        diagnostics = objective.diagnostics(
+            state,
+            n_function_evaluations=1,
+            n_jacobian_evaluations=1,
+        )
+        self.assertEqual(diagnostics.n_observations, 3)
+        self.assertEqual(diagnostics.n_state, 2)
+        self.assertGreater(diagnostics.degrees_of_freedom, 1.9)
+        self.assertLessEqual(diagnostics.degrees_of_freedom, 2.0)
 
     def test_zero_noise_thermal_full_state_recovers_truth(self) -> None:
         result = retrieve_thermal_synthetic(noise_fraction=0.0, prior_mode="off")
