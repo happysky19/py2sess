@@ -18,6 +18,7 @@ __all__ = [
     "precompute_fo_thermal_geometry_numpy",
     "prepare_inputs",
     "solve_solar_observation_bvp_batch",
+    "solve_fo_solar_obs_eps_batch_torch",
     "solve_solar_obs_batch_numpy",
     "solve_solar_obs_batch_torch",
     "solve_thermal_bvp_batch",
@@ -53,6 +54,10 @@ _LAZY_EXPORTS = {
     ),
     "prepare_inputs": (".preprocess", "prepare_inputs"),
     "solve_solar_observation_bvp_batch": (".bvp_batch", "solve_solar_observation_bvp_batch"),
+    "solve_fo_solar_obs_eps_batch_torch": (
+        ".fo_solar_obs_batch_torch",
+        "solve_fo_solar_obs_eps_batch_torch",
+    ),
     "solve_solar_obs_batch_numpy": (".solar_obs_batch_numpy", "solve_solar_obs_batch_numpy"),
     "solve_solar_obs_batch_torch": (".solar_obs_batch_torch", "solve_solar_obs_batch_torch"),
     "solve_thermal_bvp_batch": (".bvp_batch", "solve_thermal_bvp_batch"),

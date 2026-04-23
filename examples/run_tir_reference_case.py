@@ -20,7 +20,7 @@ def _print_summary(
 ) -> None:
     """Prints compact max-difference summaries."""
     print(label)
-    print("  note: this packaged TIR fixture uses stream_value=0.5")
+    print("  note: this packaged TIR fixture uses stream=0.5")
     print(
         "  2S   max_abs={:.6e} max_rel={:.6e}".format(
             np.max(np.abs(two_stream - reference.ref_2s)),

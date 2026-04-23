@@ -128,8 +128,9 @@ def print_rows(rows: list[BenchmarkRow]) -> None:
     has_accuracy = any(
         row.max_abs_diff is not None or row.max_rel_diff_pct is not None for row in rows
     )
+    backend_width = max(18, *(len(row.backend) for row in rows))
     header = (
-        f"{'backend':<18} {'wall (s)':>10} {'rt (s)':>10} {'setup (s)':>10} "
+        f"{'backend':<{backend_width}} {'wall (s)':>10} {'rt (s)':>10} {'setup (s)':>10} "
         f"{'fo (s)':>10} {'2s (s)':>10} {'#wavelength/s':>14} {'chunk':>8}"
     )
     if has_accuracy:
@@ -138,7 +139,7 @@ def print_rows(rows: list[BenchmarkRow]) -> None:
     print("-" * len(header))
     for row in rows:
         line = (
-            f"{row.backend:<18} "
+            f"{row.backend:<{backend_width}} "
             f"{row.wall_seconds:10.3f} "
             f"{row.rt_seconds:10.3f} "
             f"{row.setup_seconds:10.3f} "

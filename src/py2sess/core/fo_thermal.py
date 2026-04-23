@@ -50,6 +50,41 @@ class FoThermalResult:
     intensity_total_up_profile: np.ndarray | None = None
     intensity_atmos_dn_profile: np.ndarray | None = None
 
+    @property
+    def radiance(self) -> np.ndarray:
+        """Preferred public upwelling TOA thermal FO radiance output."""
+        return self.intensity_total_up_toa
+
+    @property
+    def radiance_total(self) -> np.ndarray:
+        """Total upwelling TOA thermal FO radiance."""
+        return self.intensity_total_up_toa
+
+    @property
+    def radiance_surface(self) -> np.ndarray:
+        """Surface contribution to upwelling TOA thermal FO radiance."""
+        return self.intensity_surface_toa
+
+    @property
+    def radiance_atmosphere(self) -> np.ndarray:
+        """Atmospheric contribution to upwelling TOA thermal FO radiance."""
+        return self.intensity_atmos_up_toa
+
+    @property
+    def radiance_up_toa(self) -> np.ndarray:
+        """Compatibility alias for total upwelling TOA radiance."""
+        return self.intensity_total_up_toa
+
+    @property
+    def radiance_up_boa(self) -> np.ndarray:
+        """Compatibility alias for total upwelling BOA radiance."""
+        return self.intensity_total_up_boa
+
+    @property
+    def radiance_up_profile(self) -> np.ndarray | None:
+        """Compatibility alias for the total upwelling radiance profile."""
+        return self.intensity_total_up_profile
+
     def toa_up_components(self) -> dict[str, Any]:
         """Returns grouped upwelling TOA thermal FO components."""
         return {

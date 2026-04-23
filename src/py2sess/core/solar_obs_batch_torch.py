@@ -376,6 +376,7 @@ def _upuser_intensity_batch_torch(
     hmult_2,
     emult_up,
     all_layers_active: bool = False,
+    return_profile: bool = False,
 ):
     """Computes upwelling TOA user intensity for a wavelength batch."""
     nlay = delta_tau.shape[1]
@@ -405,6 +406,15 @@ def _upuser_intensity_batch_torch(
         pmult_ud = sd * aterm
         pmult_uu = su * bterm
         layersource = layersource + u_xpos * pmult_ud + u_xneg * pmult_uu
+        if return_profile:
+            profile = torch.empty(
+                (delta_tau.shape[0], nlay + 1), dtype=delta_tau.dtype, device=delta_tau.device
+            )
+            profile[:, nlay] = cumsource
+            for n in range(nlay - 1, -1, -1):
+                cumsource = layersource[:, n] + t_delt_userm[:, n] * cumsource
+                profile[:, n] = cumsource
+            return fluxmult * profile
         for n in range(nlay - 1, -1, -1):
             cumsource = layersource[:, n] + t_delt_userm[:, n] * cumsource
         return fluxmult * cumsource
@@ -433,6 +443,15 @@ def _upuser_intensity_batch_torch(
     pmult_uu = su * bterm
     particulate = u_xpos * pmult_ud + u_xneg * pmult_uu
     layersource = layersource + torch.where(active, particulate, zero)
+    if return_profile:
+        profile = torch.empty(
+            (delta_tau.shape[0], nlay + 1), dtype=delta_tau.dtype, device=delta_tau.device
+        )
+        profile[:, nlay] = cumsource
+        for n in range(nlay - 1, -1, -1):
+            cumsource = layersource[:, n] + t_delt_userm[:, n] * cumsource
+            profile[:, n] = cumsource
+        return fluxmult * profile
     for n in range(nlay - 1, -1, -1):
         cumsource = layersource[:, n] + t_delt_userm[:, n] * cumsource
     return fluxmult * cumsource
@@ -461,6 +480,7 @@ def solve_solar_obs_batch_torch(
     bvp_device=None,
     bvp_dtype=None,
     bvp_engine: str = "auto",
+    return_profile: bool = False,
 ):
     """Solves batched solar-observation 2S radiance with torch tensors.
 
@@ -527,6 +547,11 @@ def solve_solar_obs_batch_torch(
     omega_asymm_3 = 3.0 * omega_total * asymm_total
     all_layers_active = bool(misc["all_active"])
     total = torch.zeros(tau_t.shape[0], dtype=dtype, device=device)
+    total_profile = None
+    if return_profile:
+        total_profile = torch.zeros(
+            (tau_t.shape[0], tau_t.shape[1] + 1), dtype=dtype, device=device
+        )
 
     for fourier in (0, 1):
         surface_factor = 2.0 if fourier == 0 else 1.0
@@ -657,6 +682,11 @@ def solve_solar_obs_batch_torch(
             hmult_2=hmult_2,
             emult_up=misc["emult_up"],
             all_layers_active=all_layers_active,
+            return_profile=return_profile,
         )
-        total = contribution if fourier == 0 else total + azmfac * contribution
-    return total
+        if return_profile:
+            total_profile = contribution if fourier == 0 else total_profile + azmfac * contribution
+            total = total_profile[:, 0]
+        else:
+            total = contribution if fourier == 0 else total + azmfac * contribution
+    return total_profile if return_profile else total

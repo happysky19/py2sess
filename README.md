@@ -44,27 +44,61 @@ from py2sess import TwoStreamEss, TwoStreamEssOptions
 
 solver = TwoStreamEss(
     TwoStreamEssOptions(
-        n_layers=3,
-        source_mode="solar_obs",
-        do_level_output=True,
+        nlyr=3,
+        mode="solar",
+        output_levels=True,
     )
 )
 
 result = solver.forward_fo(
-    tau_arr=np.zeros(3),
-    omega_arr=np.zeros(3),
-    asymm_arr=np.zeros(3),
-    height_grid=np.array([3.0, 2.0, 1.0, 0.0]),
-    user_obsgeoms=np.array([[30.0, 0.0, 0.0]]),
-    stream_value=1.0 / np.sqrt(3.0),
-    flux_factor=1.0,
+    tau=np.zeros(3),
+    ssa=np.zeros(3),
+    g=np.zeros(3),
+    z=np.array([3.0, 2.0, 1.0, 0.0]),
+    angles=[30.0, 0.0, 0.0],
     albedo=0.3,
-    d2s_scaling=np.zeros(3),
-    fo_geometry_mode="eps",
 )
 
-print(result.intensity_total)
+print(result.radiance)
 ```
+
+## Public API Names
+
+The public API uses one canonical set of short radiative-transfer names while
+keeping the Fortran-derived names inside the solver core. It follows pydisort
+where the physics matches directly: `nlyr`, `tau`, `ssa`, `fbeam`, and
+`albedo`. It keeps `g` instead of DISORT `pmom` because 2S-ESS consumes a
+single layer asymmetry factor, not a full phase-moment array. Advanced controls
+such as `stream`, `fbeam`, `delta_m_scaling`, and `geometry` have defaults for
+routine calls.
+
+For full-spectrum or multi-column work, pass leading batch dimensions on
+`tau`, `ssa`, `g`, `delta_m_scaling`, `planck`, `albedo`, `surface_planck`,
+`emissivity`, and `fbeam`. For example, `(nwave, nlyr)` returns
+`result.radiance.shape == (nwave,)` for one geometry, while multiple requested
+geometries append a final geometry axis. Batched `forward()` uses the optimized
+endpoint kernels and does not return BOA fluxes or level profiles.
+
+| New API name | Meaning | Shape | Default | Old Python name | Fortran/internal name |
+|---|---|---:|---|---|---|
+| `nlyr` | Number of atmospheric layers | scalar | required | `n_layers` | `NLAYERS` |
+| `mode` | Source mode: `solar`, `solar_lattice`, or `thermal` | scalar | `solar` | `source_mode` | source-mode branch |
+| `tau` | Layer optical thickness | `(..., nlyr)` | required | `tau_arr` | `DELTAU_INPUT` |
+| `ssa` | Single-scattering albedo | `(..., nlyr)` | required | `omega_arr` | `OMEGA_INPUT` |
+| `g` | Asymmetry factor | `(..., nlyr)` | required | `asymm_arr` | `ASYMM_INPUT` |
+| `z` | Level height grid, top to bottom | `(nlyr+1,)` | mode-dependent | `height_grid` | `HEIGHT_GRID` |
+| `angles` | Solar `[sza, vza, raz]` or thermal view zenith angle(s), degrees | solar `(3,)` or `(ngeom, 3)`; thermal scalar or `(ngeom,)` | mode-dependent | `user_obsgeoms` / `user_angles` | `USER_OBSGEOMS` / `USER_ANGLES` |
+| `stream` | Two-stream quadrature cosine | scalar | solar `1/sqrt(3)`, thermal `0.5` | `stream_value` | `STREAM_VALUE` |
+| `fbeam` | Direct solar beam/source normalization | scalar or `(...)` | `1.0` | `flux_factor` | `FLUX_FACTOR` |
+| `albedo` | Lambertian surface albedo | scalar or `(...)` | `0.0` | `albedo` | `LAMBERTIAN_ALBEDO` |
+| `delta_m_scaling` | Delta-M truncation/scaling factor | `(..., nlyr)` | zeros | `d2s_scaling` | `D2S_SCALING` / `FO_TRUNCFAC` |
+| `planck` | Thermal level Planck/source input | `(..., nlyr+1)` | thermal required | `thermal_bb_input` | `THERMAL_BB_INPUT` |
+| `surface_planck` | Surface Planck radiance | scalar or `(...)` | `0.0` | `surfbb` | `SURFBB` |
+| `emissivity` | Surface emissivity | scalar or `(...)` | `0.0` | `emissivity` | `EMISSIVITY` |
+| `geometry` | FO solar geometry method | scalar | `pseudo_spherical` | `fo_geometry_mode` | `FO_SSGeometry_Master_Obs_EPS` / `FO_SSGeometry_Master_Obs_RPS` |
+
+See [`docs/api_arguments.md`](docs/api_arguments.md) for the fuller argument
+table and notes on advanced thermal and lattice inputs.
 
 Run the bundled examples from the repository root after the editable install:
 
@@ -160,6 +194,7 @@ author-provided benchmark outputs and saved-file reference cases.
 - `src/py2sess/data/benchmark`: packaged UV and TIR benchmark fixtures
 - `tests`: standalone regression and analytic checks
 - `examples`: runnable demos
+- `docs/api_arguments.md`: public API argument mapping and Fortran-name crosswalk
 - `docs/benchmark_cases.md`: packaged benchmark notes
 - `docs/full_spectrum_benchmarks.md`: full-spectrum benchmark bundle notes
 - `docs/retrieval_examples.md`: synthetic autograd retrieval examples

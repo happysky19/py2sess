@@ -18,9 +18,19 @@ from _full_spectrum_benchmark_common import (
     require_keys,
     scalar_value,
 )
+from py2sess import TwoStreamEss, TwoStreamEssOptions
 from py2sess.core import precompute_fo_thermal_geometry_numpy
 from py2sess.core.backend import has_torch
 from py2sess.core.thermal_batch_numpy import _fo_thermal_toa, _two_stream_thermal_toa
+
+
+def _public_bvp_solver(engine: str) -> str:
+    """Maps low-level benchmark BVP names to public option names."""
+    if engine == "block":
+        return "banded"
+    if engine == "pentadiagonal":
+        return "pentadiag"
+    return "scipy"
 
 
 def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
@@ -121,6 +131,58 @@ def benchmark_numpy(
         setup_seconds=wall_seconds - rt_seconds,
         fo_seconds=fo_seconds,
         two_stream_seconds=two_stream_seconds,
+        max_abs_diff=max_abs_diff,
+        max_rel_diff_pct=max_rel_diff_pct,
+    )
+
+
+def benchmark_numpy_forward(
+    bundle: dict[str, np.ndarray],
+    *,
+    wavelengths: int,
+    numpy_bvp_engine: str,
+    output_levels: bool,
+) -> BenchmarkRow:
+    """Runs the public NumPy ``TwoStreamEss.forward`` full-spectrum path."""
+    wall_start = time.perf_counter()
+    solver = TwoStreamEss(
+        TwoStreamEssOptions(
+            nlyr=int(bundle["tau_arr"].shape[1]),
+            mode="thermal",
+            bvp_solver=_public_bvp_solver(numpy_bvp_engine),
+            output_levels=output_levels,
+        )
+    )
+    result = solver.forward(
+        tau=bundle["tau_arr"],
+        ssa=bundle["omega_arr"],
+        g=bundle["asymm_arr"],
+        z=bundle["heights"],
+        angles=scalar_value(bundle["user_angle"]),
+        stream=0.5,
+        albedo=bundle["albedo"],
+        delta_m_scaling=bundle["d2s_scaling"],
+        planck=bundle["thermal_bb_input"],
+        surface_planck=bundle["surfbb"],
+        emissivity=1.0 - bundle["albedo"],
+        include_fo=True,
+    )
+    total = np.asarray(result.radiance_total, dtype=float)
+    checksum = float(np.sum(total))
+    wall_seconds = time.perf_counter() - wall_start
+    max_abs_diff = None
+    max_rel_diff_pct = None
+    if "ref_total" in bundle:
+        max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
+    _ = checksum
+    return BenchmarkRow(
+        backend="numpy-forward-levels" if output_levels else "numpy-forward",
+        wavelengths=wavelengths,
+        layers=int(bundle["tau_arr"].shape[1]),
+        chunk_size=wavelengths,
+        wall_seconds=wall_seconds,
+        rt_seconds=wall_seconds,
+        setup_seconds=0.0,
         max_abs_diff=max_abs_diff,
         max_rel_diff_pct=max_rel_diff_pct,
     )
@@ -248,6 +310,79 @@ def benchmark_torch(
     )
 
 
+def benchmark_torch_forward(
+    bundle: dict[str, np.ndarray],
+    *,
+    wavelengths: int,
+    torch_dtype_name: str,
+    torch_device_name: str,
+    torch_threads: int,
+    torch_bvp_engine: str,
+    output_levels: bool,
+) -> BenchmarkRow:
+    """Runs the public torch ``TwoStreamEss.forward`` full-spectrum path."""
+    if not has_torch():
+        raise RuntimeError("PyTorch is not installed")
+    import torch
+
+    torch.set_num_threads(torch_threads)
+    wall_start = time.perf_counter()
+    dtype = {"float64": torch.float64, "float32": torch.float32}[torch_dtype_name]
+    device = torch.device(torch_device_name)
+    with torch.no_grad():
+        probe = torch.ones(16, dtype=dtype, device=device)
+        _ = (probe + 1.0).sum().item()
+    solver = TwoStreamEss(
+        TwoStreamEssOptions(
+            nlyr=int(bundle["tau_arr"].shape[1]),
+            mode="thermal",
+            backend="torch",
+            bvp_solver=_public_bvp_solver(torch_bvp_engine),
+            torch_device=torch_device_name,
+            torch_dtype=torch_dtype_name,
+            torch_enable_grad=False,
+            output_levels=output_levels,
+        )
+    )
+    result = solver.forward(
+        tau=bundle["tau_arr"],
+        ssa=bundle["omega_arr"],
+        g=bundle["asymm_arr"],
+        z=bundle["heights"],
+        angles=scalar_value(bundle["user_angle"]),
+        stream=0.5,
+        albedo=bundle["albedo"],
+        delta_m_scaling=bundle["d2s_scaling"],
+        planck=bundle["thermal_bb_input"],
+        surface_planck=bundle["surfbb"],
+        emissivity=1.0 - bundle["albedo"],
+        include_fo=True,
+    )
+    total = result.radiance_total.detach().cpu().numpy()
+    checksum = float(np.sum(total))
+    wall_seconds = time.perf_counter() - wall_start
+    max_abs_diff = None
+    max_rel_diff_pct = None
+    if "ref_total" in bundle:
+        max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
+    _ = checksum
+    return BenchmarkRow(
+        backend=(
+            f"torch-{torch_device_name}-{torch_dtype_name}-forward-levels"
+            if output_levels
+            else f"torch-{torch_device_name}-{torch_dtype_name}-forward"
+        ),
+        wavelengths=wavelengths,
+        layers=int(bundle["tau_arr"].shape[1]),
+        chunk_size=wavelengths,
+        wall_seconds=wall_seconds,
+        rt_seconds=wall_seconds,
+        setup_seconds=0.0,
+        max_abs_diff=max_abs_diff,
+        max_rel_diff_pct=max_rel_diff_pct,
+    )
+
+
 def main() -> None:
     """Runs the full-spectrum TIR benchmark example."""
     parser = argparse.ArgumentParser()
@@ -266,6 +401,11 @@ def main() -> None:
     parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
     parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
     parser.add_argument("--torch-threads", type=int, default=1)
+    parser.add_argument(
+        "--output-levels",
+        action="store_true",
+        help="Benchmark the public forward profile path instead of endpoint-only output.",
+    )
     args = parser.parse_args()
 
     load_start = time.perf_counter()
@@ -330,6 +470,14 @@ def main() -> None:
                 numpy_bvp_engine=args.numpy_bvp_engine,
             )
         )
+        rows.append(
+            benchmark_numpy_forward(
+                bundle,
+                wavelengths=wavelengths,
+                numpy_bvp_engine=args.numpy_bvp_engine,
+                output_levels=args.output_levels,
+            )
+        )
     if args.backend in {"torch", "both"}:
         chunk_size = args.chunk_size or recommended_chunk_size(
             total_rows=wavelengths,
@@ -346,6 +494,17 @@ def main() -> None:
                 torch_device_name=args.torch_device,
                 torch_threads=args.torch_threads,
                 torch_bvp_engine=args.torch_bvp_engine,
+            )
+        )
+        rows.append(
+            benchmark_torch_forward(
+                bundle,
+                wavelengths=wavelengths,
+                torch_dtype_name=args.torch_dtype,
+                torch_device_name=args.torch_device,
+                torch_threads=args.torch_threads,
+                torch_bvp_engine=args.torch_bvp_engine,
+                output_levels=args.output_levels,
             )
         )
     print_rows(rows)

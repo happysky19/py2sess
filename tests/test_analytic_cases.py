@@ -30,29 +30,29 @@ class BoundaryConditionAnalyticTests(unittest.TestCase):
 
     def test_solar_forward_zero_flux_returns_zero_everywhere(self) -> None:
         options = TwoStreamEssOptions(
-            n_layers=3,
-            source_mode="solar_obs",
-            do_level_output=True,
-            do_dnwelling=True,
+            nlyr=3,
+            mode="solar",
+            output_levels=True,
+            downwelling=True,
         )
         solver = TwoStreamEss(options)
         result = solver.forward(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=np.array([0.5, 0.4, 0.3], dtype=float),
-            asymm_arr=np.array([0.2, 0.1, 0.3], dtype=float),
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=np.array([[30.0, 20.0, 40.0]], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=0.0,
+            tau=THREE_LAYER_TAU,
+            ssa=np.array([0.5, 0.4, 0.3], dtype=float),
+            g=np.array([0.2, 0.1, 0.3], dtype=float),
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([[30.0, 20.0, 40.0]], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=0.0,
             albedo=0.3,
-            d2s_scaling=np.array([0.01, 0.02, 0.03], dtype=float),
+            delta_m_scaling=np.array([0.01, 0.02, 0.03], dtype=float),
             include_fo=True,
         )
         np.testing.assert_allclose(
             result.intensity_toa, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14
         )
         np.testing.assert_allclose(
-            result.fo_intensity_total, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14
+            result.fo_radiance, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14
         )
         np.testing.assert_allclose(
             result.combined_intensity_toa, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14
@@ -71,48 +71,47 @@ class BoundaryConditionAnalyticTests(unittest.TestCase):
         )
 
     def test_solar_fo_no_scattering_no_surface_returns_zero(self) -> None:
-        options = TwoStreamEssOptions(n_layers=3, source_mode="solar_obs", do_level_output=True)
+        options = TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True)
         solver = TwoStreamEss(options)
         result = solver.forward_fo(
-            tau_arr=THREE_LAYER_ZERO,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=np.array([[35.0, 50.0, 120.0]], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=2.5,
+            tau=THREE_LAYER_ZERO,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([[35.0, 50.0, 120.0]], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=2.5,
             albedo=0.0,
-            d2s_scaling=THREE_LAYER_ZERO,
-            fo_geometry_mode="eps",
+            delta_m_scaling=THREE_LAYER_ZERO,
+            geometry="pseudo_spherical",
         )
         np.testing.assert_allclose(
-            result.intensity_total, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14
+            result.radiance, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14
         )
         np.testing.assert_allclose(
-            result.intensity_total_profile, np.zeros((1, 4), dtype=float), rtol=0.0, atol=1.0e-14
+            result.radiance_profile, np.zeros((1, 4), dtype=float), rtol=0.0, atol=1.0e-14
         )
 
     def test_thermal_forward_zero_sources_returns_zero(self) -> None:
         options = TwoStreamEssOptions(
-            n_layers=3,
-            source_mode="thermal",
-            do_level_output=True,
-            do_dnwelling=True,
+            nlyr=3,
+            mode="thermal",
+            output_levels=True,
+            downwelling=True,
         )
         solver = TwoStreamEss(options)
         result = solver.forward(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([20.0], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([20.0], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.0,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=THREE_LAYER_ZERO_BB,
-            surfbb=0.0,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=THREE_LAYER_ZERO_BB,
+            surface_planck=0.0,
             emissivity=1.0,
             include_fo=True,
         )
@@ -140,25 +139,24 @@ class BoundaryConditionAnalyticTests(unittest.TestCase):
 
     def test_thermal_forward_zero_sources_remain_zero_for_nonblack_surface(self) -> None:
         options = TwoStreamEssOptions(
-            n_layers=3,
-            source_mode="thermal",
-            do_level_output=True,
-            do_dnwelling=True,
+            nlyr=3,
+            mode="thermal",
+            output_levels=True,
+            downwelling=True,
         )
         solver = TwoStreamEss(options)
         result = solver.forward(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([20.0], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([20.0], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.5,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=THREE_LAYER_ZERO_BB,
-            surfbb=0.0,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=THREE_LAYER_ZERO_BB,
+            surface_planck=0.0,
             emissivity=0.5,
             include_fo=True,
         )
@@ -189,88 +187,84 @@ class ClearSkyShortwaveAnalyticTests(unittest.TestCase):
     """Analytic checks for shortwave clear-sky surface and direct-source limits."""
 
     def test_solar_fo_surface_only_matches_lambertian_formula(self) -> None:
-        options = TwoStreamEssOptions(n_layers=3, source_mode="solar_obs", do_level_output=True)
+        options = TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True)
         solver = TwoStreamEss(options)
         albedo = 0.3
         sza = 30.0
         result = solver.forward_fo(
-            tau_arr=THREE_LAYER_ZERO,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=np.array([[sza, 0.0, 0.0]], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_ZERO,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([[sza, 0.0, 0.0]], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=albedo,
-            d2s_scaling=THREE_LAYER_ZERO,
-            fo_geometry_mode="eps",
+            delta_m_scaling=THREE_LAYER_ZERO,
+            geometry="pseudo_spherical",
         )
         expected = lambertian_surface_fo_radiance(
             flux_factor=1.0, albedo=albedo, solar_zenith_degrees=sza
         )
+        np.testing.assert_allclose(result.radiance, np.array([expected]), rtol=0.0, atol=1.0e-12)
         np.testing.assert_allclose(
-            result.intensity_total, np.array([expected]), rtol=0.0, atol=1.0e-12
-        )
-        np.testing.assert_allclose(
-            result.intensity_total_profile,
+            result.radiance_profile,
             np.full((1, 4), expected, dtype=float),
             rtol=0.0,
             atol=1.0e-12,
         )
 
     def test_solar_fo_oblique_surface_only_scales_with_flux_and_mu0(self) -> None:
-        options = TwoStreamEssOptions(n_layers=3, source_mode="solar_obs", do_level_output=True)
+        options = TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True)
         solver = TwoStreamEss(options)
         flux_factor = 2.5
         albedo = 0.4
         sza = 35.0
         result = solver.forward_fo(
-            tau_arr=THREE_LAYER_ZERO,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=np.array([[sza, 50.0, 120.0]], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=flux_factor,
+            tau=THREE_LAYER_ZERO,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([[sza, 50.0, 120.0]], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=flux_factor,
             albedo=albedo,
-            d2s_scaling=THREE_LAYER_ZERO,
-            fo_geometry_mode="eps",
+            delta_m_scaling=THREE_LAYER_ZERO,
+            geometry="pseudo_spherical",
         )
         expected = lambertian_surface_fo_radiance(
             flux_factor=flux_factor,
             albedo=albedo,
             solar_zenith_degrees=sza,
         )
+        np.testing.assert_allclose(result.radiance, np.array([expected]), rtol=0.0, atol=1.0e-12)
         np.testing.assert_allclose(
-            result.intensity_total, np.array([expected]), rtol=0.0, atol=1.0e-12
-        )
-        np.testing.assert_allclose(
-            result.intensity_total_profile,
+            result.radiance_profile,
             np.full((1, 4), expected, dtype=float),
             rtol=0.0,
             atol=1.0e-12,
         )
 
     def test_solar_fo_lambertian_surface_only_is_view_independent(self) -> None:
-        options = TwoStreamEssOptions(n_layers=3, source_mode="solar_obs", do_level_output=True)
+        options = TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True)
         solver = TwoStreamEss(options)
         result = solver.forward_fo(
-            tau_arr=THREE_LAYER_ZERO,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=np.array(
+            tau=THREE_LAYER_ZERO,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array(
                 [
                     [35.0, 0.0, 0.0],
                     [35.0, 50.0, 120.0],
                 ],
                 dtype=float,
             ),
-            stream_value=STREAM_VALUE,
-            flux_factor=2.5,
+            stream=STREAM_VALUE,
+            fbeam=2.5,
             albedo=0.4,
-            d2s_scaling=THREE_LAYER_ZERO,
-            fo_geometry_mode="eps",
+            delta_m_scaling=THREE_LAYER_ZERO,
+            geometry="pseudo_spherical",
         )
         expected = lambertian_surface_fo_radiance(
             flux_factor=2.5,
@@ -278,10 +272,10 @@ class ClearSkyShortwaveAnalyticTests(unittest.TestCase):
             solar_zenith_degrees=35.0,
         )
         np.testing.assert_allclose(
-            result.intensity_total, np.full(2, expected, dtype=float), rtol=0.0, atol=1.0e-12
+            result.radiance, np.full(2, expected, dtype=float), rtol=0.0, atol=1.0e-12
         )
         np.testing.assert_allclose(
-            result.intensity_total_profile,
+            result.radiance_profile,
             np.full((2, 4), expected, dtype=float),
             rtol=0.0,
             atol=1.0e-12,
@@ -292,33 +286,26 @@ class ClearSkyLongwaveAnalyticTests(unittest.TestCase):
     """Analytic checks for longwave pure-absorption and blackbody limits."""
 
     def test_thermal_fo_isothermal_absorbing_column_preserves_blackbody(self) -> None:
-        options = TwoStreamEssOptions(
-            n_layers=3, source_mode="thermal", do_level_output=True, do_dnwelling=True
-        )
+        options = TwoStreamEssOptions(nlyr=3, mode="thermal", output_levels=True, downwelling=True)
         solver = TwoStreamEss(options)
         result = solver.forward_fo(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([20.0], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([20.0], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.0,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=THREE_LAYER_ONE_BB,
-            surfbb=1.0,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=THREE_LAYER_ONE_BB,
+            surface_planck=1.0,
             emissivity=1.0,
         )
+        np.testing.assert_allclose(result.radiance_up_toa, np.array([1.0]), rtol=0.0, atol=5.0e-10)
+        np.testing.assert_allclose(result.radiance_up_boa, np.array([1.0]), rtol=0.0, atol=5.0e-10)
         np.testing.assert_allclose(
-            result.intensity_total_up_toa, np.array([1.0]), rtol=0.0, atol=5.0e-10
-        )
-        np.testing.assert_allclose(
-            result.intensity_total_up_boa, np.array([1.0]), rtol=0.0, atol=5.0e-10
-        )
-        np.testing.assert_allclose(
-            result.intensity_total_up_profile,
+            result.radiance_up_profile,
             np.ones((1, 4), dtype=float),
             rtol=0.0,
             atol=5.0e-10,
@@ -326,26 +313,25 @@ class ClearSkyLongwaveAnalyticTests(unittest.TestCase):
 
     def test_thermal_full_isothermal_blackbody_has_exact_toa_flux_pair(self) -> None:
         options = TwoStreamEssOptions(
-            n_layers=3,
-            source_mode="thermal",
-            do_level_output=True,
-            do_dnwelling=True,
-            do_additional_mvout=True,
+            nlyr=3,
+            mode="thermal",
+            output_levels=True,
+            downwelling=True,
+            additional_mvout=True,
         )
         solver = TwoStreamEss(options)
         result = solver.forward(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([20.0], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([20.0], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.0,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=THREE_LAYER_ONE_BB,
-            surfbb=1.0,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=THREE_LAYER_ONE_BB,
+            surface_planck=1.0,
             emissivity=1.0,
             include_fo=True,
         )
@@ -361,23 +347,20 @@ class ClearSkyLongwaveAnalyticTests(unittest.TestCase):
         user_angle_degrees = 20.0
         surfbb = 5.0
         emissivity = 0.8
-        options = TwoStreamEssOptions(
-            n_layers=3, source_mode="thermal", do_level_output=True, do_dnwelling=True
-        )
+        options = TwoStreamEssOptions(nlyr=3, mode="thermal", output_levels=True, downwelling=True)
         solver = TwoStreamEss(options)
         result = solver.forward_fo(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([user_angle_degrees], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([user_angle_degrees], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=1.0 - emissivity,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=THREE_LAYER_ZERO_BB,
-            surfbb=surfbb,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=THREE_LAYER_ZERO_BB,
+            surface_planck=surfbb,
             emissivity=emissivity,
         )
         expected_profile = thermal_surface_only_up_profile(
@@ -387,19 +370,19 @@ class ClearSkyLongwaveAnalyticTests(unittest.TestCase):
             emissivity=emissivity,
         )
         np.testing.assert_allclose(
-            result.intensity_total_up_profile,
+            result.radiance_up_profile,
             expected_profile[np.newaxis, :],
             rtol=0.0,
             atol=8.0e-5,
         )
         np.testing.assert_allclose(
-            result.intensity_total_up_toa,
+            result.radiance_up_toa,
             np.array([expected_profile[0]], dtype=float),
             rtol=0.0,
             atol=8.0e-5,
         )
         np.testing.assert_allclose(
-            result.intensity_total_up_boa,
+            result.radiance_up_boa,
             np.array([expected_profile[-1]], dtype=float),
             rtol=0.0,
             atol=8.0e-5,
@@ -407,23 +390,20 @@ class ClearSkyLongwaveAnalyticTests(unittest.TestCase):
 
     def test_thermal_fo_atmosphere_only_matches_absorption_emission_formula(self) -> None:
         user_angle_degrees = 20.0
-        options = TwoStreamEssOptions(
-            n_layers=3, source_mode="thermal", do_level_output=True, do_dnwelling=True
-        )
+        options = TwoStreamEssOptions(nlyr=3, mode="thermal", output_levels=True, downwelling=True)
         solver = TwoStreamEss(options)
         result = solver.forward_fo(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([user_angle_degrees], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([user_angle_degrees], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.0,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=THREE_LAYER_ONE_BB,
-            surfbb=0.0,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=THREE_LAYER_ONE_BB,
+            surface_planck=0.0,
             emissivity=1.0,
         )
         expected_profile = thermal_atmosphere_only_up_profile(
@@ -432,19 +412,19 @@ class ClearSkyLongwaveAnalyticTests(unittest.TestCase):
             blackbody_value=1.0,
         )
         np.testing.assert_allclose(
-            result.intensity_total_up_profile,
+            result.radiance_up_profile,
             expected_profile[np.newaxis, :],
             rtol=0.0,
             atol=2.0e-5,
         )
         np.testing.assert_allclose(
-            result.intensity_total_up_toa,
+            result.radiance_up_toa,
             np.array([expected_profile[0]], dtype=float),
             rtol=0.0,
             atol=2.0e-5,
         )
         np.testing.assert_allclose(
-            result.intensity_total_up_boa,
+            result.radiance_up_boa,
             np.array([expected_profile[-1]], dtype=float),
             rtol=0.0,
             atol=2.0e-5,
@@ -452,23 +432,20 @@ class ClearSkyLongwaveAnalyticTests(unittest.TestCase):
 
     def test_thermal_fo_atmosphere_only_downward_profile_matches_formula(self) -> None:
         user_angle_degrees = 20.0
-        options = TwoStreamEssOptions(
-            n_layers=3, source_mode="thermal", do_level_output=True, do_dnwelling=True
-        )
+        options = TwoStreamEssOptions(nlyr=3, mode="thermal", output_levels=True, downwelling=True)
         solver = TwoStreamEss(options)
         result = solver.forward_fo(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([user_angle_degrees], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([user_angle_degrees], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.0,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=THREE_LAYER_ONE_BB,
-            surfbb=0.0,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=THREE_LAYER_ONE_BB,
+            surface_planck=0.0,
             emissivity=1.0,
         )
         expected_profile = thermal_atmosphere_only_down_profile(
@@ -505,23 +482,23 @@ class ScatteringAnalyticTests(unittest.TestCase):
         sza = 30.0
         vza = 20.0
         options = TwoStreamEssOptions(
-            n_layers=1,
-            source_mode="solar_obs",
-            do_level_output=True,
-            do_plane_parallel=True,
+            nlyr=1,
+            mode="solar",
+            output_levels=True,
+            plane_parallel=True,
         )
         solver = TwoStreamEss(options)
         result = solver.forward_fo(
-            tau_arr=np.array([tau], dtype=float),
-            omega_arr=np.array([omega], dtype=float),
-            asymm_arr=np.array([0.0], dtype=float),
-            height_grid=np.array([1.0, 0.0], dtype=float),
-            user_obsgeoms=np.array([[sza, vza, 0.0]], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=np.array([tau], dtype=float),
+            ssa=np.array([omega], dtype=float),
+            g=np.array([0.0], dtype=float),
+            z=np.array([1.0, 0.0], dtype=float),
+            angles=np.array([[sza, vza, 0.0]], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.0,
-            d2s_scaling=np.zeros(1, dtype=float),
-            fo_geometry_mode="eps",
+            delta_m_scaling=np.zeros(1, dtype=float),
+            geometry="pseudo_spherical",
         )
         expected = solar_fo_single_scatter_isotropic_one_layer(
             tau=tau,
@@ -530,11 +507,9 @@ class ScatteringAnalyticTests(unittest.TestCase):
             view_zenith_degrees=vza,
             flux_factor=1.0,
         )
+        np.testing.assert_allclose(result.radiance, np.array([expected]), rtol=0.0, atol=1.0e-12)
         np.testing.assert_allclose(
-            result.intensity_total, np.array([expected]), rtol=0.0, atol=1.0e-12
-        )
-        np.testing.assert_allclose(
-            result.intensity_total_profile,
+            result.radiance_profile,
             np.array([[expected, 0.0]], dtype=float),
             rtol=0.0,
             atol=1.0e-12,
@@ -546,26 +521,25 @@ class ScatteringAnalyticTests(unittest.TestCase):
         user_angle_degrees = 20.0
         blackbody_value = 2.0
         options = TwoStreamEssOptions(
-            n_layers=1,
-            source_mode="thermal",
-            do_level_output=True,
-            do_dnwelling=True,
-            do_plane_parallel=True,
+            nlyr=1,
+            mode="thermal",
+            output_levels=True,
+            downwelling=True,
+            plane_parallel=True,
         )
         solver = TwoStreamEss(options)
         result = solver.forward_fo(
-            tau_arr=np.array([tau], dtype=float),
-            omega_arr=np.array([omega], dtype=float),
-            asymm_arr=np.array([0.0], dtype=float),
-            height_grid=np.array([1.0, 0.0], dtype=float),
-            user_obsgeoms=None,
-            user_angles=np.array([user_angle_degrees], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=np.array([tau], dtype=float),
+            ssa=np.array([omega], dtype=float),
+            g=np.array([0.0], dtype=float),
+            z=np.array([1.0, 0.0], dtype=float),
+            angles=np.array([user_angle_degrees], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.0,
-            d2s_scaling=np.zeros(1, dtype=float),
-            thermal_bb_input=np.array([blackbody_value, blackbody_value], dtype=float),
-            surfbb=0.0,
+            delta_m_scaling=np.zeros(1, dtype=float),
+            planck=np.array([blackbody_value, blackbody_value], dtype=float),
+            surface_planck=0.0,
             emissivity=1.0,
         )
         expected = thermal_fo_single_layer_uniform_source(
@@ -575,10 +549,10 @@ class ScatteringAnalyticTests(unittest.TestCase):
             blackbody_value=blackbody_value,
         )
         np.testing.assert_allclose(
-            result.intensity_total_up_toa, np.array([expected]), rtol=0.0, atol=1.0e-12
+            result.radiance_up_toa, np.array([expected]), rtol=0.0, atol=1.0e-12
         )
         np.testing.assert_allclose(
-            result.intensity_total_up_profile,
+            result.radiance_up_profile,
             np.array([[expected, 0.0]], dtype=float),
             rtol=0.0,
             atol=1.0e-12,
@@ -590,58 +564,53 @@ class ComplexAnalyticTests(unittest.TestCase):
 
     def test_thermal_fo_superposition_surface_plus_atmosphere_equals_total(self) -> None:
         user_angle_degrees = 20.0
-        options = TwoStreamEssOptions(
-            n_layers=3, source_mode="thermal", do_level_output=True, do_dnwelling=True
-        )
+        options = TwoStreamEssOptions(nlyr=3, mode="thermal", output_levels=True, downwelling=True)
         solver = TwoStreamEss(options)
         surface_only = solver.forward_fo(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([user_angle_degrees], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([user_angle_degrees], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.2,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=THREE_LAYER_ZERO_BB,
-            surfbb=5.0,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=THREE_LAYER_ZERO_BB,
+            surface_planck=5.0,
             emissivity=0.8,
         )
         atmosphere_only = solver.forward_fo(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([user_angle_degrees], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([user_angle_degrees], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.0,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=np.full(4, 1.5, dtype=float),
-            surfbb=0.0,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=np.full(4, 1.5, dtype=float),
+            surface_planck=0.0,
             emissivity=1.0,
         )
         combined = solver.forward_fo(
-            tau_arr=THREE_LAYER_TAU,
-            omega_arr=THREE_LAYER_ZERO,
-            asymm_arr=THREE_LAYER_ZERO,
-            height_grid=THREE_LAYER_HEIGHT_GRID,
-            user_obsgeoms=None,
-            user_angles=np.array([user_angle_degrees], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=THREE_LAYER_TAU,
+            ssa=THREE_LAYER_ZERO,
+            g=THREE_LAYER_ZERO,
+            z=THREE_LAYER_HEIGHT_GRID,
+            angles=np.array([user_angle_degrees], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=0.2,
-            d2s_scaling=THREE_LAYER_ZERO,
-            thermal_bb_input=np.full(4, 1.5, dtype=float),
-            surfbb=5.0,
+            delta_m_scaling=THREE_LAYER_ZERO,
+            planck=np.full(4, 1.5, dtype=float),
+            surface_planck=5.0,
             emissivity=0.8,
         )
         np.testing.assert_allclose(
-            combined.intensity_total_up_profile,
-            surface_only.intensity_total_up_profile + atmosphere_only.intensity_total_up_profile,
+            combined.radiance_up_profile,
+            surface_only.radiance_up_profile + atmosphere_only.radiance_up_profile,
             rtol=0.0,
             atol=2.0e-10,
         )
@@ -657,23 +626,20 @@ class ComplexAnalyticTests(unittest.TestCase):
         user_angle_degrees = 37.0
         surfbb = 2.7
         emissivity = 0.91
-        options = TwoStreamEssOptions(
-            n_layers=5, source_mode="thermal", do_level_output=True, do_dnwelling=True
-        )
+        options = TwoStreamEssOptions(nlyr=5, mode="thermal", output_levels=True, downwelling=True)
         solver = TwoStreamEss(options)
         result = solver.forward_fo(
-            tau_arr=tau_arr,
-            omega_arr=np.zeros(5, dtype=float),
-            asymm_arr=np.zeros(5, dtype=float),
-            height_grid=np.arange(5, -1, -1, dtype=float),
-            user_obsgeoms=None,
-            user_angles=np.array([user_angle_degrees], dtype=float),
-            stream_value=STREAM_VALUE,
-            flux_factor=1.0,
+            tau=tau_arr,
+            ssa=np.zeros(5, dtype=float),
+            g=np.zeros(5, dtype=float),
+            z=np.arange(5, -1, -1, dtype=float),
+            angles=np.array([user_angle_degrees], dtype=float),
+            stream=STREAM_VALUE,
+            fbeam=1.0,
             albedo=1.0 - emissivity,
-            d2s_scaling=np.zeros(5, dtype=float),
-            thermal_bb_input=np.zeros(6, dtype=float),
-            surfbb=surfbb,
+            delta_m_scaling=np.zeros(5, dtype=float),
+            planck=np.zeros(6, dtype=float),
+            surface_planck=surfbb,
             emissivity=emissivity,
         )
         expected_profile = thermal_surface_only_up_profile(
@@ -683,7 +649,7 @@ class ComplexAnalyticTests(unittest.TestCase):
             emissivity=emissivity,
         )
         np.testing.assert_allclose(
-            result.intensity_total_up_profile,
+            result.radiance_up_profile,
             expected_profile[np.newaxis, :],
             rtol=0.0,
             atol=2.0e-4,

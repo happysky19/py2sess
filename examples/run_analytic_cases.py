@@ -125,40 +125,34 @@ def main() -> None:
     total_cases = 0
     total_passed = 0
 
-    solar_solver = TwoStreamEss(
-        TwoStreamEssOptions(n_layers=3, source_mode="solar_obs", do_level_output=True)
-    )
+    solar_solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True))
     thermal_solver = TwoStreamEss(
-        TwoStreamEssOptions(
-            n_layers=3, source_mode="thermal", do_level_output=True, do_dnwelling=True
-        )
+        TwoStreamEssOptions(nlyr=3, mode="thermal", output_levels=True, downwelling=True)
     )
     thermal_solver_flux = TwoStreamEss(
         TwoStreamEssOptions(
-            n_layers=3,
-            source_mode="thermal",
-            do_level_output=True,
-            do_dnwelling=True,
-            do_additional_mvout=True,
+            nlyr=3,
+            mode="thermal",
+            output_levels=True,
+            downwelling=True,
+            additional_mvout=True,
         )
     )
     thermal_solver_irregular = TwoStreamEss(
-        TwoStreamEssOptions(
-            n_layers=5, source_mode="thermal", do_level_output=True, do_dnwelling=True
-        )
+        TwoStreamEssOptions(nlyr=5, mode="thermal", output_levels=True, downwelling=True)
     )
 
     solar_surface = solar_solver.forward_fo(
-        tau_arr=np.zeros(3, dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=np.array([[30.0, 0.0, 0.0]], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.zeros(3, dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([[30.0, 0.0, 0.0]], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.3,
-        d2s_scaling=np.zeros(3, dtype=float),
-        fo_geometry_mode="eps",
+        delta_m_scaling=np.zeros(3, dtype=float),
+        geometry="pseudo_spherical",
     )
     solar_surface_expected = lambertian_surface_fo_radiance(
         flux_factor=1.0,
@@ -167,16 +161,16 @@ def main() -> None:
     )
 
     solar_oblique = solar_solver.forward_fo(
-        tau_arr=np.zeros(3, dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=np.array([[35.0, 50.0, 120.0]], dtype=float),
-        stream_value=stream,
-        flux_factor=2.5,
+        tau=np.zeros(3, dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([[35.0, 50.0, 120.0]], dtype=float),
+        stream=stream,
+        fbeam=2.5,
         albedo=0.4,
-        d2s_scaling=np.zeros(3, dtype=float),
-        fo_geometry_mode="eps",
+        delta_m_scaling=np.zeros(3, dtype=float),
+        geometry="pseudo_spherical",
     )
     solar_oblique_expected = lambertian_surface_fo_radiance(
         flux_factor=2.5,
@@ -185,68 +179,65 @@ def main() -> None:
     )
 
     solar_view_independent = solar_solver.forward_fo(
-        tau_arr=np.zeros(3, dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=np.array(
+        tau=np.zeros(3, dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array(
             [
                 [35.0, 0.0, 0.0],
                 [35.0, 50.0, 120.0],
             ],
             dtype=float,
         ),
-        stream_value=stream,
-        flux_factor=2.5,
+        stream=stream,
+        fbeam=2.5,
         albedo=0.4,
-        d2s_scaling=np.zeros(3, dtype=float),
-        fo_geometry_mode="eps",
+        delta_m_scaling=np.zeros(3, dtype=float),
+        geometry="pseudo_spherical",
     )
     solar_view_independent_expected = np.full(2, solar_oblique_expected, dtype=float)
 
     solar_no_surface = solar_solver.forward_fo(
-        tau_arr=np.zeros(3, dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=np.array([[35.0, 50.0, 120.0]], dtype=float),
-        stream_value=stream,
-        flux_factor=2.5,
+        tau=np.zeros(3, dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([[35.0, 50.0, 120.0]], dtype=float),
+        stream=stream,
+        fbeam=2.5,
         albedo=0.0,
-        d2s_scaling=np.zeros(3, dtype=float),
-        fo_geometry_mode="eps",
+        delta_m_scaling=np.zeros(3, dtype=float),
+        geometry="pseudo_spherical",
     )
 
     solar_zero_flux = TwoStreamEss(
-        TwoStreamEssOptions(
-            n_layers=3, source_mode="solar_obs", do_level_output=True, do_dnwelling=True
-        )
+        TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True, downwelling=True)
     ).forward(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.array([0.5, 0.4, 0.3], dtype=float),
-        asymm_arr=np.array([0.2, 0.1, 0.3], dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=np.array([[30.0, 20.0, 40.0]], dtype=float),
-        stream_value=stream,
-        flux_factor=0.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.array([0.5, 0.4, 0.3], dtype=float),
+        g=np.array([0.2, 0.1, 0.3], dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([[30.0, 20.0, 40.0]], dtype=float),
+        stream=stream,
+        fbeam=0.0,
         albedo=0.3,
-        d2s_scaling=np.array([0.01, 0.02, 0.03], dtype=float),
+        delta_m_scaling=np.array([0.01, 0.02, 0.03], dtype=float),
         include_fo=True,
     )
 
     thermal_blackbody = thermal_solver.forward_fo(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.0,
-        d2s_scaling=np.zeros(3, dtype=float),
-        thermal_bb_input=np.ones(4, dtype=float),
-        surfbb=1.0,
+        delta_m_scaling=np.zeros(3, dtype=float),
+        planck=np.ones(4, dtype=float),
+        surface_planck=1.0,
         emissivity=1.0,
     )
     thermal_blackbody_flux_expected = twostream_upward_flux_pair_from_isotropic_intensity(
@@ -254,35 +245,33 @@ def main() -> None:
         stream_value=stream,
     )
     thermal_blackbody_full = thermal_solver_flux.forward(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.0,
-        d2s_scaling=np.zeros(3, dtype=float),
-        thermal_bb_input=np.ones(4, dtype=float),
-        surfbb=1.0,
+        delta_m_scaling=np.zeros(3, dtype=float),
+        planck=np.ones(4, dtype=float),
+        surface_planck=1.0,
         emissivity=1.0,
         include_fo=True,
     )
 
     thermal_surface_only = thermal_solver.forward_fo(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.2,
-        d2s_scaling=np.zeros(3, dtype=float),
-        thermal_bb_input=np.zeros(4, dtype=float),
-        surfbb=5.0,
+        delta_m_scaling=np.zeros(3, dtype=float),
+        planck=np.zeros(4, dtype=float),
+        surface_planck=5.0,
         emissivity=0.8,
     )
     thermal_surface_only_expected = thermal_surface_only_up_profile(
@@ -293,18 +282,17 @@ def main() -> None:
     )
 
     thermal_atmosphere_only = thermal_solver.forward_fo(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.0,
-        d2s_scaling=np.zeros(3, dtype=float),
-        thermal_bb_input=np.ones(4, dtype=float),
-        surfbb=0.0,
+        delta_m_scaling=np.zeros(3, dtype=float),
+        planck=np.ones(4, dtype=float),
+        surface_planck=0.0,
         emissivity=1.0,
     )
     thermal_atmosphere_only_expected = thermal_atmosphere_only_up_profile(
@@ -319,100 +307,93 @@ def main() -> None:
     )
 
     thermal_zero = thermal_solver.forward(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.0,
-        d2s_scaling=np.zeros(3, dtype=float),
-        thermal_bb_input=np.zeros(4, dtype=float),
-        surfbb=0.0,
+        delta_m_scaling=np.zeros(3, dtype=float),
+        planck=np.zeros(4, dtype=float),
+        surface_planck=0.0,
         emissivity=1.0,
         include_fo=True,
     )
 
     thermal_zero_nonblack = thermal_solver.forward(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.5,
-        d2s_scaling=np.zeros(3, dtype=float),
-        thermal_bb_input=np.zeros(4, dtype=float),
-        surfbb=0.0,
+        delta_m_scaling=np.zeros(3, dtype=float),
+        planck=np.zeros(4, dtype=float),
+        surface_planck=0.0,
         emissivity=0.5,
         include_fo=True,
     )
 
     thermal_super_surface = thermal_solver.forward_fo(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.2,
-        d2s_scaling=np.zeros(3, dtype=float),
-        thermal_bb_input=np.zeros(4, dtype=float),
-        surfbb=5.0,
+        delta_m_scaling=np.zeros(3, dtype=float),
+        planck=np.zeros(4, dtype=float),
+        surface_planck=5.0,
         emissivity=0.8,
     )
     thermal_super_atmos = thermal_solver.forward_fo(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.0,
-        d2s_scaling=np.zeros(3, dtype=float),
-        thermal_bb_input=np.full(4, 1.5, dtype=float),
-        surfbb=0.0,
+        delta_m_scaling=np.zeros(3, dtype=float),
+        planck=np.full(4, 1.5, dtype=float),
+        surface_planck=0.0,
         emissivity=1.0,
     )
     thermal_super_total = thermal_solver.forward_fo(
-        tau_arr=np.array([0.2, 0.3, 0.1], dtype=float),
-        omega_arr=np.zeros(3, dtype=float),
-        asymm_arr=np.zeros(3, dtype=float),
-        height_grid=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.2, 0.3, 0.1], dtype=float),
+        ssa=np.zeros(3, dtype=float),
+        g=np.zeros(3, dtype=float),
+        z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.2,
-        d2s_scaling=np.zeros(3, dtype=float),
-        thermal_bb_input=np.full(4, 1.5, dtype=float),
-        surfbb=5.0,
+        delta_m_scaling=np.zeros(3, dtype=float),
+        planck=np.full(4, 1.5, dtype=float),
+        surface_planck=5.0,
         emissivity=0.8,
     )
 
     solar_scattering = TwoStreamEss(
-        TwoStreamEssOptions(
-            n_layers=1, source_mode="solar_obs", do_level_output=True, do_plane_parallel=True
-        )
+        TwoStreamEssOptions(nlyr=1, mode="solar", output_levels=True, plane_parallel=True)
     ).forward_fo(
-        tau_arr=np.array([0.4], dtype=float),
-        omega_arr=np.array([0.6], dtype=float),
-        asymm_arr=np.array([0.0], dtype=float),
-        height_grid=np.array([1.0, 0.0], dtype=float),
-        user_obsgeoms=np.array([[30.0, 20.0, 0.0]], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.4], dtype=float),
+        ssa=np.array([0.6], dtype=float),
+        g=np.array([0.0], dtype=float),
+        z=np.array([1.0, 0.0], dtype=float),
+        angles=np.array([[30.0, 20.0, 0.0]], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.0,
-        d2s_scaling=np.zeros(1, dtype=float),
-        fo_geometry_mode="eps",
+        delta_m_scaling=np.zeros(1, dtype=float),
+        geometry="pseudo_spherical",
     )
     solar_scattering_expected = solar_fo_single_scatter_isotropic_one_layer(
         tau=0.4,
@@ -424,25 +405,24 @@ def main() -> None:
 
     thermal_scattering = TwoStreamEss(
         TwoStreamEssOptions(
-            n_layers=1,
-            source_mode="thermal",
-            do_level_output=True,
-            do_dnwelling=True,
-            do_plane_parallel=True,
+            nlyr=1,
+            mode="thermal",
+            output_levels=True,
+            downwelling=True,
+            plane_parallel=True,
         )
     ).forward_fo(
-        tau_arr=np.array([0.4], dtype=float),
-        omega_arr=np.array([0.3], dtype=float),
-        asymm_arr=np.array([0.0], dtype=float),
-        height_grid=np.array([1.0, 0.0], dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([20.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.4], dtype=float),
+        ssa=np.array([0.3], dtype=float),
+        g=np.array([0.0], dtype=float),
+        z=np.array([1.0, 0.0], dtype=float),
+        angles=np.array([20.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.0,
-        d2s_scaling=np.zeros(1, dtype=float),
-        thermal_bb_input=np.array([2.0, 2.0], dtype=float),
-        surfbb=0.0,
+        delta_m_scaling=np.zeros(1, dtype=float),
+        planck=np.array([2.0, 2.0], dtype=float),
+        surface_planck=0.0,
         emissivity=1.0,
     )
     thermal_scattering_expected = thermal_fo_single_layer_uniform_source(
@@ -453,18 +433,17 @@ def main() -> None:
     )
 
     thermal_surface_irregular = thermal_solver_irregular.forward_fo(
-        tau_arr=np.array([0.05, 0.12, 0.27, 0.08, 0.19], dtype=float),
-        omega_arr=np.zeros(5, dtype=float),
-        asymm_arr=np.zeros(5, dtype=float),
-        height_grid=np.arange(5, -1, -1, dtype=float),
-        user_obsgeoms=None,
-        user_angles=np.array([37.0], dtype=float),
-        stream_value=stream,
-        flux_factor=1.0,
+        tau=np.array([0.05, 0.12, 0.27, 0.08, 0.19], dtype=float),
+        ssa=np.zeros(5, dtype=float),
+        g=np.zeros(5, dtype=float),
+        z=np.arange(5, -1, -1, dtype=float),
+        angles=np.array([37.0], dtype=float),
+        stream=stream,
+        fbeam=1.0,
         albedo=0.09,
-        d2s_scaling=np.zeros(5, dtype=float),
-        thermal_bb_input=np.zeros(6, dtype=float),
-        surfbb=2.7,
+        delta_m_scaling=np.zeros(5, dtype=float),
+        planck=np.zeros(6, dtype=float),
+        surface_planck=2.7,
         emissivity=0.91,
     )
     thermal_surface_irregular_expected = thermal_surface_only_up_profile(
@@ -487,7 +466,7 @@ def main() -> None:
     section_passed += int(
         _print_zero_case(
             "solar_fo_no_scattering_no_surface",
-            value=float(np.max(np.abs(solar_no_surface.intensity_total))),
+            value=float(np.max(np.abs(solar_no_surface.radiance))),
             tolerance=1.0e-14,
             note="Without scattering and without a reflecting surface, FO upwelling solar radiance is zero.",
         )
@@ -548,7 +527,7 @@ def main() -> None:
     section_passed += int(
         _print_scalar_case(
             "solar_fo_surface_only",
-            actual=float(solar_surface.intensity_total[0]),
+            actual=float(solar_surface.radiance[0]),
             expected=solar_surface_expected,
             tolerance=1.0e-12,
             note="Lambertian surface-only FO solution.",
@@ -558,7 +537,7 @@ def main() -> None:
     section_passed += int(
         _print_scalar_case(
             "solar_fo_oblique_surface_only",
-            actual=float(solar_oblique.intensity_total[0]),
+            actual=float(solar_oblique.radiance[0]),
             expected=solar_oblique_expected,
             tolerance=1.0e-12,
             note="Same closed-form surface-only FO solution at oblique view and non-unit flux.",
@@ -568,7 +547,7 @@ def main() -> None:
     section_passed += int(
         _print_profile_case(
             "solar_fo_lambertian_view_independent",
-            actual=solar_view_independent.intensity_total,
+            actual=solar_view_independent.radiance,
             expected=solar_view_independent_expected,
             tolerance=1.0e-12,
             note="Lambertian surface-only FO solution should not depend on viewing angle.",
@@ -588,7 +567,7 @@ def main() -> None:
     section_passed += int(
         _print_scalar_case(
             "thermal_fo_isothermal_absorbing_column",
-            actual=float(thermal_blackbody.intensity_total_up_toa[0]),
+            actual=float(thermal_blackbody.radiance_up_toa[0]),
             expected=1.0,
             tolerance=5.0e-10,
             note="FO thermal solution for an isothermal pure-absorption column with black surface.",
@@ -608,7 +587,7 @@ def main() -> None:
     section_passed += int(
         _print_profile_case(
             "thermal_fo_surface_only_profile",
-            actual=thermal_surface_only.intensity_total_up_profile[0],
+            actual=thermal_surface_only.radiance_up_profile[0],
             expected=thermal_surface_only_expected,
             tolerance=8.0e-5,
             note="Closed-form surface emission attenuated by pure absorption.",
@@ -618,7 +597,7 @@ def main() -> None:
     section_passed += int(
         _print_profile_case(
             "thermal_fo_atmosphere_only_profile",
-            actual=thermal_atmosphere_only.intensity_total_up_profile[0],
+            actual=thermal_atmosphere_only.radiance_up_profile[0],
             expected=thermal_atmosphere_only_expected,
             tolerance=2.0e-5,
             note="Closed-form atmospheric emission through a pure-absorption column.",
@@ -648,7 +627,7 @@ def main() -> None:
     section_passed += int(
         _print_scalar_case(
             "solar_fo_one_layer_isotropic_scattering",
-            actual=float(solar_scattering.intensity_total[0]),
+            actual=float(solar_scattering.radiance[0]),
             expected=solar_scattering_expected,
             tolerance=1.0e-12,
             note="One-layer plane-parallel isotropic single-scatter solar FO solution over a black surface.",
@@ -658,7 +637,7 @@ def main() -> None:
     section_passed += int(
         _print_scalar_case(
             "thermal_fo_one_layer_uniform_scattering",
-            actual=float(thermal_scattering.intensity_total_up_toa[0]),
+            actual=float(thermal_scattering.radiance_up_toa[0]),
             expected=thermal_scattering_expected,
             tolerance=1.0e-12,
             note="One-layer plane-parallel thermal FO solution with uniform source and nonzero single-scattering albedo.",
@@ -678,10 +657,9 @@ def main() -> None:
     section_passed += int(
         _print_profile_case(
             "thermal_fo_superposition_surface_plus_atmosphere",
-            actual=thermal_super_total.intensity_total_up_profile[0],
+            actual=thermal_super_total.radiance_up_profile[0],
             expected=(
-                thermal_super_surface.intensity_total_up_profile
-                + thermal_super_atmos.intensity_total_up_profile
+                thermal_super_surface.radiance_up_profile + thermal_super_atmos.radiance_up_profile
             )[0],
             tolerance=2.0e-10,
             note="Thermal FO total should equal the sum of independent surface-only and atmosphere-only runs.",
@@ -691,7 +669,7 @@ def main() -> None:
     section_passed += int(
         _print_profile_case(
             "thermal_fo_surface_only_irregular_profile",
-            actual=thermal_surface_irregular.intensity_total_up_profile[0],
+            actual=thermal_surface_irregular.radiance_up_profile[0],
             expected=thermal_surface_irregular_expected,
             tolerance=2.0e-4,
             note="Pure-absorption surface-only thermal solution on an irregular multilayer profile.",

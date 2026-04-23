@@ -18,12 +18,18 @@ from _full_spectrum_benchmark_common import (
     require_keys,
     scalar_value,
 )
+from py2sess import TwoStreamEss, TwoStreamEssOptions
 from py2sess.core.backend import has_torch
 from py2sess.core.fo_solar_obs_batch_numpy import (
     fo_solar_obs_batch_precompute,
     solve_fo_solar_obs_eps_batch_numpy,
 )
 from py2sess.core.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
+
+
+def _public_bvp_solver(engine: str) -> str:
+    """Maps low-level benchmark BVP names to public option names."""
+    return "banded" if engine == "block" else "scipy"
 
 
 def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
@@ -130,6 +136,57 @@ def benchmark_numpy(
     )
 
 
+def benchmark_numpy_forward(
+    bundle: dict[str, np.ndarray],
+    *,
+    wavelengths: int,
+    numpy_bvp_engine: str,
+    output_levels: bool,
+) -> BenchmarkRow:
+    """Runs the public NumPy ``TwoStreamEss.forward`` full-spectrum path."""
+    wall_start = time.perf_counter()
+    solver = TwoStreamEss(
+        TwoStreamEssOptions(
+            nlyr=int(bundle["tau"].shape[1]),
+            mode="solar",
+            bvp_solver=_public_bvp_solver(numpy_bvp_engine),
+            output_levels=output_levels,
+        )
+    )
+    result = solver.forward(
+        tau=bundle["tau"],
+        ssa=bundle["omega"],
+        g=bundle["asymm"],
+        z=bundle["heights"],
+        angles=bundle["user_obsgeom"],
+        stream=scalar_value(bundle["stream_value"]),
+        fbeam=bundle["flux_factor"],
+        albedo=bundle["albedo"],
+        delta_m_scaling=bundle["scaling"],
+        include_fo=True,
+        fo_exact_scatter=bundle["fo_exact_scatter"],
+    )
+    total = np.asarray(result.radiance_total, dtype=float)
+    checksum = float(np.sum(total))
+    wall_seconds = time.perf_counter() - wall_start
+    max_abs_diff = None
+    max_rel_diff_pct = None
+    if "ref_total" in bundle:
+        max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
+    _ = checksum
+    return BenchmarkRow(
+        backend="numpy-forward-levels" if output_levels else "numpy-forward",
+        wavelengths=wavelengths,
+        layers=int(bundle["tau"].shape[1]),
+        chunk_size=wavelengths,
+        wall_seconds=wall_seconds,
+        rt_seconds=wall_seconds,
+        setup_seconds=0.0,
+        max_abs_diff=max_abs_diff,
+        max_rel_diff_pct=max_rel_diff_pct,
+    )
+
+
 def benchmark_torch(
     bundle: dict[str, np.ndarray],
     *,
@@ -145,6 +202,7 @@ def benchmark_torch(
         raise RuntimeError("PyTorch is not installed")
     import torch
 
+    from py2sess.core.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
     from py2sess.core.solar_obs_batch_torch import solve_solar_obs_batch_torch
 
     wall_start = time.perf_counter()
@@ -171,15 +229,18 @@ def benchmark_torch(
         chunk = _slice_rows(bundle, start, stop)
 
         t0 = time.perf_counter()
-        fo_total = solve_fo_solar_obs_eps_batch_numpy(
-            tau=chunk["tau"],
-            omega=chunk["omega"],
-            scaling=chunk["scaling"],
-            albedo=chunk["albedo"],
-            flux_factor=chunk["flux_factor"],
-            exact_scatter=chunk["fo_exact_scatter"],
-            precomputed=fo_precomputed,
-        )
+        with torch.no_grad():
+            fo_total = solve_fo_solar_obs_eps_batch_torch(
+                tau=chunk["tau"],
+                omega=chunk["omega"],
+                scaling=chunk["scaling"],
+                albedo=chunk["albedo"],
+                flux_factor=chunk["flux_factor"],
+                exact_scatter=chunk["fo_exact_scatter"],
+                precomputed=fo_precomputed,
+                dtype=dtype,
+                device=device,
+            )
         fo_seconds += time.perf_counter() - t0
 
         t0 = time.perf_counter()
@@ -206,8 +267,9 @@ def benchmark_torch(
                 bvp_engine=torch_bvp_engine,
             )
         two_stream_seconds += time.perf_counter() - t0
-        total = two_stream.detach().cpu().numpy() + fo_total
-        checksum += float(total.sum())
+        total_torch = two_stream + fo_total
+        checksum += float(total_torch.sum().item())
+        total = total_torch.detach().cpu().numpy()
         if "ref_total" in chunk:
             chunk_abs_diff, chunk_rel_diff_pct = accuracy_summary(
                 total,
@@ -240,6 +302,79 @@ def benchmark_torch(
     )
 
 
+def benchmark_torch_forward(
+    bundle: dict[str, np.ndarray],
+    *,
+    wavelengths: int,
+    torch_dtype_name: str,
+    torch_device_name: str,
+    torch_threads: int,
+    torch_bvp_engine: str,
+    output_levels: bool,
+) -> BenchmarkRow:
+    """Runs the public torch ``TwoStreamEss.forward`` full-spectrum path."""
+    if not has_torch():
+        raise RuntimeError("PyTorch is not installed")
+    import torch
+
+    torch.set_num_threads(torch_threads)
+    bvp_solver = _public_bvp_solver(torch_bvp_engine)
+    wall_start = time.perf_counter()
+    dtype = {"float64": torch.float64, "float32": torch.float32}[torch_dtype_name]
+    device = torch.device(torch_device_name)
+    with torch.no_grad():
+        probe = torch.ones(16, dtype=dtype, device=device)
+        _ = (probe + 1.0).sum().item()
+    solver = TwoStreamEss(
+        TwoStreamEssOptions(
+            nlyr=int(bundle["tau"].shape[1]),
+            mode="solar",
+            backend="torch",
+            bvp_solver=bvp_solver,
+            torch_device=torch_device_name,
+            torch_dtype=torch_dtype_name,
+            torch_enable_grad=False,
+            output_levels=output_levels,
+        )
+    )
+    result = solver.forward(
+        tau=bundle["tau"],
+        ssa=bundle["omega"],
+        g=bundle["asymm"],
+        z=bundle["heights"],
+        angles=bundle["user_obsgeom"],
+        stream=scalar_value(bundle["stream_value"]),
+        fbeam=bundle["flux_factor"],
+        albedo=bundle["albedo"],
+        delta_m_scaling=bundle["scaling"],
+        include_fo=True,
+        fo_exact_scatter=bundle["fo_exact_scatter"],
+    )
+    total = result.radiance_total.detach().cpu().numpy()
+    checksum = float(np.sum(total))
+    wall_seconds = time.perf_counter() - wall_start
+    max_abs_diff = None
+    max_rel_diff_pct = None
+    if "ref_total" in bundle:
+        max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
+    _ = checksum
+    return BenchmarkRow(
+        backend=(
+            f"torch-{torch_device_name}-{torch_dtype_name}-forward-levels"
+            if output_levels
+            else f"torch-{torch_device_name}-{torch_dtype_name}-forward"
+        ),
+        wavelengths=wavelengths,
+        layers=int(bundle["tau"].shape[1]),
+        chunk_size=wavelengths,
+        wall_seconds=wall_seconds,
+        rt_seconds=wall_seconds,
+        setup_seconds=0.0,
+        max_abs_diff=max_abs_diff,
+        max_rel_diff_pct=max_rel_diff_pct,
+    )
+
+
 def main() -> None:
     """Runs the full-spectrum UV benchmark example."""
     parser = argparse.ArgumentParser()
@@ -256,6 +391,11 @@ def main() -> None:
     parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
     parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
     parser.add_argument("--torch-threads", type=int, default=1)
+    parser.add_argument(
+        "--output-levels",
+        action="store_true",
+        help="Benchmark the public forward profile path instead of endpoint-only output.",
+    )
     args = parser.parse_args()
 
     load_start = time.perf_counter()
@@ -331,6 +471,14 @@ def main() -> None:
                 numpy_bvp_engine=args.numpy_bvp_engine,
             )
         )
+        rows.append(
+            benchmark_numpy_forward(
+                bundle,
+                wavelengths=wavelengths,
+                numpy_bvp_engine=args.numpy_bvp_engine,
+                output_levels=args.output_levels,
+            )
+        )
     if args.backend in {"torch", "both"}:
         chunk_size = args.chunk_size or recommended_chunk_size(
             total_rows=wavelengths,
@@ -347,6 +495,17 @@ def main() -> None:
                 torch_device_name=args.torch_device,
                 torch_threads=args.torch_threads,
                 torch_bvp_engine=args.torch_bvp_engine,
+            )
+        )
+        rows.append(
+            benchmark_torch_forward(
+                bundle,
+                wavelengths=wavelengths,
+                torch_dtype_name=args.torch_dtype,
+                torch_device_name=args.torch_device,
+                torch_threads=args.torch_threads,
+                torch_bvp_engine=args.torch_bvp_engine,
+                output_levels=args.output_levels,
             )
         )
     print_rows(rows)

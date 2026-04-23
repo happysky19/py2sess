@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import Any
@@ -16,6 +17,20 @@ from .core.preprocess import PreparedInputs, prepare_inputs
 from .core.result_components import build_solar_components, build_thermal_components
 from .core.solver import solve_optimized_solar_obs
 
+_MODE_TO_SOURCE_MODE = {
+    "solar": "solar_obs",
+    "solar_lattice": "solar_lat",
+    "thermal": "thermal",
+}
+
+_GEOMETRY_TO_FO_MODE = {
+    "pseudo_spherical": "eps",
+    "enhanced_pseudo_spherical": "eps",
+    "eps": "eps",
+    "regular_pseudo_spherical": "rps",
+    "rps": "rps",
+}
+
 
 @dataclass(frozen=True)
 class TwoStreamEssOptions:
@@ -23,28 +38,28 @@ class TwoStreamEssOptions:
 
     Parameters
     ----------
-    n_layers
+    nlyr
         Number of atmospheric layers in the problem.
     backend
         Execution backend. Use ``"numpy"`` for the reference CPU path or
         ``"torch"`` for the native tensor path where supported.
-    source_mode
-        Forward-model source mode. Supported values are ``"solar_obs"``,
-        ``"solar_lat"``, and ``"thermal"``.
-    do_upwelling, do_dnwelling
+    mode
+        Forward-model source mode. Supported values are ``"solar"``,
+        ``"solar_lattice"``, and ``"thermal"``.
+    upwelling, downwelling
         Flags controlling whether upwelling and/or downwelling outputs are
         computed.
-    do_plane_parallel
+    plane_parallel
         Whether to use the plane-parallel geometry approximation.
-    do_delta_scaling
+    delta_scaling
         Whether to apply delta-M scaling to the optical properties.
-    do_level_output
+    output_levels
         Whether full level profiles should be returned.
-    do_mvout_only, do_additional_mvout
+    mvout_only, additional_mvout
         Flags controlling which flux outputs are produced.
-    do_surface_leaving, do_sl_isotropic
+    surface_leaving, sl_isotropic
         Solar surface-leaving configuration flags.
-    do_brdf_surface
+    brdf_surface
         Whether explicit BRDF inputs are enabled.
     bvp_solver
         Boundary-value-problem solver selection. Supported values are
@@ -63,64 +78,154 @@ class TwoStreamEssOptions:
     torch_enable_grad
         Whether torch forward calls should record autograd operations. Disable
         this for pure inference/comparison runs to avoid gradient bookkeeping.
-    fo_optical_deltam_scaling
+    fo_optical_delta_m_scaling
         Optional override for FO optical-depth delta-M scaling. ``None``
-        inherits ``do_delta_scaling``.
-    fo_thermal_source_deltam_scaling
+        inherits ``delta_scaling``.
+    fo_thermal_source_delta_m_scaling
         Optional override for the thermal FO source-side delta-M multiplier
         used by the raw Fortran FO thermal core. ``None`` disables source-side
         scaling, matching the corrected FO thermal handling described by the
         code author.
     """
 
-    n_layers: int
+    nlyr: int
     backend: str = "numpy"
-    source_mode: str = "solar_obs"
-    do_upwelling: bool = True
-    do_dnwelling: bool = False
-    do_plane_parallel: bool = False
-    do_delta_scaling: bool = True
-    do_level_output: bool = False
-    do_mvout_only: bool = False
-    do_additional_mvout: bool = False
-    do_surface_leaving: bool = False
-    do_sl_isotropic: bool = True
-    do_brdf_surface: bool = False
+    mode: str = "solar"
+    upwelling: bool = True
+    downwelling: bool = False
+    plane_parallel: bool = False
+    delta_scaling: bool = True
+    output_levels: bool = False
+    mvout_only: bool = False
+    additional_mvout: bool = False
+    surface_leaving: bool = False
+    sl_isotropic: bool = True
+    brdf_surface: bool = False
     bvp_solver: str = "scipy"
     thermal_tcutoff: float = 1.0e-8
     torch_device: str | None = None
     torch_dtype: str | None = None
     torch_enable_grad: bool = True
-    fo_optical_deltam_scaling: bool | None = None
-    fo_thermal_source_deltam_scaling: bool | None = None
+    fo_optical_delta_m_scaling: bool | None = None
+    fo_thermal_source_delta_m_scaling: bool | None = None
 
     def __post_init__(self) -> None:
-        if self.n_layers <= 0:
-            raise ValueError("n_layers must be positive")
+        if self.nlyr <= 0:
+            raise ValueError("nlyr must be positive")
         if self.backend not in {"numpy", "torch"}:
             raise ValueError("backend must be 'numpy' or 'torch'")
-        if self.source_mode not in {"solar_obs", "solar_lat", "thermal"}:
-            raise ValueError("source_mode must be 'solar_obs', 'solar_lat', or 'thermal'")
+        if self.mode not in _MODE_TO_SOURCE_MODE:
+            allowed = "', '".join(sorted(_MODE_TO_SOURCE_MODE))
+            raise ValueError(f"mode must be one of: '{allowed}'")
         if self.backend == "torch" and not has_torch():
             raise ValueError("backend='torch' requires torch to be installed")
         if self.bvp_solver not in {"scipy", "banded", "pentadiag"}:
             raise ValueError("bvp_solver must be 'scipy', 'banded', or 'pentadiag'")
 
     @property
+    def n_layers(self) -> int:
+        """Internal compatibility alias for the original Fortran-port name."""
+        return self.nlyr
+
+    @property
+    def source_mode(self) -> str:
+        """Internal source-mode selector used by the solver core."""
+        return _MODE_TO_SOURCE_MODE[self.mode]
+
+    @property
+    def do_upwelling(self) -> bool:
+        """Internal compatibility alias."""
+        return self.upwelling
+
+    @property
+    def do_dnwelling(self) -> bool:
+        """Internal compatibility alias."""
+        return self.downwelling
+
+    @property
+    def do_plane_parallel(self) -> bool:
+        """Internal compatibility alias."""
+        return self.plane_parallel
+
+    @property
+    def do_delta_scaling(self) -> bool:
+        """Internal compatibility alias."""
+        return self.delta_scaling
+
+    @property
+    def do_level_output(self) -> bool:
+        """Internal compatibility alias."""
+        return self.output_levels
+
+    @property
+    def do_mvout_only(self) -> bool:
+        """Internal compatibility alias."""
+        return self.mvout_only
+
+    @property
+    def do_additional_mvout(self) -> bool:
+        """Internal compatibility alias."""
+        return self.additional_mvout
+
+    @property
+    def do_surface_leaving(self) -> bool:
+        """Internal compatibility alias."""
+        return self.surface_leaving
+
+    @property
+    def do_sl_isotropic(self) -> bool:
+        """Internal compatibility alias."""
+        return self.sl_isotropic
+
+    @property
+    def do_brdf_surface(self) -> bool:
+        """Internal compatibility alias."""
+        return self.brdf_surface
+
+    @property
     def effective_fo_optical_deltam_scaling(self) -> bool:
         """Returns FO optical delta-M control after applying inheritance."""
         return (
-            self.do_delta_scaling
-            if self.fo_optical_deltam_scaling is None
-            else self.fo_optical_deltam_scaling
+            self.delta_scaling
+            if self.fo_optical_delta_m_scaling is None
+            else self.fo_optical_delta_m_scaling
         )
 
     @property
     def effective_fo_thermal_source_deltam_scaling(self) -> bool:
         """Returns thermal FO source delta-M control after applying inheritance."""
-        if self.fo_thermal_source_deltam_scaling is not None:
-            return self.fo_thermal_source_deltam_scaling
+        if self.fo_thermal_source_delta_m_scaling is not None:
+            return self.fo_thermal_source_delta_m_scaling
         return False
+
+
+@dataclass(frozen=True)
+class TwoStreamEssBatchResult:
+    """Radiances from a batched public ``forward`` call.
+
+    By default batched calls expose the fast wavelength/column endpoint path.
+    When ``output_levels=True`` the result also includes upwelling radiance
+    profiles ordered from TOA to BOA along the final level axis.
+    """
+
+    radiance_2s: Any
+    radiance_total: Any
+    radiance_fo: Any | None = None
+    radiance_profile_2s: Any | None = None
+    radiance_profile_fo: Any | None = None
+    radiance_profile_total: Any | None = None
+    batch_shape: tuple[int, ...] = ()
+    geometry_shape: tuple[int, ...] = ()
+
+    @property
+    def radiance(self) -> Any:
+        """Preferred public radiance output."""
+        return self.radiance_total
+
+    @property
+    def radiance_profile(self) -> Any | None:
+        """Preferred public level radiance profile when available."""
+        return self.radiance_profile_total
 
 
 @dataclass(frozen=True)
@@ -143,7 +248,7 @@ class TwoStreamEssResult:
         is used on the main forward API.
     lattice_counts, lattice_axes
         Original lattice-grid metadata for results produced from
-        ``source_mode="solar_lat"``.
+        ``mode="solar_lattice"``.
     """
 
     intensity_toa: np.ndarray
@@ -175,6 +280,37 @@ class TwoStreamEssResult:
     fo_thermal_atmos_dn_boa: np.ndarray | None = None
     lattice_counts: tuple[int, int, int] | None = None
     lattice_axes: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+
+    @property
+    def radiance(self) -> np.ndarray:
+        """Preferred public radiance output."""
+        return self.radiance_total
+
+    @property
+    def radiance_2s(self) -> np.ndarray:
+        """Two-stream radiance at TOA."""
+        return self.intensity_toa
+
+    @property
+    def radiance_fo(self) -> np.ndarray | None:
+        """First-order radiance component when an FO solve was attached."""
+        if self.fo_intensity_total is not None:
+            return self.fo_intensity_total
+        return self.fo_thermal_total_up_toa
+
+    @property
+    def fo_radiance(self) -> np.ndarray | None:
+        """Compatibility alias for the preferred ``radiance_fo`` name."""
+        return self.radiance_fo
+
+    @property
+    def radiance_total(self) -> np.ndarray:
+        """Best available total radiance for the configured mode."""
+        if self.combined_intensity_toa is not None:
+            return self.combined_intensity_toa
+        if self.fo_thermal_total_up_toa is not None:
+            return self.intensity_toa + self.fo_thermal_total_up_toa
+        return self.intensity_toa
 
     def _lattice_shape(self) -> tuple[int, int, int]:
         """Returns the expected lattice shape for reshape helpers."""
@@ -321,6 +457,1625 @@ class TwoStreamEss:
         """Validates the named FO solar geometry mode."""
         if fo_geometry_mode not in {"eps", "rps"}:
             raise ValueError("fo_geometry_mode must be 'eps' or 'rps'")
+
+    @staticmethod
+    def _normalize_fo_geometry(geometry: str) -> str:
+        """Maps public FO geometry names to the internal EPS/RPS selector."""
+        try:
+            return _GEOMETRY_TO_FO_MODE[geometry]
+        except KeyError as exc:
+            allowed = "', '".join(sorted(_GEOMETRY_TO_FO_MODE))
+            raise ValueError(f"geometry must be one of: '{allowed}'") from exc
+
+    @staticmethod
+    def _as_public_1d(name: str, value: Any | None) -> np.ndarray | None:
+        """Normalizes scalar-or-1D public angle inputs."""
+        if value is None:
+            return None
+        arr = np.asarray(to_numpy(value), dtype=float)
+        if arr.ndim == 0:
+            return arr.reshape(1)
+        if arr.ndim != 1:
+            raise ValueError(f"{name} must be a scalar or 1D array")
+        return arr
+
+    def _normalize_public_angles(self, angles: Any | None) -> np.ndarray | None:
+        """Normalizes public ``angles`` before Fortran-style validation."""
+        if angles is None:
+            return None
+        arr = np.asarray(to_numpy(angles), dtype=float)
+        source_mode = self.options.source_mode
+        if source_mode == "solar_obs":
+            if arr.ndim == 1 and arr.size == 3:
+                return arr.reshape(1, 3)
+            if arr.ndim != 2 or arr.shape[1] != 3:
+                raise ValueError(
+                    "angles must have shape (3,) for one solar geometry or "
+                    "(ngeom, 3) for multiple solar geometries; columns are "
+                    "[sza, vza, raz] in degrees"
+                )
+            return arr
+        if source_mode == "thermal":
+            if arr.ndim == 0:
+                return arr.reshape(1)
+            if arr.ndim != 1:
+                raise ValueError("angles must be a scalar or 1D thermal view-zenith array")
+            return arr
+        if source_mode == "solar_lat":
+            if arr.ndim == 0:
+                return arr.reshape(1)
+            if arr.ndim != 1:
+                raise ValueError("angles must be a scalar or 1D solar-lattice view-angle array")
+            return arr
+        return arr
+
+    def _default_stream(self) -> float:
+        """Returns the public API default two-stream quadrature cosine."""
+        if self.options.source_mode == "thermal":
+            return 0.5
+        return 1.0 / math.sqrt(3.0)
+
+    def _translate_public_forward_args(
+        self,
+        *,
+        tau: Any,
+        ssa: Any,
+        g: Any,
+        z: Any | None,
+        angles: Any | None,
+        stream: float | None,
+        fbeam: Any,
+        delta_m_scaling: Any | None,
+        view_angles: Any | None,
+        beam_szas: Any | None,
+        relazms: Any | None,
+        planck: Any | None,
+        surface_planck: Any,
+        geometry: str,
+    ) -> dict[str, Any]:
+        """Translates friendly public names to the solver's internal names."""
+        source_mode = self.options.source_mode
+        user_obsgeoms = None
+        user_angles = None
+        user_relazms = None
+        angles = self._normalize_public_angles(angles)
+        view_angles = self._as_public_1d("view_angles", view_angles)
+        beam_szas = self._as_public_1d("beam_szas", beam_szas)
+        relazms = self._as_public_1d("relazms", relazms)
+
+        if source_mode == "solar_obs":
+            if angles is None:
+                raise ValueError("angles are required for mode='solar'")
+            user_obsgeoms = angles
+        elif source_mode == "solar_lat":
+            user_angles = view_angles if view_angles is not None else angles
+            user_relazms = relazms
+            if beam_szas is None:
+                raise ValueError("beam_szas is required for mode='solar_lattice'")
+            if user_angles is None:
+                raise ValueError("angles or view_angles are required for mode='solar_lattice'")
+            if user_relazms is None:
+                raise ValueError("relazms is required for mode='solar_lattice'")
+        elif source_mode == "thermal":
+            user_angles = view_angles if view_angles is not None else angles
+            if user_angles is None:
+                raise ValueError("angles are required for mode='thermal'")
+            if planck is None:
+                raise ValueError("planck is required for mode='thermal'")
+
+        return {
+            "tau_arr": tau,
+            "omega_arr": ssa,
+            "asymm_arr": g,
+            "height_grid": z,
+            "user_obsgeoms": user_obsgeoms,
+            "user_angles": user_angles,
+            "beam_szas": beam_szas,
+            "user_relazms": user_relazms,
+            "stream_value": self._default_stream() if stream is None else stream,
+            "flux_factor": fbeam,
+            "d2s_scaling": delta_m_scaling,
+            "thermal_bb_input": planck,
+            "surfbb": surface_planck,
+            "fo_geometry_mode": self._normalize_fo_geometry(geometry),
+        }
+
+    def _public_forward_is_batched(self, tau_arr: Any) -> bool:
+        """Returns true when ``tau`` has leading wavelength/column dimensions."""
+        shape = getattr(tau_arr, "shape", None)
+        if shape is None:
+            shape = np.asarray(tau_arr).shape
+        shape = tuple(int(dim) for dim in shape)
+        return len(shape) > 1 and shape[-1] == self.options.n_layers
+
+    @staticmethod
+    def _require_finite(name: str, value: np.ndarray) -> None:
+        """Raises a public error when a batched input contains non-finite values."""
+        if not np.all(np.isfinite(value)):
+            raise ValueError(f"{name} must be finite")
+
+    @staticmethod
+    def _broadcast_batch_layers(
+        name: str,
+        value: Any | None,
+        *,
+        batch_shape: tuple[int, ...],
+        width: int,
+        default: float | None = None,
+    ) -> np.ndarray:
+        """Broadcasts a layer-shaped public input to flattened batch rows."""
+        target = batch_shape + (width,)
+        if value is None:
+            if default is None:
+                raise ValueError(f"{name} is required")
+            arr = np.full(target, float(default), dtype=float)
+        else:
+            arr = np.asarray(to_numpy(value), dtype=float)
+            if arr.shape == (width,):
+                arr = np.broadcast_to(arr, target)
+            else:
+                try:
+                    arr = np.broadcast_to(arr, target)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{name} must have shape {target} or ({width},) for batched forward"
+                    ) from exc
+        TwoStreamEss._require_finite(name, arr)
+        return np.ascontiguousarray(arr.reshape(-1, width), dtype=float)
+
+    @staticmethod
+    def _broadcast_batch_scalar(
+        name: str,
+        value: Any,
+        *,
+        batch_shape: tuple[int, ...],
+    ) -> np.ndarray:
+        """Broadcasts a scalar-or-batch public input to flattened batch rows."""
+        arr = np.asarray(to_numpy(value), dtype=float)
+        try:
+            broadcast = np.broadcast_to(arr, batch_shape)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be scalar or broadcastable to {batch_shape}") from exc
+        TwoStreamEss._require_finite(name, broadcast)
+        return np.ascontiguousarray(broadcast.reshape(-1), dtype=float)
+
+    @staticmethod
+    def _require_finite_torch(name: str, value: Any) -> None:
+        """Raises a public error when a torch batch input contains non-finite values."""
+        from .core.backend import _load_torch
+
+        torch = _load_torch()
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("backend='torch' requires torch to be installed")
+        if not bool(torch.all(torch.isfinite(value)).item()):
+            raise ValueError(f"{name} must be finite")
+
+    @staticmethod
+    def _broadcast_batch_layers_torch(
+        name: str,
+        value: Any | None,
+        *,
+        context: TorchContext,
+        batch_shape: tuple[int, ...],
+        width: int,
+        default: float | None = None,
+    ):
+        """Broadcasts a layer-shaped public input to flattened torch batch rows."""
+        from .core.backend import _load_torch
+
+        torch = _load_torch()
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("backend='torch' requires torch to be installed")
+        target = batch_shape + (width,)
+        if value is None:
+            if default is None:
+                raise ValueError(f"{name} is required")
+            tensor = torch.full(target, float(default), dtype=context.dtype, device=context.device)
+        else:
+            tensor = value_to_torch(value, context)
+            if tuple(tensor.shape) == (width,):
+                tensor = torch.broadcast_to(tensor, target)
+            else:
+                try:
+                    tensor = torch.broadcast_to(tensor, target)
+                except RuntimeError as exc:
+                    raise ValueError(
+                        f"{name} must have shape {target} or ({width},) for batched forward"
+                    ) from exc
+        TwoStreamEss._require_finite_torch(name, tensor)
+        return tensor.reshape(-1, width).contiguous()
+
+    @staticmethod
+    def _broadcast_batch_scalar_torch(
+        name: str,
+        value: Any,
+        *,
+        context: TorchContext,
+        batch_shape: tuple[int, ...],
+    ):
+        """Broadcasts a scalar-or-batch public input to flattened torch rows."""
+        from .core.backend import _load_torch
+
+        torch = _load_torch()
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("backend='torch' requires torch to be installed")
+        tensor = value_to_torch(value, context)
+        try:
+            tensor = torch.broadcast_to(tensor, batch_shape)
+        except RuntimeError as exc:
+            raise ValueError(f"{name} must be scalar or broadcastable to {batch_shape}") from exc
+        TwoStreamEss._require_finite_torch(name, tensor)
+        return tensor.reshape(-1).contiguous()
+
+    def _batch_bvp_engine(self) -> str:
+        """Maps public BVP solver names to the optimized batch-kernel names."""
+        if self.options.bvp_solver == "scipy":
+            return "auto"
+        if self.options.bvp_solver == "pentadiag":
+            return "pentadiagonal"
+        return self.options.bvp_solver
+
+    def _torch_batch_bvp_engine(self) -> str:
+        """Maps public BVP solver names to torch batch-kernel names."""
+        engine = self._batch_bvp_engine()
+        if engine == "banded":
+            return "block"
+        return engine
+
+    @staticmethod
+    def _solar_batch_chunk_size(n_rows: int, n_layers: int) -> int:
+        """Returns a memory-friendly chunk size for large solar endpoint batches."""
+        _ = n_layers
+        return min(n_rows, 30_000)
+
+    @staticmethod
+    def _reshape_endpoint(
+        values_by_geometry: list[np.ndarray],
+        *,
+        batch_shape: tuple[int, ...],
+    ) -> tuple[np.ndarray, tuple[int, ...]]:
+        """Reshapes flattened endpoint rows back to public batch/geometry shape."""
+        if len(values_by_geometry) == 1:
+            return values_by_geometry[0].reshape(batch_shape), ()
+        stacked = np.stack(values_by_geometry, axis=-1)
+        return stacked.reshape(batch_shape + (len(values_by_geometry),)), (len(values_by_geometry),)
+
+    @staticmethod
+    def _reshape_endpoint_torch(
+        values_by_geometry: list[Any],
+        *,
+        batch_shape: tuple[int, ...],
+    ) -> tuple[Any, tuple[int, ...]]:
+        """Reshapes flattened torch endpoint rows back to public batch/geometry shape."""
+        if len(values_by_geometry) == 1:
+            return values_by_geometry[0].reshape(batch_shape), ()
+        from .core.backend import _load_torch
+
+        torch = _load_torch()
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("backend='torch' requires torch to be installed")
+        stacked = torch.stack(values_by_geometry, dim=-1)
+        return stacked.reshape(batch_shape + (len(values_by_geometry),)), (len(values_by_geometry),)
+
+    @staticmethod
+    def _reshape_profile(
+        values_by_geometry: list[np.ndarray],
+        *,
+        batch_shape: tuple[int, ...],
+    ) -> tuple[np.ndarray, tuple[int, ...]]:
+        """Reshapes flattened profile rows back to public batch/geometry shape."""
+        n_levels = values_by_geometry[0].shape[-1]
+        if len(values_by_geometry) == 1:
+            return values_by_geometry[0].reshape(batch_shape + (n_levels,)), ()
+        stacked = np.stack(values_by_geometry, axis=-2)
+        return (
+            stacked.reshape(batch_shape + (len(values_by_geometry), n_levels)),
+            (len(values_by_geometry),),
+        )
+
+    @staticmethod
+    def _reshape_profile_torch(
+        values_by_geometry: list[Any],
+        *,
+        batch_shape: tuple[int, ...],
+    ) -> tuple[Any, tuple[int, ...]]:
+        """Reshapes flattened torch profile rows back to public batch/geometry shape."""
+        from .core.backend import _load_torch
+
+        torch = _load_torch()
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("backend='torch' requires torch to be installed")
+        n_levels = int(values_by_geometry[0].shape[-1])
+        if len(values_by_geometry) == 1:
+            return values_by_geometry[0].reshape(batch_shape + (n_levels,)), ()
+        stacked = torch.stack(values_by_geometry, dim=-2)
+        return (
+            stacked.reshape(batch_shape + (len(values_by_geometry), n_levels)),
+            (len(values_by_geometry),),
+        )
+
+    def _batched_solar_fo_scatter_torch(
+        self,
+        *,
+        fo_exact_scatter: Any,
+        context: TorchContext,
+        batch_shape: tuple[int, ...],
+        geom_index: int,
+        n_geometries: int,
+    ):
+        """Returns the exact-scatter torch batch slice for one solar geometry."""
+        n_layers = self.options.n_layers
+        scatter = value_to_torch(fo_exact_scatter, context)
+        if n_geometries == 1:
+            return self._broadcast_batch_layers_torch(
+                "fo_exact_scatter",
+                scatter,
+                context=context,
+                batch_shape=batch_shape,
+                width=n_layers,
+            )
+        leading = batch_shape
+        shape_by_geom_layer = leading + (n_geometries, n_layers)
+        shape_by_layer_geom = leading + (n_layers, n_geometries)
+        if tuple(scatter.shape) == shape_by_geom_layer:
+            selected = scatter.reshape((-1, n_geometries, n_layers))[:, geom_index, :]
+        elif tuple(scatter.shape) == shape_by_layer_geom:
+            selected = scatter.reshape((-1, n_layers, n_geometries))[:, :, geom_index]
+        else:
+            raise ValueError(
+                "fo_exact_scatter for multiple solar geometries must have shape "
+                f"{shape_by_geom_layer} or {shape_by_layer_geom}"
+            )
+        self._require_finite_torch("fo_exact_scatter", selected)
+        return selected.contiguous()
+
+    def _batched_solar_fo_scatter(
+        self,
+        *,
+        fo_exact_scatter: Any,
+        batch_shape: tuple[int, ...],
+        geom_index: int,
+        n_geometries: int,
+    ) -> np.ndarray:
+        """Returns the exact-scatter batch slice for one solar geometry."""
+        n_layers = self.options.n_layers
+        scatter = np.asarray(to_numpy(fo_exact_scatter), dtype=float)
+        if n_geometries == 1:
+            return self._broadcast_batch_layers(
+                "fo_exact_scatter",
+                scatter,
+                batch_shape=batch_shape,
+                width=n_layers,
+            )
+        leading = batch_shape
+        shape_by_geom_layer = leading + (n_geometries, n_layers)
+        shape_by_layer_geom = leading + (n_layers, n_geometries)
+        if scatter.shape == shape_by_geom_layer:
+            selected = scatter.reshape((-1, n_geometries, n_layers))[:, geom_index, :]
+        elif scatter.shape == shape_by_layer_geom:
+            selected = scatter.reshape((-1, n_layers, n_geometries))[:, :, geom_index]
+        else:
+            raise ValueError(
+                "fo_exact_scatter for multiple solar geometries must have shape "
+                f"{shape_by_geom_layer} or {shape_by_layer_geom}"
+            )
+        self._require_finite("fo_exact_scatter", selected)
+        return np.ascontiguousarray(selected, dtype=float)
+
+    def _forward_fo_solar_obs_batched_numpy(
+        self,
+        *,
+        mapped: dict[str, Any],
+        albedo: Any,
+        earth_radius: float,
+        nfine: int,
+        fo_exact_scatter: Any | None,
+    ) -> FoSolarObsResult:
+        """Runs the FO-only solar observation batch path."""
+        from .core.fo_solar_obs_batch_numpy import (
+            fo_solar_obs_batch_precompute,
+            solve_fo_solar_obs_eps_batch_numpy,
+        )
+
+        if fo_exact_scatter is None:
+            raise ValueError(
+                "batched solar forward_fo requires fo_exact_scatter with the same "
+                "leading batch dimensions as tau"
+            )
+        if self.options.do_plane_parallel or mapped["fo_geometry_mode"] != "eps":
+            raise ValueError("batched solar forward_fo currently supports pseudo_spherical only")
+        n_layers = self.options.n_layers
+        tau_arr = np.asarray(to_numpy(mapped["tau_arr"]), dtype=float)
+        if tau_arr.ndim <= 1 or tau_arr.shape[-1] != n_layers:
+            raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward_fo")
+        if mapped["height_grid"] is None:
+            raise ValueError("z is required for batched solar forward_fo")
+        batch_shape = tuple(tau_arr.shape[:-1])
+        tau = np.ascontiguousarray(tau_arr.reshape(-1, n_layers), dtype=float)
+        omega = self._broadcast_batch_layers(
+            "ssa", mapped["omega_arr"], batch_shape=batch_shape, width=n_layers
+        )
+        scaling = self._broadcast_batch_layers(
+            "delta_m_scaling",
+            mapped["d2s_scaling"],
+            batch_shape=batch_shape,
+            width=n_layers,
+            default=0.0,
+        )
+        albedo_rows = self._broadcast_batch_scalar("albedo", albedo, batch_shape=batch_shape)
+        fbeam_rows = self._broadcast_batch_scalar(
+            "fbeam", mapped["flux_factor"], batch_shape=batch_shape
+        )
+        self._require_finite("tau", tau)
+        height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
+        prepared = self._prepare_forward(
+            tau_arr=np.zeros(n_layers, dtype=float),
+            omega_arr=np.zeros(n_layers, dtype=float),
+            asymm_arr=np.zeros(n_layers, dtype=float),
+            height_grid=height_grid,
+            user_obsgeoms=mapped["user_obsgeoms"],
+            stream_value=mapped["stream_value"],
+            flux_factor=1.0,
+            albedo=0.0,
+            d2s_scaling=np.zeros(n_layers, dtype=float),
+            earth_radius=earth_radius,
+        )
+        want_profiles = self.options.do_level_output
+        total_by_geometry: list[np.ndarray] = []
+        ss_by_geometry: list[np.ndarray] = []
+        db_by_geometry: list[np.ndarray] = []
+        total_profile_by_geometry: list[np.ndarray] = []
+        ss_profile_by_geometry: list[np.ndarray] = []
+        db_profile_by_geometry: list[np.ndarray] = []
+        mu0_by_geometry: list[np.ndarray] = []
+        mu1_by_geometry: list[np.ndarray] = []
+        cosscat_by_geometry: list[np.ndarray] = []
+        do_nadir_by_geometry: list[np.ndarray] = []
+        n_rows = tau.shape[0]
+        chunk_size = self._solar_batch_chunk_size(n_rows, n_layers)
+        for geom_index, user_obsgeom in enumerate(prepared.user_obsgeoms):
+            scatter = self._batched_solar_fo_scatter(
+                fo_exact_scatter=fo_exact_scatter,
+                batch_shape=batch_shape,
+                geom_index=geom_index,
+                n_geometries=prepared.user_obsgeoms.shape[0],
+            )
+            precomputed = fo_solar_obs_batch_precompute(
+                user_obsgeom=user_obsgeom,
+                heights=height_grid,
+                earth_radius=earth_radius,
+                nfine=nfine,
+            )
+            total_rows = np.empty(n_rows, dtype=float)
+            ss_rows = np.empty(n_rows, dtype=float)
+            db_rows = np.empty(n_rows, dtype=float)
+            total_profile_rows = (
+                np.empty((n_rows, n_layers + 1), dtype=float) if want_profiles else None
+            )
+            ss_profile_rows = (
+                np.empty((n_rows, n_layers + 1), dtype=float) if want_profiles else None
+            )
+            db_profile_rows = (
+                np.empty((n_rows, n_layers + 1), dtype=float) if want_profiles else None
+            )
+            for start in range(0, n_rows, chunk_size):
+                stop = min(start + chunk_size, n_rows)
+                row_slice = slice(start, stop)
+                chunk = solve_fo_solar_obs_eps_batch_numpy(
+                    tau=tau[row_slice],
+                    omega=omega[row_slice],
+                    scaling=scaling[row_slice],
+                    albedo=albedo_rows[row_slice],
+                    flux_factor=fbeam_rows[row_slice],
+                    exact_scatter=scatter[row_slice],
+                    precomputed=precomputed,
+                    return_profile=want_profiles,
+                    return_components=True,
+                )
+                total_rows[row_slice] = chunk.total
+                ss_rows[row_slice] = chunk.single_scatter
+                db_rows[row_slice] = chunk.direct_beam
+                if want_profiles:
+                    total_profile_rows[row_slice] = chunk.total_profile
+                    ss_profile_rows[row_slice] = chunk.single_scatter_profile
+                    db_profile_rows[row_slice] = chunk.direct_beam_profile
+            sza = math.radians(float(user_obsgeom[0]))
+            vza = math.radians(float(user_obsgeom[1]))
+            azm = math.radians(float(user_obsgeom[2]))
+            mu0 = math.cos(sza)
+            mu1 = math.cos(vza)
+            if math.isclose(float(user_obsgeom[0]), 0.0):
+                cosscat = -mu1 if not math.isclose(mu1, 0.0) else 0.0
+            else:
+                cosscat = -(math.cos(vza) * math.cos(sza)) + math.sin(vza) * math.sin(
+                    sza
+                ) * math.cos(azm)
+            total_by_geometry.append(total_rows)
+            ss_by_geometry.append(ss_rows)
+            db_by_geometry.append(db_rows)
+            if want_profiles:
+                total_profile_by_geometry.append(total_profile_rows)
+                ss_profile_by_geometry.append(ss_profile_rows)
+                db_profile_by_geometry.append(db_profile_rows)
+            mu0_by_geometry.append(np.full(n_rows, mu0, dtype=float))
+            mu1_by_geometry.append(np.full(n_rows, mu1, dtype=float))
+            cosscat_by_geometry.append(np.full(n_rows, cosscat, dtype=float))
+            do_nadir_by_geometry.append(
+                np.full(n_rows, bool(math.isclose(float(user_obsgeom[1]), 0.0)), dtype=bool)
+            )
+        total, _geometry_shape = self._reshape_endpoint(total_by_geometry, batch_shape=batch_shape)
+        ss, _ = self._reshape_endpoint(ss_by_geometry, batch_shape=batch_shape)
+        db, _ = self._reshape_endpoint(db_by_geometry, batch_shape=batch_shape)
+        mu0, _ = self._reshape_endpoint(mu0_by_geometry, batch_shape=batch_shape)
+        mu1, _ = self._reshape_endpoint(mu1_by_geometry, batch_shape=batch_shape)
+        cosscat, _ = self._reshape_endpoint(cosscat_by_geometry, batch_shape=batch_shape)
+        do_nadir, _ = self._reshape_endpoint(do_nadir_by_geometry, batch_shape=batch_shape)
+        if want_profiles:
+            total_profile, _ = self._reshape_profile(
+                total_profile_by_geometry,
+                batch_shape=batch_shape,
+            )
+            ss_profile, _ = self._reshape_profile(ss_profile_by_geometry, batch_shape=batch_shape)
+            db_profile, _ = self._reshape_profile(db_profile_by_geometry, batch_shape=batch_shape)
+        else:
+            total_profile = None
+            ss_profile = None
+            db_profile = None
+        return FoSolarObsResult(
+            intensity_total=total,
+            intensity_ss=ss,
+            intensity_db=db,
+            mu0=mu0,
+            mu1=mu1,
+            cosscat=cosscat,
+            do_nadir=do_nadir,
+            intensity_total_profile=total_profile,
+            intensity_ss_profile=ss_profile,
+            intensity_db_profile=db_profile,
+        )
+
+    def _forward_fo_solar_obs_batched_torch(
+        self,
+        *,
+        mapped: dict[str, Any],
+        albedo: Any,
+        earth_radius: float,
+        nfine: int,
+        fo_exact_scatter: Any | None,
+    ) -> FoSolarObsResult:
+        """Runs the FO-only solar observation batch path on torch tensors."""
+        from .core.backend import _load_torch
+        from .core.fo_solar_obs_batch_numpy import fo_solar_obs_batch_precompute
+        from .core.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
+
+        torch = _load_torch()
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("backend='torch' requires torch to be installed")
+        if fo_exact_scatter is None:
+            raise ValueError(
+                "batched solar forward_fo requires fo_exact_scatter with the same "
+                "leading batch dimensions as tau"
+            )
+        if self.options.do_plane_parallel or mapped["fo_geometry_mode"] != "eps":
+            raise ValueError("batched solar forward_fo currently supports pseudo_spherical only")
+        context = self._select_torch_context(
+            detect_torch_context(
+                mapped["tau_arr"],
+                mapped["omega_arr"],
+                mapped["d2s_scaling"],
+                albedo,
+                mapped["flux_factor"],
+                fo_exact_scatter,
+            )
+        )
+        n_layers = self.options.n_layers
+        tau_arr = value_to_torch(mapped["tau_arr"], context)
+        if tau_arr.ndim <= 1 or int(tau_arr.shape[-1]) != n_layers:
+            raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward_fo")
+        if mapped["height_grid"] is None:
+            raise ValueError("z is required for batched solar forward_fo")
+        batch_shape = tuple(int(dim) for dim in tau_arr.shape[:-1])
+        tau = tau_arr.reshape(-1, n_layers).contiguous()
+        omega = self._broadcast_batch_layers_torch(
+            "ssa",
+            mapped["omega_arr"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+        )
+        scaling = self._broadcast_batch_layers_torch(
+            "delta_m_scaling",
+            mapped["d2s_scaling"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+            default=0.0,
+        )
+        albedo_rows = self._broadcast_batch_scalar_torch(
+            "albedo", albedo, context=context, batch_shape=batch_shape
+        )
+        fbeam_rows = self._broadcast_batch_scalar_torch(
+            "fbeam", mapped["flux_factor"], context=context, batch_shape=batch_shape
+        )
+        self._require_finite_torch("tau", tau)
+        height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
+        prepared = self._prepare_forward(
+            tau_arr=np.zeros(n_layers, dtype=float),
+            omega_arr=np.zeros(n_layers, dtype=float),
+            asymm_arr=np.zeros(n_layers, dtype=float),
+            height_grid=height_grid,
+            user_obsgeoms=mapped["user_obsgeoms"],
+            stream_value=mapped["stream_value"],
+            flux_factor=1.0,
+            albedo=0.0,
+            d2s_scaling=np.zeros(n_layers, dtype=float),
+            earth_radius=earth_radius,
+        )
+        want_profiles = self.options.do_level_output
+        total_by_geometry = []
+        ss_by_geometry = []
+        db_by_geometry = []
+        total_profile_by_geometry = []
+        ss_profile_by_geometry = []
+        db_profile_by_geometry = []
+        mu0_by_geometry = []
+        mu1_by_geometry = []
+        cosscat_by_geometry = []
+        do_nadir_by_geometry = []
+        n_rows = int(tau.shape[0])
+        chunk_size = self._solar_batch_chunk_size(n_rows, n_layers)
+        with self._torch_grad_context():
+            for geom_index, user_obsgeom in enumerate(prepared.user_obsgeoms):
+                scatter = self._batched_solar_fo_scatter_torch(
+                    fo_exact_scatter=fo_exact_scatter,
+                    context=context,
+                    batch_shape=batch_shape,
+                    geom_index=geom_index,
+                    n_geometries=prepared.user_obsgeoms.shape[0],
+                )
+                precomputed = fo_solar_obs_batch_precompute(
+                    user_obsgeom=user_obsgeom,
+                    heights=height_grid,
+                    earth_radius=earth_radius,
+                    nfine=nfine,
+                )
+                total_chunks = []
+                ss_chunks = []
+                db_chunks = []
+                total_profile_chunks = []
+                ss_profile_chunks = []
+                db_profile_chunks = []
+                for start in range(0, n_rows, chunk_size):
+                    stop = min(start + chunk_size, n_rows)
+                    row_slice = slice(start, stop)
+                    chunk = solve_fo_solar_obs_eps_batch_torch(
+                        tau=tau[row_slice],
+                        omega=omega[row_slice],
+                        scaling=scaling[row_slice],
+                        albedo=albedo_rows[row_slice],
+                        flux_factor=fbeam_rows[row_slice],
+                        exact_scatter=scatter[row_slice],
+                        precomputed=precomputed,
+                        dtype=context.dtype,
+                        device=context.device,
+                        return_profile=want_profiles,
+                        return_components=True,
+                    )
+                    total_chunks.append(chunk.total)
+                    ss_chunks.append(chunk.single_scatter)
+                    db_chunks.append(chunk.direct_beam)
+                    if want_profiles:
+                        total_profile_chunks.append(chunk.total_profile)
+                        ss_profile_chunks.append(chunk.single_scatter_profile)
+                        db_profile_chunks.append(chunk.direct_beam_profile)
+                sza = math.radians(float(user_obsgeom[0]))
+                vza = math.radians(float(user_obsgeom[1]))
+                azm = math.radians(float(user_obsgeom[2]))
+                mu0_value = math.cos(sza)
+                mu1_value = math.cos(vza)
+                if math.isclose(float(user_obsgeom[0]), 0.0):
+                    cosscat_value = -mu1_value if not math.isclose(mu1_value, 0.0) else 0.0
+                else:
+                    cosscat_value = -(math.cos(vza) * math.cos(sza)) + math.sin(vza) * math.sin(
+                        sza
+                    ) * math.cos(azm)
+                total_by_geometry.append(torch.cat(total_chunks, dim=0))
+                ss_by_geometry.append(torch.cat(ss_chunks, dim=0))
+                db_by_geometry.append(torch.cat(db_chunks, dim=0))
+                if want_profiles:
+                    total_profile_by_geometry.append(torch.cat(total_profile_chunks, dim=0))
+                    ss_profile_by_geometry.append(torch.cat(ss_profile_chunks, dim=0))
+                    db_profile_by_geometry.append(torch.cat(db_profile_chunks, dim=0))
+                mu0_by_geometry.append(
+                    torch.full((n_rows,), mu0_value, dtype=context.dtype, device=context.device)
+                )
+                mu1_by_geometry.append(
+                    torch.full((n_rows,), mu1_value, dtype=context.dtype, device=context.device)
+                )
+                cosscat_by_geometry.append(
+                    torch.full((n_rows,), cosscat_value, dtype=context.dtype, device=context.device)
+                )
+                do_nadir_by_geometry.append(
+                    torch.full(
+                        (n_rows,),
+                        bool(math.isclose(float(user_obsgeom[1]), 0.0)),
+                        dtype=torch.bool,
+                        device=context.device,
+                    )
+                )
+            total, _geometry_shape = self._reshape_endpoint_torch(
+                total_by_geometry,
+                batch_shape=batch_shape,
+            )
+            ss, _ = self._reshape_endpoint_torch(ss_by_geometry, batch_shape=batch_shape)
+            db, _ = self._reshape_endpoint_torch(db_by_geometry, batch_shape=batch_shape)
+            mu0, _ = self._reshape_endpoint_torch(mu0_by_geometry, batch_shape=batch_shape)
+            mu1, _ = self._reshape_endpoint_torch(mu1_by_geometry, batch_shape=batch_shape)
+            cosscat, _ = self._reshape_endpoint_torch(
+                cosscat_by_geometry,
+                batch_shape=batch_shape,
+            )
+            do_nadir, _ = self._reshape_endpoint_torch(
+                do_nadir_by_geometry,
+                batch_shape=batch_shape,
+            )
+            if want_profiles:
+                total_profile, _ = self._reshape_profile_torch(
+                    total_profile_by_geometry,
+                    batch_shape=batch_shape,
+                )
+                ss_profile, _ = self._reshape_profile_torch(
+                    ss_profile_by_geometry,
+                    batch_shape=batch_shape,
+                )
+                db_profile, _ = self._reshape_profile_torch(
+                    db_profile_by_geometry,
+                    batch_shape=batch_shape,
+                )
+            else:
+                total_profile = None
+                ss_profile = None
+                db_profile = None
+        return FoSolarObsResult(
+            intensity_total=total,
+            intensity_ss=ss,
+            intensity_db=db,
+            mu0=mu0,
+            mu1=mu1,
+            cosscat=cosscat,
+            do_nadir=do_nadir,
+            intensity_total_profile=total_profile,
+            intensity_ss_profile=ss_profile,
+            intensity_db_profile=db_profile,
+        )
+
+    def _forward_batched(
+        self,
+        *,
+        mapped: dict[str, Any],
+        albedo: Any,
+        brdf: Any | None,
+        surface_leaving: Any | None,
+        emissivity: Any,
+        earth_radius: float,
+        include_fo: bool,
+        fo_nfine: int,
+        fo_exact_scatter: Any | None,
+    ) -> TwoStreamEssBatchResult:
+        """Runs the public batch path, keeping fast endpoint kernels as default."""
+        if (
+            not self.options.do_upwelling
+            or self.options.do_dnwelling
+            or self.options.do_mvout_only
+            or self.options.do_additional_mvout
+        ):
+            raise ValueError(
+                "batched forward currently supports the default upwelling TOA endpoint only"
+            )
+        if brdf is not None or surface_leaving is not None:
+            raise ValueError("batched forward does not support brdf or surface_leaving inputs")
+        if self.options.do_brdf_surface or self.options.do_surface_leaving:
+            raise ValueError(
+                "batched forward does not support brdf_surface or surface_leaving options"
+            )
+        if self.options.backend == "torch":
+            if self.options.source_mode == "solar_obs":
+                return self._forward_solar_obs_batched_torch(
+                    mapped=mapped,
+                    albedo=albedo,
+                    earth_radius=earth_radius,
+                    include_fo=include_fo,
+                    fo_nfine=fo_nfine,
+                    fo_exact_scatter=fo_exact_scatter,
+                )
+            if self.options.source_mode == "thermal":
+                return self._forward_thermal_batched_torch(
+                    mapped=mapped,
+                    albedo=albedo,
+                    emissivity=emissivity,
+                    earth_radius=earth_radius,
+                    include_fo=include_fo,
+                    fo_nfine=fo_nfine,
+                )
+        elif self.options.backend != "numpy":
+            raise NotImplementedError(
+                "batched forward currently supports backend='numpy' or 'torch'"
+            )
+        if self.options.source_mode == "solar_obs":
+            return self._forward_solar_obs_batched_numpy(
+                mapped=mapped,
+                albedo=albedo,
+                earth_radius=earth_radius,
+                include_fo=include_fo,
+                fo_nfine=fo_nfine,
+                fo_exact_scatter=fo_exact_scatter,
+            )
+        if self.options.source_mode == "thermal":
+            return self._forward_thermal_batched_numpy(
+                mapped=mapped,
+                albedo=albedo,
+                emissivity=emissivity,
+                earth_radius=earth_radius,
+                include_fo=include_fo,
+                fo_nfine=fo_nfine,
+            )
+        raise NotImplementedError(
+            "batched forward is currently implemented for mode='solar' and mode='thermal'"
+        )
+
+    def _forward_solar_obs_batched_numpy(
+        self,
+        *,
+        mapped: dict[str, Any],
+        albedo: Any,
+        earth_radius: float,
+        include_fo: bool,
+        fo_nfine: int,
+        fo_exact_scatter: Any | None,
+    ) -> TwoStreamEssBatchResult:
+        """Runs the solar observation-geometry public batch path."""
+        from .core.fo_solar_obs_batch_numpy import (
+            fo_solar_obs_batch_precompute,
+            solve_fo_solar_obs_eps_batch_numpy,
+        )
+        from .core.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
+
+        if include_fo and fo_exact_scatter is None:
+            raise ValueError(
+                "batched solar include_fo=True requires fo_exact_scatter with the "
+                "same leading batch dimensions as tau"
+            )
+        if include_fo and (self.options.do_plane_parallel or mapped["fo_geometry_mode"] != "eps"):
+            raise ValueError(
+                "batched solar include_fo=True currently supports pseudo_spherical geometry only"
+            )
+        n_layers = self.options.n_layers
+        tau_arr = np.asarray(to_numpy(mapped["tau_arr"]), dtype=float)
+        if tau_arr.ndim <= 1 or tau_arr.shape[-1] != n_layers:
+            raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward")
+        batch_shape = tuple(tau_arr.shape[:-1])
+        tau = np.ascontiguousarray(tau_arr.reshape(-1, n_layers), dtype=float)
+        omega = self._broadcast_batch_layers(
+            "ssa", mapped["omega_arr"], batch_shape=batch_shape, width=n_layers
+        )
+        asymm = self._broadcast_batch_layers(
+            "g", mapped["asymm_arr"], batch_shape=batch_shape, width=n_layers
+        )
+        scaling = self._broadcast_batch_layers(
+            "delta_m_scaling",
+            mapped["d2s_scaling"],
+            batch_shape=batch_shape,
+            width=n_layers,
+            default=0.0,
+        )
+        albedo_rows = self._broadcast_batch_scalar("albedo", albedo, batch_shape=batch_shape)
+        fbeam_rows = self._broadcast_batch_scalar(
+            "fbeam", mapped["flux_factor"], batch_shape=batch_shape
+        )
+        self._require_finite("tau", tau)
+        height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
+        prepared = self._prepare_forward(
+            tau_arr=np.zeros(n_layers, dtype=float),
+            omega_arr=np.zeros(n_layers, dtype=float),
+            asymm_arr=np.zeros(n_layers, dtype=float),
+            height_grid=height_grid,
+            user_obsgeoms=mapped["user_obsgeoms"],
+            stream_value=mapped["stream_value"],
+            flux_factor=1.0,
+            albedo=0.0,
+            d2s_scaling=np.zeros(n_layers, dtype=float),
+            earth_radius=earth_radius,
+        )
+        geometry = prepared.geometry
+        want_profiles = self.options.do_level_output
+        two_stream_by_geometry: list[np.ndarray] = []
+        fo_by_geometry: list[np.ndarray] = []
+        two_stream_profile_by_geometry: list[np.ndarray] = []
+        fo_profile_by_geometry: list[np.ndarray] = []
+        for geom_index, user_obsgeom in enumerate(prepared.user_obsgeoms):
+            if self.options.do_plane_parallel:
+                secant = float(geometry.average_secant_pp[geom_index])
+                chapman = np.triu(np.full((n_layers, n_layers), secant, dtype=float))
+            else:
+                chapman = geometry.chapman_factors[:, :, geom_index]
+            n_rows = tau.shape[0]
+            chunk_size = self._solar_batch_chunk_size(n_rows, n_layers)
+            two_stream_rows = np.empty(n_rows, dtype=float)
+            fo_rows = np.empty(n_rows, dtype=float) if include_fo else None
+            two_stream_profile_rows = (
+                np.empty((n_rows, n_layers + 1), dtype=float) if want_profiles else None
+            )
+            fo_profile_rows = (
+                np.empty((n_rows, n_layers + 1), dtype=float)
+                if include_fo and want_profiles
+                else None
+            )
+            scatter = None
+            precomputed = None
+            if include_fo:
+                scatter = self._batched_solar_fo_scatter(
+                    fo_exact_scatter=fo_exact_scatter,
+                    batch_shape=batch_shape,
+                    geom_index=geom_index,
+                    n_geometries=prepared.user_obsgeoms.shape[0],
+                )
+                precomputed = fo_solar_obs_batch_precompute(
+                    user_obsgeom=user_obsgeom,
+                    heights=height_grid,
+                    earth_radius=earth_radius,
+                    nfine=fo_nfine,
+                )
+            for start in range(0, n_rows, chunk_size):
+                stop = min(start + chunk_size, n_rows)
+                row_slice = slice(start, stop)
+                two_stream_chunk = solve_solar_obs_batch_numpy(
+                    tau=tau[row_slice],
+                    omega=omega[row_slice],
+                    asymm=asymm[row_slice],
+                    scaling=scaling[row_slice],
+                    albedo=albedo_rows[row_slice],
+                    flux_factor=fbeam_rows[row_slice],
+                    stream_value=prepared.stream_value,
+                    chapman=chapman,
+                    x0=float(geometry.x0[geom_index]),
+                    user_stream=float(geometry.user_streams[geom_index]),
+                    user_secant=float(geometry.user_secants[geom_index]),
+                    azmfac=float(geometry.azmfac[geom_index]),
+                    px11=float(geometry.px11),
+                    pxsq=geometry.pxsq,
+                    px0x=geometry.px0x[geom_index],
+                    ulp=float(geometry.ulp[geom_index]),
+                    bvp_engine=self._batch_bvp_engine(),
+                    return_profile=want_profiles,
+                )
+                if want_profiles:
+                    two_stream_profile_rows[row_slice] = two_stream_chunk
+                    two_stream_rows[row_slice] = two_stream_chunk[:, 0]
+                else:
+                    two_stream_rows[row_slice] = two_stream_chunk
+                if include_fo:
+                    fo_chunk = solve_fo_solar_obs_eps_batch_numpy(
+                        tau=tau[row_slice],
+                        omega=omega[row_slice],
+                        scaling=scaling[row_slice],
+                        albedo=albedo_rows[row_slice],
+                        flux_factor=fbeam_rows[row_slice],
+                        exact_scatter=scatter[row_slice],
+                        precomputed=precomputed,
+                        return_profile=want_profiles,
+                    )
+                    if want_profiles:
+                        fo_profile_rows[row_slice] = fo_chunk
+                        fo_rows[row_slice] = fo_chunk[:, 0]
+                    else:
+                        fo_rows[row_slice] = fo_chunk
+            two_stream_by_geometry.append(two_stream_rows)
+            if want_profiles:
+                two_stream_profile_by_geometry.append(two_stream_profile_rows)
+            if include_fo:
+                fo_by_geometry.append(fo_rows)
+                if want_profiles:
+                    fo_profile_by_geometry.append(fo_profile_rows)
+        radiance_2s, geometry_shape = self._reshape_endpoint(
+            two_stream_by_geometry, batch_shape=batch_shape
+        )
+        if include_fo:
+            radiance_fo, _ = self._reshape_endpoint(fo_by_geometry, batch_shape=batch_shape)
+            radiance_total = radiance_2s + radiance_fo
+        else:
+            radiance_fo = None
+            radiance_total = radiance_2s
+        if want_profiles:
+            radiance_profile_2s, profile_geometry_shape = self._reshape_profile(
+                two_stream_profile_by_geometry,
+                batch_shape=batch_shape,
+            )
+            if include_fo:
+                radiance_profile_fo, _ = self._reshape_profile(
+                    fo_profile_by_geometry,
+                    batch_shape=batch_shape,
+                )
+                radiance_profile_total = radiance_profile_2s + radiance_profile_fo
+            else:
+                radiance_profile_fo = None
+                radiance_profile_total = radiance_profile_2s
+            geometry_shape = profile_geometry_shape
+        else:
+            radiance_profile_2s = None
+            radiance_profile_fo = None
+            radiance_profile_total = None
+        return TwoStreamEssBatchResult(
+            radiance_2s=radiance_2s,
+            radiance_fo=radiance_fo,
+            radiance_total=radiance_total,
+            radiance_profile_2s=radiance_profile_2s,
+            radiance_profile_fo=radiance_profile_fo,
+            radiance_profile_total=radiance_profile_total,
+            batch_shape=batch_shape,
+            geometry_shape=geometry_shape,
+        )
+
+    def _forward_solar_obs_batched_torch(
+        self,
+        *,
+        mapped: dict[str, Any],
+        albedo: Any,
+        earth_radius: float,
+        include_fo: bool,
+        fo_nfine: int,
+        fo_exact_scatter: Any | None,
+    ) -> TwoStreamEssBatchResult:
+        """Runs the solar observation-geometry public batch path on torch tensors."""
+        from .core.backend import _load_torch
+        from .core.fo_solar_obs_batch_numpy import fo_solar_obs_batch_precompute
+        from .core.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
+        from .core.solar_obs_batch_torch import solve_solar_obs_batch_torch
+
+        torch = _load_torch()
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("backend='torch' requires torch to be installed")
+        if include_fo and fo_exact_scatter is None:
+            raise ValueError(
+                "batched solar include_fo=True requires fo_exact_scatter with the "
+                "same leading batch dimensions as tau"
+            )
+        if include_fo and (self.options.do_plane_parallel or mapped["fo_geometry_mode"] != "eps"):
+            raise ValueError(
+                "batched solar include_fo=True currently supports pseudo_spherical geometry only"
+            )
+        context = self._select_torch_context(
+            detect_torch_context(
+                mapped["tau_arr"],
+                mapped["omega_arr"],
+                mapped["asymm_arr"],
+                mapped["d2s_scaling"],
+                albedo,
+                mapped["flux_factor"],
+                fo_exact_scatter,
+            )
+        )
+        n_layers = self.options.n_layers
+        tau_arr = value_to_torch(mapped["tau_arr"], context)
+        if tau_arr.ndim <= 1 or int(tau_arr.shape[-1]) != n_layers:
+            raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward")
+        batch_shape = tuple(int(dim) for dim in tau_arr.shape[:-1])
+        tau = tau_arr.reshape(-1, n_layers).contiguous()
+        omega = self._broadcast_batch_layers_torch(
+            "ssa",
+            mapped["omega_arr"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+        )
+        asymm = self._broadcast_batch_layers_torch(
+            "g",
+            mapped["asymm_arr"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+        )
+        scaling = self._broadcast_batch_layers_torch(
+            "delta_m_scaling",
+            mapped["d2s_scaling"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+            default=0.0,
+        )
+        albedo_rows = self._broadcast_batch_scalar_torch(
+            "albedo", albedo, context=context, batch_shape=batch_shape
+        )
+        fbeam_rows = self._broadcast_batch_scalar_torch(
+            "fbeam", mapped["flux_factor"], context=context, batch_shape=batch_shape
+        )
+        self._require_finite_torch("tau", tau)
+        height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
+        prepared = self._prepare_forward(
+            tau_arr=np.zeros(n_layers, dtype=float),
+            omega_arr=np.zeros(n_layers, dtype=float),
+            asymm_arr=np.zeros(n_layers, dtype=float),
+            height_grid=height_grid,
+            user_obsgeoms=mapped["user_obsgeoms"],
+            stream_value=mapped["stream_value"],
+            flux_factor=1.0,
+            albedo=0.0,
+            d2s_scaling=np.zeros(n_layers, dtype=float),
+            earth_radius=earth_radius,
+        )
+        geometry = prepared.geometry
+        want_profiles = self.options.do_level_output
+        two_stream_by_geometry = []
+        fo_by_geometry = []
+        two_stream_profile_by_geometry = []
+        fo_profile_by_geometry = []
+        with self._torch_grad_context():
+            for geom_index, user_obsgeom in enumerate(prepared.user_obsgeoms):
+                if self.options.do_plane_parallel:
+                    secant = float(geometry.average_secant_pp[geom_index])
+                    chapman = np.triu(np.full((n_layers, n_layers), secant, dtype=float))
+                else:
+                    chapman = geometry.chapman_factors[:, :, geom_index]
+                n_rows = int(tau.shape[0])
+                chunk_size = self._solar_batch_chunk_size(n_rows, n_layers)
+                two_chunks = []
+                fo_chunks = []
+                two_profile_chunks = []
+                fo_profile_chunks = []
+                scatter = None
+                precomputed = None
+                if include_fo:
+                    scatter = self._batched_solar_fo_scatter_torch(
+                        fo_exact_scatter=fo_exact_scatter,
+                        context=context,
+                        batch_shape=batch_shape,
+                        geom_index=geom_index,
+                        n_geometries=prepared.user_obsgeoms.shape[0],
+                    )
+                    precomputed = fo_solar_obs_batch_precompute(
+                        user_obsgeom=user_obsgeom,
+                        heights=height_grid,
+                        earth_radius=earth_radius,
+                        nfine=fo_nfine,
+                    )
+                for start in range(0, n_rows, chunk_size):
+                    stop = min(start + chunk_size, n_rows)
+                    row_slice = slice(start, stop)
+                    two_chunk = solve_solar_obs_batch_torch(
+                        tau=tau[row_slice],
+                        omega=omega[row_slice],
+                        asymm=asymm[row_slice],
+                        scaling=scaling[row_slice],
+                        albedo=albedo_rows[row_slice],
+                        flux_factor=fbeam_rows[row_slice],
+                        stream_value=prepared.stream_value,
+                        chapman=chapman,
+                        x0=float(geometry.x0[geom_index]),
+                        user_stream=float(geometry.user_streams[geom_index]),
+                        user_secant=float(geometry.user_secants[geom_index]),
+                        azmfac=float(geometry.azmfac[geom_index]),
+                        px11=float(geometry.px11),
+                        pxsq=geometry.pxsq,
+                        px0x=geometry.px0x[geom_index],
+                        ulp=float(geometry.ulp[geom_index]),
+                        dtype=context.dtype,
+                        device=context.device,
+                        bvp_engine=self._torch_batch_bvp_engine(),
+                        return_profile=want_profiles,
+                    )
+                    if want_profiles:
+                        two_profile_chunks.append(two_chunk)
+                        two_chunks.append(two_chunk[:, 0])
+                    else:
+                        two_chunks.append(two_chunk)
+                    if include_fo:
+                        fo_chunk = solve_fo_solar_obs_eps_batch_torch(
+                            tau=tau[row_slice],
+                            omega=omega[row_slice],
+                            scaling=scaling[row_slice],
+                            albedo=albedo_rows[row_slice],
+                            flux_factor=fbeam_rows[row_slice],
+                            exact_scatter=scatter[row_slice],
+                            precomputed=precomputed,
+                            dtype=context.dtype,
+                            device=context.device,
+                            return_profile=want_profiles,
+                        )
+                        if want_profiles:
+                            fo_profile_chunks.append(fo_chunk)
+                            fo_chunks.append(fo_chunk[:, 0])
+                        else:
+                            fo_chunks.append(fo_chunk)
+                two_stream_by_geometry.append(torch.cat(two_chunks, dim=0))
+                if want_profiles:
+                    two_stream_profile_by_geometry.append(torch.cat(two_profile_chunks, dim=0))
+                if include_fo:
+                    fo_by_geometry.append(torch.cat(fo_chunks, dim=0))
+                    if want_profiles:
+                        fo_profile_by_geometry.append(torch.cat(fo_profile_chunks, dim=0))
+            radiance_2s, geometry_shape = self._reshape_endpoint_torch(
+                two_stream_by_geometry, batch_shape=batch_shape
+            )
+            if include_fo:
+                radiance_fo, _ = self._reshape_endpoint_torch(
+                    fo_by_geometry, batch_shape=batch_shape
+                )
+                radiance_total = radiance_2s + radiance_fo
+            else:
+                radiance_fo = None
+                radiance_total = radiance_2s
+            if want_profiles:
+                radiance_profile_2s, profile_geometry_shape = self._reshape_profile_torch(
+                    two_stream_profile_by_geometry,
+                    batch_shape=batch_shape,
+                )
+                if include_fo:
+                    radiance_profile_fo, _ = self._reshape_profile_torch(
+                        fo_profile_by_geometry,
+                        batch_shape=batch_shape,
+                    )
+                    radiance_profile_total = radiance_profile_2s + radiance_profile_fo
+                else:
+                    radiance_profile_fo = None
+                    radiance_profile_total = radiance_profile_2s
+                geometry_shape = profile_geometry_shape
+            else:
+                radiance_profile_2s = None
+                radiance_profile_fo = None
+                radiance_profile_total = None
+        return TwoStreamEssBatchResult(
+            radiance_2s=radiance_2s,
+            radiance_fo=radiance_fo,
+            radiance_total=radiance_total,
+            radiance_profile_2s=radiance_profile_2s,
+            radiance_profile_fo=radiance_profile_fo,
+            radiance_profile_total=radiance_profile_total,
+            batch_shape=batch_shape,
+            geometry_shape=geometry_shape,
+        )
+
+    def _forward_thermal_batched_numpy(
+        self,
+        *,
+        mapped: dict[str, Any],
+        albedo: Any,
+        emissivity: Any,
+        earth_radius: float,
+        include_fo: bool,
+        fo_nfine: int,
+    ) -> TwoStreamEssBatchResult:
+        """Runs the thermal observation-geometry public batch path."""
+        from .core.thermal_batch_numpy import (
+            _fo_thermal_toa,
+            _two_stream_thermal_toa,
+            precompute_fo_thermal_geometry_numpy,
+        )
+
+        n_layers = self.options.n_layers
+        tau_arr = np.asarray(to_numpy(mapped["tau_arr"]), dtype=float)
+        if tau_arr.ndim <= 1 or tau_arr.shape[-1] != n_layers:
+            raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward")
+        batch_shape = tuple(tau_arr.shape[:-1])
+        tau = np.ascontiguousarray(tau_arr.reshape(-1, n_layers), dtype=float)
+        omega = self._broadcast_batch_layers(
+            "ssa", mapped["omega_arr"], batch_shape=batch_shape, width=n_layers
+        )
+        asymm = self._broadcast_batch_layers(
+            "g", mapped["asymm_arr"], batch_shape=batch_shape, width=n_layers
+        )
+        scaling = self._broadcast_batch_layers(
+            "delta_m_scaling",
+            mapped["d2s_scaling"],
+            batch_shape=batch_shape,
+            width=n_layers,
+            default=0.0,
+        )
+        planck = self._broadcast_batch_layers(
+            "planck",
+            mapped["thermal_bb_input"],
+            batch_shape=batch_shape,
+            width=n_layers + 1,
+        )
+        surfbb = self._broadcast_batch_scalar(
+            "surface_planck", mapped["surfbb"], batch_shape=batch_shape
+        )
+        albedo_rows = self._broadcast_batch_scalar("albedo", albedo, batch_shape=batch_shape)
+        emissivity_rows = self._broadcast_batch_scalar(
+            "emissivity", emissivity, batch_shape=batch_shape
+        )
+        self._require_finite("tau", tau)
+        angles = np.asarray(to_numpy(mapped["user_angles"]), dtype=float).reshape(-1)
+        if angles.size == 0:
+            raise ValueError("angles are required for mode='thermal'")
+        if np.any((angles < 0.0) | (angles > 90.0)):
+            raise ValueError("thermal angles must satisfy 0 <= vza <= 90")
+        want_profiles = self.options.do_level_output
+        two_stream_by_geometry: list[np.ndarray] = []
+        fo_by_geometry: list[np.ndarray] = []
+        two_stream_profile_by_geometry: list[np.ndarray] = []
+        fo_profile_by_geometry: list[np.ndarray] = []
+        for angle in angles:
+            user_stream = float(np.cos(np.deg2rad(float(angle))))
+            two_stream = _two_stream_thermal_toa(
+                tau=tau,
+                omega=omega,
+                asymm=asymm,
+                scaling=scaling,
+                thermal_bb_input=planck,
+                surfbb=surfbb,
+                emissivity=emissivity_rows,
+                albedo=albedo_rows,
+                stream_value=mapped["stream_value"],
+                user_stream=user_stream,
+                thermal_tcutoff=self.options.thermal_tcutoff,
+                bvp_engine=self._batch_bvp_engine(),
+                return_profile=want_profiles,
+            )
+            if want_profiles:
+                two_stream_profile_by_geometry.append(two_stream)
+                two_stream_by_geometry.append(two_stream[:, 0])
+            else:
+                two_stream_by_geometry.append(two_stream)
+            if include_fo:
+                if mapped["height_grid"] is None:
+                    raise ValueError("z is required for batched thermal include_fo=True")
+                height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
+                fo_geometry = precompute_fo_thermal_geometry_numpy(
+                    heights=height_grid,
+                    user_angle_degrees=float(angle),
+                    earth_radius=earth_radius,
+                    nfine=fo_nfine,
+                )
+                fo = _fo_thermal_toa(
+                    tau=tau,
+                    omega=omega,
+                    scaling=scaling,
+                    thermal_bb_input=planck,
+                    surfbb=surfbb,
+                    emissivity=emissivity_rows,
+                    heights=height_grid,
+                    user_angle_degrees=float(angle),
+                    earth_radius=earth_radius,
+                    nfine=fo_nfine,
+                    geometry=fo_geometry,
+                    return_profile=want_profiles,
+                )
+                if want_profiles:
+                    fo_profile_by_geometry.append(fo)
+                    fo_by_geometry.append(fo[:, 0])
+                else:
+                    fo_by_geometry.append(fo)
+        radiance_2s, geometry_shape = self._reshape_endpoint(
+            two_stream_by_geometry, batch_shape=batch_shape
+        )
+        if include_fo:
+            radiance_fo, _ = self._reshape_endpoint(fo_by_geometry, batch_shape=batch_shape)
+            radiance_total = radiance_2s + radiance_fo
+        else:
+            radiance_fo = None
+            radiance_total = radiance_2s
+        if want_profiles:
+            radiance_profile_2s, profile_geometry_shape = self._reshape_profile(
+                two_stream_profile_by_geometry,
+                batch_shape=batch_shape,
+            )
+            if include_fo:
+                radiance_profile_fo, _ = self._reshape_profile(
+                    fo_profile_by_geometry,
+                    batch_shape=batch_shape,
+                )
+                radiance_profile_total = radiance_profile_2s + radiance_profile_fo
+            else:
+                radiance_profile_fo = None
+                radiance_profile_total = radiance_profile_2s
+            geometry_shape = profile_geometry_shape
+        else:
+            radiance_profile_2s = None
+            radiance_profile_fo = None
+            radiance_profile_total = None
+        return TwoStreamEssBatchResult(
+            radiance_2s=radiance_2s,
+            radiance_fo=radiance_fo,
+            radiance_total=radiance_total,
+            radiance_profile_2s=radiance_profile_2s,
+            radiance_profile_fo=radiance_profile_fo,
+            radiance_profile_total=radiance_profile_total,
+            batch_shape=batch_shape,
+            geometry_shape=geometry_shape,
+        )
+
+    def _forward_thermal_batched_torch(
+        self,
+        *,
+        mapped: dict[str, Any],
+        albedo: Any,
+        emissivity: Any,
+        earth_radius: float,
+        include_fo: bool,
+        fo_nfine: int,
+    ) -> TwoStreamEssBatchResult:
+        """Runs the thermal observation-geometry public batch path on torch tensors."""
+        from .core.backend import _load_torch
+        from .core.thermal_batch_numpy import precompute_fo_thermal_geometry_numpy
+        from .core.thermal_batch_torch import _fo_thermal_toa_batch, _two_stream_thermal_toa_batch
+
+        torch = _load_torch()
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("backend='torch' requires torch to be installed")
+        context = self._select_torch_context(
+            detect_torch_context(
+                mapped["tau_arr"],
+                mapped["omega_arr"],
+                mapped["asymm_arr"],
+                mapped["d2s_scaling"],
+                mapped["thermal_bb_input"],
+                mapped["surfbb"],
+                albedo,
+                emissivity,
+            )
+        )
+        n_layers = self.options.n_layers
+        tau_arr = value_to_torch(mapped["tau_arr"], context)
+        if tau_arr.ndim <= 1 or int(tau_arr.shape[-1]) != n_layers:
+            raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward")
+        batch_shape = tuple(int(dim) for dim in tau_arr.shape[:-1])
+        tau = tau_arr.reshape(-1, n_layers).contiguous()
+        omega = self._broadcast_batch_layers_torch(
+            "ssa",
+            mapped["omega_arr"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+        )
+        asymm = self._broadcast_batch_layers_torch(
+            "g",
+            mapped["asymm_arr"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+        )
+        scaling = self._broadcast_batch_layers_torch(
+            "delta_m_scaling",
+            mapped["d2s_scaling"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+            default=0.0,
+        )
+        planck = self._broadcast_batch_layers_torch(
+            "planck",
+            mapped["thermal_bb_input"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers + 1,
+        )
+        surfbb = self._broadcast_batch_scalar_torch(
+            "surface_planck",
+            mapped["surfbb"],
+            context=context,
+            batch_shape=batch_shape,
+        )
+        albedo_rows = self._broadcast_batch_scalar_torch(
+            "albedo",
+            albedo,
+            context=context,
+            batch_shape=batch_shape,
+        )
+        emissivity_rows = self._broadcast_batch_scalar_torch(
+            "emissivity",
+            emissivity,
+            context=context,
+            batch_shape=batch_shape,
+        )
+        self._require_finite_torch("tau", tau)
+        angles = np.asarray(to_numpy(mapped["user_angles"]), dtype=float).reshape(-1)
+        if angles.size == 0:
+            raise ValueError("angles are required for mode='thermal'")
+        if np.any((angles < 0.0) | (angles > 90.0)):
+            raise ValueError("thermal angles must satisfy 0 <= vza <= 90")
+        if include_fo and mapped["height_grid"] is None:
+            raise ValueError("z is required for batched thermal include_fo=True")
+        height_grid = (
+            None
+            if mapped["height_grid"] is None
+            else np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
+        )
+        want_profiles = self.options.do_level_output
+        two_stream_by_geometry = []
+        fo_by_geometry = []
+        two_stream_profile_by_geometry = []
+        fo_profile_by_geometry = []
+        with self._torch_grad_context():
+            for angle in angles:
+                user_stream = float(np.cos(np.deg2rad(float(angle))))
+                two_stream = _two_stream_thermal_toa_batch(
+                    tau=tau,
+                    omega=omega,
+                    asymm=asymm,
+                    scaling=scaling,
+                    thermal_bb_input=planck,
+                    surfbb=surfbb,
+                    emissivity=emissivity_rows,
+                    albedo=albedo_rows,
+                    stream_value=mapped["stream_value"],
+                    user_stream=user_stream,
+                    pxsq=mapped["stream_value"] * mapped["stream_value"],
+                    thermal_tcutoff=self.options.thermal_tcutoff,
+                    bvp_engine=self._torch_batch_bvp_engine(),
+                    return_profile=want_profiles,
+                )
+                if want_profiles:
+                    two_stream_profile_by_geometry.append(two_stream)
+                    two_stream_by_geometry.append(two_stream[:, 0])
+                else:
+                    two_stream_by_geometry.append(two_stream)
+                if include_fo:
+                    fo_geometry = precompute_fo_thermal_geometry_numpy(
+                        heights=height_grid,
+                        user_angle_degrees=float(angle),
+                        earth_radius=earth_radius,
+                        nfine=fo_nfine,
+                    )
+                    fo = _fo_thermal_toa_batch(
+                        tau=tau,
+                        omega=omega,
+                        scaling=scaling,
+                        thermal_bb_input=planck,
+                        surfbb=surfbb,
+                        emissivity=emissivity_rows,
+                        heights=height_grid,
+                        user_angle_degrees=float(angle),
+                        earth_radius=earth_radius,
+                        nfine=fo_nfine,
+                        fo_geometry=fo_geometry,
+                        return_profile=want_profiles,
+                    )
+                    if want_profiles:
+                        fo_profile_by_geometry.append(fo)
+                        fo_by_geometry.append(fo[:, 0])
+                    else:
+                        fo_by_geometry.append(fo)
+            radiance_2s, geometry_shape = self._reshape_endpoint_torch(
+                two_stream_by_geometry,
+                batch_shape=batch_shape,
+            )
+            if include_fo:
+                radiance_fo, _ = self._reshape_endpoint_torch(
+                    fo_by_geometry,
+                    batch_shape=batch_shape,
+                )
+                radiance_total = radiance_2s + radiance_fo
+            else:
+                radiance_fo = None
+                radiance_total = radiance_2s
+            if want_profiles:
+                radiance_profile_2s, profile_geometry_shape = self._reshape_profile_torch(
+                    two_stream_profile_by_geometry,
+                    batch_shape=batch_shape,
+                )
+                if include_fo:
+                    radiance_profile_fo, _ = self._reshape_profile_torch(
+                        fo_profile_by_geometry,
+                        batch_shape=batch_shape,
+                    )
+                    radiance_profile_total = radiance_profile_2s + radiance_profile_fo
+                else:
+                    radiance_profile_fo = None
+                    radiance_profile_total = radiance_profile_2s
+                geometry_shape = profile_geometry_shape
+            else:
+                radiance_profile_2s = None
+                radiance_profile_fo = None
+                radiance_profile_total = None
+        return TwoStreamEssBatchResult(
+            radiance_2s=radiance_2s,
+            radiance_fo=radiance_fo,
+            radiance_total=radiance_total,
+            radiance_profile_2s=radiance_profile_2s,
+            radiance_profile_fo=radiance_profile_fo,
+            radiance_profile_total=radiance_profile_total,
+            batch_shape=batch_shape,
+            geometry_shape=geometry_shape,
+        )
 
     def _default_torch_context(self) -> TorchContext:
         """Returns the default torch context for converted inputs.
@@ -813,61 +2568,65 @@ class TwoStreamEss:
     def forward(
         self,
         *,
-        tau_arr: Any,
-        omega_arr: Any,
-        asymm_arr: Any,
-        height_grid: Any | None = None,
-        user_obsgeoms: Any | None = None,
-        stream_value: float,
-        flux_factor: float,
-        albedo: float,
-        d2s_scaling: Any | None = None,
+        tau: Any,
+        ssa: Any,
+        g: Any,
+        z: Any | None = None,
+        angles: Any | None = None,
+        stream: float | None = None,
+        fbeam: Any = 1.0,
+        albedo: Any = 0.0,
+        delta_m_scaling: Any | None = None,
         brdf: Any | None = None,
         surface_leaving: Any | None = None,
-        user_angles: Any | None = None,
+        view_angles: Any | None = None,
         beam_szas: Any | None = None,
-        user_relazms: Any | None = None,
-        thermal_bb_input: Any | None = None,
-        surfbb: float = 0.0,
-        emissivity: float = 0.0,
+        relazms: Any | None = None,
+        planck: Any | None = None,
+        surface_planck: Any = 0.0,
+        emissivity: Any = 0.0,
         earth_radius: float = 6371.0,
         include_fo: bool = False,
-        fo_geometry_mode: str = "eps",
+        geometry: str = "pseudo_spherical",
         fo_n_moments: int = 5000,
         fo_nfine: int = 3,
         fo_exact_scatter: Any | None = None,
-    ) -> TwoStreamEssResult:
+    ) -> TwoStreamEssResult | TwoStreamEssBatchResult:
         """Runs the main 2S-ESS forward model.
 
         Parameters
         ----------
-        tau_arr, omega_arr, asymm_arr
+        tau, ssa, g
             Layer optical thickness, single-scattering albedo, and asymmetry
             inputs.
-        height_grid
+        z
             Height grid in descending order.
-        user_obsgeoms
-            Observation-geometry array for solar observation mode.
-        stream_value
-            Two-stream quadrature value.
-        flux_factor
-            Flux normalization factor.
+        angles
+            Solar observation geometry in degrees, either ``[sza, vza, raz]``
+            for one geometry or ``(ngeom, 3)`` for many geometries. For
+            ``mode="thermal"``, this is scalar or 1D viewing zenith angle(s).
+        stream
+            Optional two-stream quadrature cosine. Defaults to ``1/sqrt(3)``
+            for solar and ``0.5`` for thermal.
+        fbeam
+            Direct solar beam/source normalization.
         albedo
             Lambertian surface albedo.
-        d2s_scaling
+        delta_m_scaling
             Optional delta-M scaling factors.
         brdf, surface_leaving
             Optional solar or thermal surface supplements.
-        user_angles, beam_szas, user_relazms
-            Lattice-style or thermal viewing-angle inputs where applicable.
-        thermal_bb_input, surfbb, emissivity
+        view_angles, beam_szas, relazms
+            Advanced lattice-style or thermal viewing-angle inputs.
+        planck, surface_planck, emissivity
             Thermal source and surface-emission inputs.
         earth_radius
             Planetary radius used by spherical geometry paths.
         include_fo
             Whether to also run and attach first-order outputs.
-        fo_geometry_mode
-            FO solar geometry mode, typically ``"eps"`` or ``"rps"``.
+        geometry
+            FO solar geometry mode, typically ``"pseudo_spherical"`` or
+            ``"regular_pseudo_spherical"``.
         fo_n_moments
             Number of phase-function moments used by the FO solver.
         fo_nfine
@@ -878,9 +2637,51 @@ class TwoStreamEss:
 
         Returns
         -------
-        TwoStreamEssResult
-            Public forward-model output object.
+        TwoStreamEssResult or TwoStreamEssBatchResult
+            Public forward-model output object. Batched inputs return endpoint
+            radiances with the same leading batch dimensions as ``tau``.
         """
+        mapped = self._translate_public_forward_args(
+            tau=tau,
+            ssa=ssa,
+            g=g,
+            z=z,
+            angles=angles,
+            stream=stream,
+            fbeam=fbeam,
+            delta_m_scaling=delta_m_scaling,
+            view_angles=view_angles,
+            beam_szas=beam_szas,
+            relazms=relazms,
+            planck=planck,
+            surface_planck=surface_planck,
+            geometry=geometry,
+        )
+        tau_arr = mapped["tau_arr"]
+        omega_arr = mapped["omega_arr"]
+        asymm_arr = mapped["asymm_arr"]
+        height_grid = mapped["height_grid"]
+        user_obsgeoms = mapped["user_obsgeoms"]
+        user_angles = mapped["user_angles"]
+        user_relazms = mapped["user_relazms"]
+        stream_value = mapped["stream_value"]
+        flux_factor = mapped["flux_factor"]
+        d2s_scaling = mapped["d2s_scaling"]
+        thermal_bb_input = mapped["thermal_bb_input"]
+        surfbb = mapped["surfbb"]
+        fo_geometry_mode = mapped["fo_geometry_mode"]
+        if self._public_forward_is_batched(tau_arr):
+            return self._forward_batched(
+                mapped=mapped,
+                albedo=albedo,
+                brdf=brdf,
+                surface_leaving=surface_leaving,
+                emissivity=emissivity,
+                earth_radius=earth_radius,
+                include_fo=include_fo,
+                fo_nfine=fo_nfine,
+                fo_exact_scatter=fo_exact_scatter,
+            )
         prepared, torch_context = self._prepare_forward_with_context(
             tau_arr=tau_arr,
             omega_arr=omega_arr,
@@ -901,6 +2702,10 @@ class TwoStreamEss:
             emissivity=emissivity,
             earth_radius=earth_radius,
         )
+        if d2s_scaling is None:
+            d2s_scaling = prepared.d2s_scaling
+        if height_grid is None:
+            height_grid = prepared.height_grid
         if self.options.backend == "torch":
             torch_context = self._select_torch_context(torch_context)
         if self.options.backend == "torch":
@@ -960,25 +2765,25 @@ class TwoStreamEss:
     def forward_fo(
         self,
         *,
-        tau_arr: Any,
-        omega_arr: Any,
-        asymm_arr: Any,
-        height_grid: Any | None = None,
-        user_obsgeoms: Any | None = None,
-        user_angles: Any | None = None,
+        tau: Any,
+        ssa: Any,
+        g: Any,
+        z: Any | None = None,
+        angles: Any | None = None,
+        stream: float | None = None,
+        fbeam: float = 1.0,
+        albedo: float = 0.0,
+        delta_m_scaling: Any | None = None,
+        view_angles: Any | None = None,
         beam_szas: Any | None = None,
-        user_relazms: Any | None = None,
-        stream_value: float,
-        flux_factor: float,
-        albedo: float,
-        d2s_scaling: Any | None = None,
+        relazms: Any | None = None,
         brdf: Any | None = None,
         surface_leaving: Any | None = None,
         earth_radius: float = 6371.0,
-        thermal_bb_input: Any | None = None,
-        surfbb: float = 0.0,
+        planck: Any | None = None,
+        surface_planck: float = 0.0,
         emissivity: float = 0.0,
-        fo_geometry_mode: str = "eps",
+        geometry: str = "pseudo_spherical",
         n_moments: int = 5000,
         nfine: int = 3,
         fo_exact_scatter: Any | None = None,
@@ -987,25 +2792,28 @@ class TwoStreamEss:
 
         Parameters
         ----------
-        tau_arr, omega_arr, asymm_arr
+        tau, ssa, g
             Layer optical inputs.
-        height_grid
+        z
             Height grid in descending order.
-        user_obsgeoms
-            Observation-geometry array for solar observation mode.
-        user_angles, beam_szas, user_relazms
-            Thermal or lattice-style viewing-angle inputs where applicable.
-        stream_value, flux_factor, albedo
-            Standard forward-model scalar inputs reused by the FO path.
-        d2s_scaling
+        angles
+            Solar observation geometry in degrees, either ``[sza, vza, raz]``
+            for one geometry or ``(ngeom, 3)`` for many geometries. For
+            ``mode="thermal"``, this is scalar or 1D viewing zenith angle(s).
+        stream, fbeam, albedo
+            Optional two-stream quadrature, beam normalization, and surface
+            albedo inputs reused by the FO path.
+        delta_m_scaling
             Optional delta-M scaling factors.
+        view_angles, beam_szas, relazms
+            Advanced lattice-style or thermal viewing-angle inputs.
         brdf, surface_leaving
             Optional surface supplements for preprocessing compatibility.
         earth_radius
             Planetary radius used by spherical geometry paths.
-        thermal_bb_input, surfbb, emissivity
+        planck, surface_planck, emissivity
             Thermal source and surface-emission inputs.
-        fo_geometry_mode
+        geometry
             Solar FO geometry mode.
         n_moments
             Number of phase-function moments used by the FO solver.
@@ -1020,8 +2828,63 @@ class TwoStreamEss:
         FoSolarObsResult or FoThermalResult
             FO-only result object for the requested source mode.
         """
+        mapped = self._translate_public_forward_args(
+            tau=tau,
+            ssa=ssa,
+            g=g,
+            z=z,
+            angles=angles,
+            stream=stream,
+            fbeam=fbeam,
+            delta_m_scaling=delta_m_scaling,
+            view_angles=view_angles,
+            beam_szas=beam_szas,
+            relazms=relazms,
+            planck=planck,
+            surface_planck=surface_planck,
+            geometry=geometry,
+        )
+        tau_arr = mapped["tau_arr"]
+        omega_arr = mapped["omega_arr"]
+        asymm_arr = mapped["asymm_arr"]
+        height_grid = mapped["height_grid"]
+        user_obsgeoms = mapped["user_obsgeoms"]
+        user_angles = mapped["user_angles"]
+        user_relazms = mapped["user_relazms"]
+        stream_value = mapped["stream_value"]
+        flux_factor = mapped["flux_factor"]
+        d2s_scaling = mapped["d2s_scaling"]
+        thermal_bb_input = mapped["thermal_bb_input"]
+        surfbb = mapped["surfbb"]
+        fo_geometry_mode = mapped["fo_geometry_mode"]
         if self.options.source_mode in {"solar_obs", "solar_lat"}:
             self._validate_fo_geometry_mode(fo_geometry_mode)
+        if d2s_scaling is None:
+            d2s_scaling = np.zeros(self.options.n_layers, dtype=float)
+        if self._public_forward_is_batched(tau_arr):
+            if brdf is not None or surface_leaving is not None:
+                raise ValueError("batched forward_fo does not support brdf or surface_leaving")
+            if self.options.do_brdf_surface or self.options.do_surface_leaving:
+                raise ValueError(
+                    "batched forward_fo does not support brdf_surface or surface_leaving options"
+                )
+            if self.options.source_mode != "solar_obs":
+                raise ValueError("batched forward_fo currently supports mode='solar' only")
+            if self.options.backend == "torch":
+                return self._forward_fo_solar_obs_batched_torch(
+                    mapped=mapped,
+                    albedo=albedo,
+                    earth_radius=earth_radius,
+                    nfine=nfine,
+                    fo_exact_scatter=fo_exact_scatter,
+                )
+            return self._forward_fo_solar_obs_batched_numpy(
+                mapped=mapped,
+                albedo=albedo,
+                earth_radius=earth_radius,
+                nfine=nfine,
+                fo_exact_scatter=fo_exact_scatter,
+            )
         if self.options.source_mode == "solar_lat":
             prepared, torch_context = self._prepare_forward_with_context(
                 tau_arr=tau_arr,
@@ -1043,6 +2906,8 @@ class TwoStreamEss:
                 emissivity=emissivity,
                 earth_radius=earth_radius,
             )
+            if height_grid is None:
+                height_grid = prepared.height_grid
             if self.options.backend == "torch":
                 from .core.fo_solar_obs_torch import (
                     solve_fo_solar_obs_eps_torch,

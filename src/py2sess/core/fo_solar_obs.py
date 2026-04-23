@@ -30,6 +30,31 @@ class FoSolarObsResult:
     lattice_counts: tuple[int, int, int] | None = None
     lattice_axes: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
+    @property
+    def radiance(self) -> np.ndarray:
+        """Preferred public total FO radiance output."""
+        return self.intensity_total
+
+    @property
+    def radiance_total(self) -> np.ndarray:
+        """Total FO radiance output."""
+        return self.intensity_total
+
+    @property
+    def radiance_ss(self) -> np.ndarray:
+        """Single-scatter FO radiance component."""
+        return self.intensity_ss
+
+    @property
+    def radiance_db(self) -> np.ndarray:
+        """Direct-beam FO radiance component."""
+        return self.intensity_db
+
+    @property
+    def radiance_profile(self) -> np.ndarray | None:
+        """Total FO radiance profile when level output is available."""
+        return self.intensity_total_profile
+
     def _lattice_shape(self) -> tuple[int, int, int]:
         """Returns the expected lattice shape for reshaping helpers."""
         return lattice_shape(self.lattice_counts)
