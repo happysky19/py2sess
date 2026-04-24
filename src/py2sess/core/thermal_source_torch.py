@@ -19,8 +19,8 @@ from .thermal_source import (
 class ThermalSourceTorchInputs:
     """Torch blackbody source inputs derived from temperature tensors."""
 
-    thermal_bb_input: Any
-    surfbb: Any
+    planck: Any
+    surface_planck: Any
 
 
 def _require_torch():
@@ -159,8 +159,8 @@ def thermal_source_from_temperature_profile_torch(
     """Builds differentiable torch thermal source inputs from temperatures.
 
     Exactly one spectral coordinate must be provided. If the spectral coordinate
-    is a vector, ``thermal_bb_input`` has shape ``(n_spectral, n_levels)`` and
-    ``surfbb`` has shape ``(n_spectral,)``.
+    is a vector, ``planck`` has shape ``(n_spectral, n_levels)`` and
+    ``surface_planck`` has shape ``(n_spectral,)``.
     """
     provided = sum(value is not None for value in (wavelength_microns, wavenumber_cm_inv))
     if provided != 1:
@@ -178,14 +178,14 @@ def thermal_source_from_temperature_profile_torch(
     if wavelength_microns is not None:
         spectral = _as_tensor(wavelength_microns, dtype=dtype, device=device)
         spectral_grid, level_grid = _profile_spectral_grid(spectral, level_temperature)
-        thermal_bb_input = planck_radiance_wavelength_torch(
+        planck = planck_radiance_wavelength_torch(
             level_grid,
             spectral_grid,
             dtype=dtype,
             device=device,
             validate=validate,
         )
-        surfbb = planck_radiance_wavelength_torch(
+        surface_planck = planck_radiance_wavelength_torch(
             surface_temperature,
             spectral,
             dtype=dtype,
@@ -195,18 +195,18 @@ def thermal_source_from_temperature_profile_torch(
     else:
         spectral = _as_tensor(wavenumber_cm_inv, dtype=dtype, device=device)
         spectral_grid, level_grid = _profile_spectral_grid(spectral, level_temperature)
-        thermal_bb_input = planck_radiance_wavenumber_torch(
+        planck = planck_radiance_wavenumber_torch(
             level_grid,
             spectral_grid,
             dtype=dtype,
             device=device,
             validate=validate,
         )
-        surfbb = planck_radiance_wavenumber_torch(
+        surface_planck = planck_radiance_wavenumber_torch(
             surface_temperature,
             spectral,
             dtype=dtype,
             device=device,
             validate=validate,
         )
-    return ThermalSourceTorchInputs(thermal_bb_input=thermal_bb_input, surfbb=surfbb)
+    return ThermalSourceTorchInputs(planck=planck, surface_planck=surface_planck)

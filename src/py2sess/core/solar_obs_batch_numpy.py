@@ -6,7 +6,10 @@ from typing import TypedDict
 
 import numpy as np
 
-from .batch_accumulation import accumulate_upwelling_sources_numpy
+from .batch_accumulation import (
+    accumulate_upwelling_profile_numpy,
+    accumulate_upwelling_sources_numpy,
+)
 from .bvp_batch import solve_solar_observation_bvp_batch
 from .optical import delta_m_scale_optical_properties
 from .taylor import vectorized_taylor_series_1, vectorized_taylor_series_2
@@ -48,7 +51,7 @@ def _exp_cutoff(values: np.ndarray, cutoff: float) -> np.ndarray:
 
 
 def _exp_cutoff_owned(values: np.ndarray, cutoff: float) -> np.ndarray:
-    """Returns the cutoff exponential in place when ``values`` is temporary."""
+    """Applies the cutoff exponential in place."""
     if values.size == 0 or float(np.max(values)) <= cutoff:
         np.exp(-values, out=values)
         return values
@@ -359,6 +362,7 @@ def _upuser_intensity_batch(
     emult_up: np.ndarray,
     all_layers_active: bool = False,
     surface_source_zero: bool = False,
+    return_profile: bool = False,
 ):
     """Computes upwelling TOA user intensity for a wavelength batch."""
     nlay = delta_tau.shape[1]
@@ -404,6 +408,12 @@ def _upuser_intensity_batch(
         su *= bterm
         su *= u_xneg
         layersource += su
+        if return_profile:
+            return fluxmult * accumulate_upwelling_profile_numpy(
+                layer_source=layersource,
+                layer_trans=t_delt_userm,
+                surface_source=cumsource,
+            )
         return fluxmult * accumulate_upwelling_sources_numpy(
             layer_source=layersource,
             layer_trans=t_delt_userm,
@@ -439,6 +449,12 @@ def _upuser_intensity_batch(
     su *= bterm
     su *= u_xneg
     layersource += np.where(active, sd + su, zero)
+    if return_profile:
+        return fluxmult * accumulate_upwelling_profile_numpy(
+            layer_source=layersource,
+            layer_trans=t_delt_userm,
+            surface_source=cumsource,
+        )
     return fluxmult * accumulate_upwelling_sources_numpy(
         layer_source=layersource,
         layer_trans=t_delt_userm,
@@ -465,6 +481,7 @@ def solve_solar_obs_batch_numpy(
     px0x: np.ndarray,
     ulp: float,
     bvp_engine: str = "auto",
+    return_profile: bool = False,
 ) -> np.ndarray:
     """Solves the solar-observation 2S problem for a spectral batch.
 
@@ -513,6 +530,9 @@ def solve_solar_obs_batch_numpy(
     sigma_p = qsprep["sigma_p"]
     emult_up = qsprep["emult_up"]
     total = np.zeros(tau.shape[0], dtype=float)
+    total_profile = None
+    if return_profile:
+        total_profile = np.zeros((tau.shape[0], tau.shape[1] + 1), dtype=float)
     zero_surface = np.zeros_like(albedo)
 
     for fourier in (0, 1):
@@ -616,6 +636,11 @@ def solve_solar_obs_batch_numpy(
             emult_up=emult_up,
             all_layers_active=all_layers_active,
             surface_source_zero=(fourier == 1),
+            return_profile=return_profile,
         )
-        total = contribution if fourier == 0 else total + azmfac * contribution
-    return total
+        if return_profile:
+            total_profile = contribution if fourier == 0 else total_profile + azmfac * contribution
+            total = total_profile[:, 0]
+        else:
+            total = contribution if fourier == 0 else total + azmfac * contribution
+    return total_profile if return_profile else total

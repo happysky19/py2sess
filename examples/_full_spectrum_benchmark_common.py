@@ -19,7 +19,6 @@ class BenchmarkRow:
     wall_seconds: float
     rt_seconds: float
     setup_seconds: float
-    prep_seconds: float | None = None
     fo_seconds: float | None = None
     two_stream_seconds: float | None = None
     max_abs_diff: float | None = None
@@ -110,16 +109,11 @@ def scalar_value(value: np.ndarray | float | int) -> float:
     return float(array.reshape(-1)[0])
 
 
-def relative_diff(value: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    """Returns a stable elementwise relative difference."""
-    scale = np.maximum(np.abs(reference), 1.0e-15)
-    return np.abs(value - reference) / scale
-
-
 def accuracy_summary(value: np.ndarray, reference: np.ndarray) -> tuple[float, float]:
     """Returns the max absolute diff and max relative diff in percent."""
     abs_diff = float(np.max(np.abs(value - reference)))
-    rel_diff_pct = float(np.max(relative_diff(value, reference)) * 100.0)
+    scale = np.maximum(np.abs(reference), 1.0e-15)
+    rel_diff_pct = float(np.max(np.abs(value - reference) / scale) * 100.0)
     return abs_diff, rel_diff_pct
 
 
@@ -128,8 +122,9 @@ def print_rows(rows: list[BenchmarkRow]) -> None:
     has_accuracy = any(
         row.max_abs_diff is not None or row.max_rel_diff_pct is not None for row in rows
     )
+    backend_width = max(18, *(len(row.backend) for row in rows))
     header = (
-        f"{'backend':<18} {'wall (s)':>10} {'rt (s)':>10} {'setup (s)':>10} "
+        f"{'backend':<{backend_width}} {'wall (s)':>10} {'rt (s)':>10} {'setup (s)':>10} "
         f"{'fo (s)':>10} {'2s (s)':>10} {'#wavelength/s':>14} {'chunk':>8}"
     )
     if has_accuracy:
@@ -138,7 +133,7 @@ def print_rows(rows: list[BenchmarkRow]) -> None:
     print("-" * len(header))
     for row in rows:
         line = (
-            f"{row.backend:<18} "
+            f"{row.backend:<{backend_width}} "
             f"{row.wall_seconds:10.3f} "
             f"{row.rt_seconds:10.3f} "
             f"{row.setup_seconds:10.3f} "

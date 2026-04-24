@@ -18,10 +18,10 @@ def main() -> None:
         wavenumber_band_cm_inv=(900.0, 901.0),
     )
 
-    print("thermal_bb_input:")
-    print(source.thermal_bb_input)
+    print("planck:")
+    print(source.planck)
     print()
-    print(f"surfbb: {source.surfbb:.8e}")
+    print(f"surface_planck: {source.surface_planck:.8e}")
 
 
 if __name__ == "__main__":

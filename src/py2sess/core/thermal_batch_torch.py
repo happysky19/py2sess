@@ -29,11 +29,22 @@ class ThermalBatchTorchResult:
 
     two_stream_toa: object
     fo_total_up_toa: object
+    two_stream_profile: object | None = None
+    fo_total_up_profile: object | None = None
 
     @property
     def total_toa(self):
         """Returns 2S plus FO upwelling TOA radiance."""
         return self.two_stream_toa + self.fo_total_up_toa
+
+    @property
+    def total_profile(self):
+        """Returns 2S plus FO upwelling level radiance when available."""
+        if self.two_stream_profile is None:
+            return None
+        if self.fo_total_up_profile is None:
+            return self.two_stream_profile
+        return self.two_stream_profile + self.fo_total_up_profile
 
 
 def _as_tensor(value, *, dtype, device):
@@ -45,6 +56,18 @@ def _as_tensor(value, *, dtype, device):
             warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
             return torch.as_tensor(value, dtype=dtype, device=device)
     return torch.as_tensor(value, dtype=dtype, device=device)
+
+
+def _accumulate_upwelling_profile_torch(*, layer_source, layer_trans, surface_source):
+    """Evaluates the backward layer recurrence and stores every level."""
+    batch, nlay = layer_source.shape
+    profile = torch.empty((batch, nlay + 1), dtype=layer_source.dtype, device=layer_source.device)
+    accum = surface_source
+    profile[:, nlay] = accum
+    for n in range(nlay - 1, -1, -1):
+        accum = layer_source[:, n] + layer_trans[:, n] * accum
+        profile[:, n] = accum
+    return profile
 
 
 def _hom_solution_thermal_batch(*, stream_value: float, pxsq: float, omega, asymm, delta_tau):
@@ -188,6 +211,7 @@ def _two_stream_thermal_toa_batch(
     bvp_device=None,
     bvp_dtype=None,
     bvp_engine: str = "auto",
+    return_profile: bool = False,
 ):
     """Computes batched 2S thermal upwelling TOA radiance."""
     delta_tau, omega_total, asymm_total = delta_m_scale_optical_properties_torch(
@@ -300,6 +324,12 @@ def _two_stream_thermal_toa_batch(
     ) * stream_value
     boa_source = surface_factor * albedo * idownsurf
     layersource = lcon * u_xpos * hmult_2 + mcon * u_xneg * hmult_1 + layer_tsup_up
+    if return_profile:
+        return _accumulate_upwelling_profile_torch(
+            layer_source=layersource,
+            layer_trans=t_delt_userm,
+            surface_source=boa_source,
+        )
     trans_prefix = torch.cumprod(t_delt_userm, dim=1)
     layer_weights = torch.cat((torch.ones_like(trans_prefix[:, :1]), trans_prefix[:, :-1]), dim=1)
     return torch.sum(layersource * layer_weights, dim=1) + trans_prefix[:, -1] * boa_source
@@ -318,6 +348,7 @@ def _fo_thermal_toa_batch(
     earth_radius,
     nfine,
     fo_geometry=None,
+    return_profile: bool = False,
 ):
     """Computes batched FO thermal upwelling TOA radiance."""
     dtype = tau.dtype
@@ -372,6 +403,12 @@ def _fo_thermal_toa_batch(
             dim=1,
         )
     trans_prefix = torch.cumprod(lostrans, dim=1)
+    if return_profile:
+        return _accumulate_upwelling_profile_torch(
+            layer_source=sources_up,
+            layer_trans=lostrans,
+            surface_source=surfbb * emissivity,
+        )
     layer_weights = torch.cat((torch.ones_like(trans_prefix[:, :1]), trans_prefix[:, :-1]), dim=1)
     cum_atmos = torch.sum(sources_up * layer_weights, dim=1)
     cum_surface = trans_prefix[:, -1] * surfbb * emissivity
@@ -400,6 +437,7 @@ def solve_thermal_batch_torch(
     bvp_dtype=None,
     bvp_engine: str = "auto",
     fo_geometry=None,
+    return_profiles: bool = False,
 ) -> ThermalBatchTorchResult:
     """Solves thermal observation-geometry spectra with torch tensors.
 
@@ -499,6 +537,7 @@ def solve_thermal_batch_torch(
         bvp_device=bvp_device,
         bvp_dtype=bvp_dtype,
         bvp_engine=bvp_engine,
+        return_profile=return_profiles,
     )
     fo = _fo_thermal_toa_batch(
         tau=tau,
@@ -512,5 +551,13 @@ def solve_thermal_batch_torch(
         earth_radius=earth_radius,
         nfine=nfine,
         fo_geometry=fo_geometry,
+        return_profile=return_profiles,
     )
+    if return_profiles:
+        return ThermalBatchTorchResult(
+            two_stream_toa=two_stream[:, 0],
+            fo_total_up_toa=fo[:, 0],
+            two_stream_profile=two_stream,
+            fo_total_up_profile=fo,
+        )
     return ThermalBatchTorchResult(two_stream_toa=two_stream, fo_total_up_toa=fo)

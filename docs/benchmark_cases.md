@@ -5,19 +5,21 @@ The package includes two packaged benchmark fixtures:
 - `tir_benchmark_fixture.npz`
 - `uv_benchmark_fixture.npz`
 
-These fixtures are static Python-ready subsets of larger 114-layer author benchmark cases. They are intended for:
+These fixtures are static Python-ready subsets of larger 114-layer 2S-ESS
+benchmark cases. They are intended for:
 
 - regression testing
 - example scripts
 - quick solver validation after refactoring
 
-They are not intended to replace the full-spectrum benchmark datasets used during development.
+They are not intended to replace the full-spectrum benchmark datasets used during
+development.
 
 ## TIR fixture
 
 - source mode: thermal observation geometry
 - vertical structure: 114 layers
-- spectral coverage: 32 sampled wavelengths from the larger author case
+- spectral coverage: 32 sampled wavelengths from the larger benchmark case
 - packaged fields:
   - optical properties
   - thermal blackbody inputs
@@ -37,7 +39,7 @@ standalone regression suite checks:
 
 - source mode: solar observation geometry
 - vertical structure: 114 layers
-- spectral coverage: 16 sampled wavelengths from the larger author case
+- spectral coverage: 16 sampled wavelengths from the larger benchmark case
 - packaged fields:
   - optical properties
   - precomputed 2S geometry factors

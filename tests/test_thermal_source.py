@@ -28,8 +28,8 @@ class ThermalSourceTests(unittest.TestCase):
             280.0,
             wavenumber_band_cm_inv=(900.0, 901.0),
         )
-        self.assertEqual(source.thermal_bb_input.shape, (4,))
-        self.assertGreater(source.surfbb, source.thermal_bb_input[-1])
+        self.assertEqual(source.planck.shape, (4,))
+        self.assertGreater(source.surface_planck, source.planck[-1])
 
     def test_profile_helper_returns_constant_planck_for_constant_temperature(self) -> None:
         temperature = 250.0
@@ -42,9 +42,9 @@ class ThermalSourceTests(unittest.TestCase):
             np.array([temperature], dtype=float), 900.0, 901.0
         )[0]
         np.testing.assert_allclose(
-            source.thermal_bb_input, np.full(4, expected, dtype=float), rtol=0.0, atol=1.0e-12
+            source.planck, np.full(4, expected, dtype=float), rtol=0.0, atol=1.0e-12
         )
-        self.assertAlmostEqual(source.surfbb, float(expected), places=12)
+        self.assertAlmostEqual(source.surface_planck, float(expected), places=12)
 
     def test_torch_planck_matches_numpy_helpers(self) -> None:
         if not has_torch():
@@ -102,9 +102,9 @@ class ThermalSourceTests(unittest.TestCase):
             surface_temperature,
             wavenumber_cm_inv=wavenumber,
         )
-        self.assertEqual(tuple(source.thermal_bb_input.shape), (3, 4))
-        self.assertEqual(tuple(source.surfbb.shape), (3,))
-        loss = source.thermal_bb_input.sum() + source.surfbb.sum()
+        self.assertEqual(tuple(source.planck.shape), (3, 4))
+        self.assertEqual(tuple(source.surface_planck.shape), (3,))
+        loss = source.planck.sum() + source.surface_planck.sum()
         loss.backward()
         self.assertIsNotNone(level_temperature.grad)
         self.assertIsNotNone(surface_temperature.grad)

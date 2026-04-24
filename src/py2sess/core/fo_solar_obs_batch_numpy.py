@@ -38,6 +38,18 @@ class FoSolarObsBatchPrecompute:
     fine_column_index: np.ndarray | None = None
 
 
+@dataclass(frozen=True)
+class FoSolarObsBatchResult:
+    """Batched solar FO endpoint and optional profile components."""
+
+    total: np.ndarray
+    single_scatter: np.ndarray
+    direct_beam: np.ndarray
+    total_profile: np.ndarray | None = None
+    single_scatter_profile: np.ndarray | None = None
+    direct_beam_profile: np.ndarray | None = None
+
+
 def _exp_cutoff_owned(values: np.ndarray) -> np.ndarray:
     """Applies the Fortran 88-optical-depth cutoff in place."""
     np.exp(-values, out=values)
@@ -236,7 +248,9 @@ def solve_fo_solar_obs_eps_batch_numpy(
     flux_factor: np.ndarray,
     exact_scatter: np.ndarray,
     precomputed: FoSolarObsBatchPrecompute,
-) -> np.ndarray:
+    return_profile: bool = False,
+    return_components: bool = False,
+) -> np.ndarray | FoSolarObsBatchResult:
     """Evaluates FO EPS TOA radiance for a spectral batch.
 
     Notes
@@ -256,6 +270,8 @@ def solve_fo_solar_obs_eps_batch_numpy(
 
     if (
         _numba_fo_enabled(int(extinction.shape[0]))
+        and not return_profile
+        and not return_components
         and not precomputed.do_nadir
         and precomputed.fine_path_matrix is not None
         and precomputed.fine_column_index is not None
@@ -283,6 +299,12 @@ def solve_fo_solar_obs_eps_batch_numpy(
     batch_size, nlayers = extinction.shape
     cumsource_up = np.zeros(batch_size, dtype=float)
     cumsource_db = 4.0 * precomputed.mu0 * np.asarray(albedo, dtype=float) * attenuation_nl
+    profile_up = None
+    profile_db = None
+    if return_profile:
+        profile_up = np.zeros((batch_size, nlayers + 1), dtype=float)
+        profile_db = np.empty((batch_size, nlayers + 1), dtype=float)
+        profile_db[:, nlayers] = cumsource_db
 
     if precomputed.do_nadir:
         v = 0
@@ -305,6 +327,9 @@ def solve_fo_solar_obs_eps_batch_numpy(
             source = layer_sum * kn
             cumsource_db = lostrans * cumsource_db
             cumsource_up = lostrans * cumsource_up + source
+            if return_profile:
+                profile_up[:, n - 1] = cumsource_up
+                profile_db[:, n - 1] = cumsource_db
     else:
         if precomputed.fine_path_matrix is None or precomputed.fine_column_index is None:
             raise ValueError("missing non-nadir FO batch geometry terms")
@@ -329,6 +354,32 @@ def solve_fo_solar_obs_eps_batch_numpy(
             source = layer_sum * ke
             cumsource_db = lostrans * cumsource_db
             cumsource_up = lostrans * cumsource_up + source
+            if return_profile:
+                profile_up[:, n - 1] = cumsource_up
+                profile_db[:, n - 1] = cumsource_db
             cot_1 = cot_2
 
-    return 0.25 * np.asarray(flux_factor, dtype=float) / math.pi * (cumsource_up + cumsource_db)
+    scale = 0.25 * np.asarray(flux_factor, dtype=float) / math.pi
+    single_scatter = scale * cumsource_up
+    direct_beam = scale * cumsource_db
+    if return_profile:
+        single_scatter_profile = scale[:, np.newaxis] * profile_up
+        direct_beam_profile = scale[:, np.newaxis] * profile_db
+        total_profile = single_scatter_profile + direct_beam_profile
+        if return_components:
+            return FoSolarObsBatchResult(
+                total=single_scatter + direct_beam,
+                single_scatter=single_scatter,
+                direct_beam=direct_beam,
+                total_profile=total_profile,
+                single_scatter_profile=single_scatter_profile,
+                direct_beam_profile=direct_beam_profile,
+            )
+        return total_profile
+    if return_components:
+        return FoSolarObsBatchResult(
+            total=single_scatter + direct_beam,
+            single_scatter=single_scatter,
+            direct_beam=direct_beam,
+        )
+    return single_scatter + direct_beam

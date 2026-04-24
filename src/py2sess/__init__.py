@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .api import TwoStreamEss, TwoStreamEssOptions, TwoStreamEssResult
+    from .api import TwoStreamEss, TwoStreamEssBatchResult, TwoStreamEssOptions, TwoStreamEssResult
     from .core.fo_solar_obs import FoSolarObsResult
     from .core.fo_thermal import FoThermalResult
     from .core.surface_leaving import (
@@ -42,6 +42,7 @@ __all__ = [
     "TwoStreamEss",
     "TwoStreamEssOptions",
     "TwoStreamEssResult",
+    "TwoStreamEssBatchResult",
     "FoSolarObsResult",
     "FoThermalResult",
     "ThermalSourceInputs",
@@ -66,7 +67,12 @@ __all__ = [
 
 def __getattr__(name: str):
     """Lazily resolves public package exports."""
-    if name in {"TwoStreamEss", "TwoStreamEssOptions", "TwoStreamEssResult"}:
+    if name in {
+        "TwoStreamEss",
+        "TwoStreamEssOptions",
+        "TwoStreamEssResult",
+        "TwoStreamEssBatchResult",
+    }:
         from . import api
 
         value = getattr(api, name)

@@ -53,3 +53,20 @@ def accumulate_upwelling_sources_numpy(
     prefix_exclusive[:, 0] = 1.0
     prefix_exclusive[:, 1:] = prefix[:, :-1]
     return np.sum(prefix_exclusive * layer_source, axis=1) + prefix[:, -1] * surface_source
+
+
+def accumulate_upwelling_profile_numpy(
+    *,
+    layer_source: np.ndarray,
+    layer_trans: np.ndarray,
+    surface_source: np.ndarray,
+) -> np.ndarray:
+    """Evaluates the backward layer recurrence and stores every level."""
+    batch, nlay = layer_source.shape
+    profile = np.empty((batch, nlay + 1), dtype=layer_source.dtype)
+    accum = surface_source
+    profile[:, nlay] = accum
+    for n in range(nlay - 1, -1, -1):
+        accum = layer_source[:, n] + layer_trans[:, n] * accum
+        profile[:, n] = accum
+    return profile

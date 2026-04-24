@@ -8,7 +8,10 @@ import math
 
 import numpy as np
 
-from .batch_accumulation import accumulate_upwelling_sources_numpy
+from .batch_accumulation import (
+    accumulate_upwelling_profile_numpy,
+    accumulate_upwelling_sources_numpy,
+)
 from .bvp_batch import solve_thermal_bvp_batch
 from .optical import delta_m_scale_optical_properties
 from .taylor import vectorized_taylor_series_1
@@ -20,11 +23,22 @@ class ThermalBatchNumpyResult:
 
     two_stream_toa: np.ndarray
     fo_total_up_toa: np.ndarray
+    two_stream_profile: np.ndarray | None = None
+    fo_total_up_profile: np.ndarray | None = None
 
     @property
     def total_toa(self) -> np.ndarray:
         """Returns 2S plus FO upwelling TOA radiance."""
         return self.two_stream_toa + self.fo_total_up_toa
+
+    @property
+    def total_profile(self) -> np.ndarray | None:
+        """Returns 2S plus FO upwelling level radiance when available."""
+        if self.two_stream_profile is None:
+            return None
+        if self.fo_total_up_profile is None:
+            return self.two_stream_profile
+        return self.two_stream_profile + self.fo_total_up_profile
 
 
 @lru_cache(maxsize=None)
@@ -176,8 +190,15 @@ def _accumulate_upwelling_sources(
     layer_source: np.ndarray,
     layer_trans: np.ndarray,
     surface_source: np.ndarray,
+    return_profile: bool = False,
 ) -> np.ndarray:
     """Evaluates the backward layer recurrence in vectorized batch form."""
+    if return_profile:
+        return accumulate_upwelling_profile_numpy(
+            layer_source=layer_source,
+            layer_trans=layer_trans,
+            surface_source=surface_source,
+        )
     return accumulate_upwelling_sources_numpy(
         layer_source=layer_source,
         layer_trans=layer_trans,
@@ -199,6 +220,7 @@ def _two_stream_thermal_toa(
     user_stream,
     thermal_tcutoff,
     bvp_engine: str = "auto",
+    return_profile: bool = False,
 ):
     """Computes batched 2S thermal upwelling TOA radiance."""
     delta_tau, omega_total, asymm_total = delta_m_scale_optical_properties(
@@ -280,6 +302,7 @@ def _two_stream_thermal_toa(
         layer_source=layer_source,
         layer_trans=t_delt_userm,
         surface_source=surface_source,
+        return_profile=return_profile,
     )
 
 
@@ -376,6 +399,7 @@ def _fo_thermal_toa(
     earth_radius,
     nfine,
     geometry=None,
+    return_profile: bool = False,
 ):
     """Computes batched FO thermal upwelling TOA radiance."""
     deltaus = tau * (1.0 - omega * scaling)
@@ -423,9 +447,17 @@ def _fo_thermal_toa(
             sources_up += solution * weight * np.exp(-optical_path)
     cum_atmos = np.zeros(tau.shape[0], dtype=float)
     cum_surface = surfbb * emissivity
+    profile = None
+    if return_profile:
+        profile = np.empty((tau.shape[0], tau.shape[1] + 1), dtype=float)
+        profile[:, tau.shape[1]] = cum_atmos + cum_surface
     for n in range(tau.shape[1] - 1, -1, -1):
         cum_surface = lostrans[:, n] * cum_surface
         cum_atmos = lostrans[:, n] * cum_atmos + sources_up[:, n]
+        if return_profile:
+            profile[:, n] = cum_atmos + cum_surface
+    if return_profile:
+        return profile
     return cum_atmos + cum_surface
 
 
@@ -447,6 +479,7 @@ def solve_thermal_batch_numpy(
     emissivity=None,
     bvp_engine: str = "auto",
     fo_geometry=None,
+    return_profiles: bool = False,
 ) -> ThermalBatchNumpyResult:
     """Solves thermal observation-geometry spectra with NumPy arrays.
 
@@ -501,6 +534,7 @@ def solve_thermal_batch_numpy(
         user_stream=user_stream,
         thermal_tcutoff=thermal_tcutoff,
         bvp_engine=bvp_engine,
+        return_profile=return_profiles,
     )
     fo = _fo_thermal_toa(
         tau=tau,
@@ -514,5 +548,13 @@ def solve_thermal_batch_numpy(
         earth_radius=earth_radius,
         nfine=nfine,
         geometry=fo_geometry,
+        return_profile=return_profiles,
     )
+    if return_profiles:
+        return ThermalBatchNumpyResult(
+            two_stream_toa=two_stream[:, 0],
+            fo_total_up_toa=fo[:, 0],
+            two_stream_profile=two_stream,
+            fo_total_up_profile=fo,
+        )
     return ThermalBatchNumpyResult(two_stream_toa=two_stream, fo_total_up_toa=fo)

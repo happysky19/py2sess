@@ -1,9 +1,4 @@
-"""Utilities for building thermal source inputs from temperature profiles.
-
-The thermal solvers in :mod:`py2sess` consume blackbody source terms directly
-through ``thermal_bb_input`` and ``surfbb``. This module provides small helper
-functions that convert temperatures into those Planck-function values.
-"""
+"""Utilities for building thermal source inputs from temperature profiles."""
 
 from __future__ import annotations
 
@@ -31,18 +26,10 @@ _FORTRAN_PLANCK_VCP = (10.25, 5.7, 3.9, 2.9, 2.3, 1.9, 0.0)
 
 @dataclass(frozen=True)
 class ThermalSourceInputs:
-    """Blackbody source inputs derived from a temperature profile.
+    """Thermal source inputs for public ``forward`` calls."""
 
-    Attributes
-    ----------
-    thermal_bb_input
-        Planck-function values at atmospheric model levels.
-    surfbb
-        Planck-function value for the surface temperature.
-    """
-
-    thermal_bb_input: np.ndarray
-    surfbb: float
+    planck: np.ndarray
+    surface_planck: float
 
 
 def _as_float_array(name: str, values: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
@@ -269,7 +256,7 @@ def thermal_source_from_temperature_profile(
     wavenumber_cm_inv: float | None = None,
     wavenumber_band_cm_inv: tuple[float, float] | None = None,
 ) -> ThermalSourceInputs:
-    """Build ``thermal_bb_input`` and ``surfbb`` from temperatures.
+    """Build ``planck`` and ``surface_planck`` from temperatures.
 
     Exactly one spectral coordinate must be provided.
 
@@ -307,14 +294,14 @@ def thermal_source_from_temperature_profile(
         raise ValueError("Specify exactly one spectral coordinate")
 
     if wavelength_microns is not None:
-        thermal_bb_input = planck_radiance_wavelength(level_temperature, wavelength_microns)
-        surfbb = float(planck_radiance_wavelength(surface_temperature, wavelength_microns))
+        planck = planck_radiance_wavelength(level_temperature, wavelength_microns)
+        surface_planck = float(planck_radiance_wavelength(surface_temperature, wavelength_microns))
     elif wavenumber_cm_inv is not None:
-        thermal_bb_input = planck_radiance_wavenumber(level_temperature, wavenumber_cm_inv)
-        surfbb = float(planck_radiance_wavenumber(surface_temperature, wavenumber_cm_inv))
+        planck = planck_radiance_wavenumber(level_temperature, wavenumber_cm_inv)
+        surface_planck = float(planck_radiance_wavenumber(surface_temperature, wavenumber_cm_inv))
     else:
         low, high = wavenumber_band_cm_inv
-        thermal_bb_input = planck_radiance_wavenumber_band(level_temperature, low, high)
-        surfbb = float(planck_radiance_wavenumber_band(surface_temperature, low, high))
+        planck = planck_radiance_wavenumber_band(level_temperature, low, high)
+        surface_planck = float(planck_radiance_wavenumber_band(surface_temperature, low, high))
 
-    return ThermalSourceInputs(thermal_bb_input=thermal_bb_input, surfbb=surfbb)
+    return ThermalSourceInputs(planck=planck, surface_planck=surface_planck)

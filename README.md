@@ -1,187 +1,153 @@
 # py2sess
 
-`py2sess` is a standalone Python implementation of the optimized 2S-ESS forward radiative-transfer model.
+`py2sess` is a standalone Python implementation of the optimized 2S-ESS
+two-stream radiative-transfer model. It exposes a small public API for solar and
+thermal forward calculations, with NumPy and optional torch backends.
 
-It provides:
+The package does not build or call the original Fortran code. Fortran-style
+names are kept inside the solver core; user code should use the public names
+shown below.
 
-- solar observation-geometry forward calculations
-- thermal observation-geometry forward calculations
-- NumPy and torch execution backends
-- packaged benchmark fixtures for regression testing
-- NumPy and differentiable torch helpers for thermal source construction
-- surface-leaving input helpers
-
-This repository is intentionally independent of the original Fortran codebase. It does not build or invoke Fortran code, and it does not retain the mixed-repository porting history.
-
-Primary upstream references:
-
-- Fortran repository: [vnatraj1/2S-ESS](https://github.com/vnatraj1/2S-ESS)
-- Paper: [Natraj et al., 2022, Journal of Quantitative Spectroscopy and Radiative Transfer](https://www.sciencedirect.com/science/article/pii/S002240732200351X)
-
-## Installation
+## Install
 
 ```bash
 python3 -m pip install -e .
+python3 -m pip install -e ".[torch,dev]"
 ```
 
-Optional extras:
-
-```bash
-python3 -m pip install -e ".[torch]"
-python3 -m pip install -e ".[speed]"
-python3 -m pip install -e ".[plot]"
-python3 -m pip install -e ".[dev]"
-```
-
-Editable install is the recommended development mode. After installation, the
-package imports as `py2sess` without setting `PYTHONPATH`.
+For source-tree runs without installation, set `PYTHONPATH=src`.
 
 ## Quick Start
+
+Solar observation geometry:
 
 ```python
 import numpy as np
 from py2sess import TwoStreamEss, TwoStreamEssOptions
 
-solver = TwoStreamEss(
-    TwoStreamEssOptions(
-        n_layers=3,
-        source_mode="solar_obs",
-        do_level_output=True,
-    )
-)
+solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar"))
 
-result = solver.forward_fo(
-    tau_arr=np.zeros(3),
-    omega_arr=np.zeros(3),
-    asymm_arr=np.zeros(3),
-    height_grid=np.array([3.0, 2.0, 1.0, 0.0]),
-    user_obsgeoms=np.array([[30.0, 0.0, 0.0]]),
-    stream_value=1.0 / np.sqrt(3.0),
-    flux_factor=1.0,
+result = solver.forward(
+    tau=np.full(3, 0.02),
+    ssa=np.full(3, 0.2),
+    g=np.full(3, 0.1),
+    z=np.array([3.0, 2.0, 1.0, 0.0]),
+    angles=[30.0, 20.0, 0.0],  # sza, vza, relative azimuth in degrees
     albedo=0.3,
-    d2s_scaling=np.zeros(3),
-    fo_geometry_mode="eps",
 )
 
-print(result.intensity_total)
+print(result.radiance)
 ```
 
-Run the bundled examples from the repository root after the editable install:
+Thermal observation geometry:
+
+```python
+solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="thermal"))
+
+result = solver.forward(
+    tau=np.full(3, 0.1),
+    ssa=np.zeros(3),
+    g=np.zeros(3),
+    z=np.array([3.0, 2.0, 1.0, 0.0]),
+    angles=20.0,
+    planck=np.array([1.0, 1.1, 1.2, 1.3]),
+    surface_planck=1.4,
+    emissivity=1.0,
+)
+```
+
+Batched wavelengths use leading dimensions:
+
+```python
+solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="thermal"))
+
+tau = np.full((100, 3), 0.02)
+result = solver.forward(
+    tau=tau,
+    ssa=np.zeros_like(tau),
+    g=np.zeros_like(tau),
+    z=np.array([3.0, 2.0, 1.0, 0.0]),
+    angles=20.0,
+    planck=np.ones((100, 4)),
+    surface_planck=np.ones(100),
+    emissivity=np.ones(100),
+)
+print(result.radiance.shape)  # (100,)
+```
+
+Torch CPU float64:
+
+```python
+solver = TwoStreamEss(
+    TwoStreamEssOptions(nlyr=3, mode="solar", backend="torch", torch_dtype="float64")
+)
+```
+
+## Public Names
+
+Core inputs:
+
+| Name | Meaning |
+|---|---|
+| `nlyr` | number of atmospheric layers |
+| `mode` | `solar`, `solar_lattice`, or `thermal` |
+| `tau` | layer optical thickness |
+| `ssa` | single-scattering albedo |
+| `g` | layer asymmetry factor |
+| `z` | level height grid, top to bottom |
+| `angles` | solar `[sza, vza, raz]` or thermal view zenith angle |
+| `albedo` | Lambertian surface albedo |
+| `planck` | thermal level Planck/source input |
+| `surface_planck` | surface Planck radiance |
+| `emissivity` | surface emissivity |
+
+Optional controls include `stream`, `fbeam`, `delta_m_scaling`, `geometry`,
+`include_fo`, `fo_exact_scatter`, and `output_levels`.
+
+Result names:
+
+- `result.radiance`: preferred total radiance
+- `result.radiance_2s`: two-stream component
+- `result.radiance_fo`: first-order component when available
+- `result.radiance_total`: explicit total radiance
+- `result.radiance_profile_*`: profile outputs when `output_levels=True`
+
+For the complete argument table and Fortran-name crosswalk, see
+[`docs/api_arguments.md`](docs/api_arguments.md).
+
+## Examples
 
 ```bash
-python3 examples/run_tir_reference_case.py
 python3 examples/run_uv_reference_case.py
-python3 examples/run_analytic_cases.py
+python3 examples/run_tir_reference_case.py
 python3 examples/build_thermal_source_from_temperature.py
-python3 examples/retrieve_synthetic_spectra.py
 ```
 
-The retrieval example defaults to a zero-noise/no-prior sanity check. For a
-noisy, weakly regularized demonstration, run:
+Full-spectrum benchmark scripts accept local `.npz` bundles:
 
 ```bash
-python3 examples/retrieve_synthetic_spectra.py \
-  --prior-mode weak \
-  --thermal-noise 0.003 \
-  --solar-noise 0.002 \
-  --uv-noise 0.002 \
-  --plot-dir outputs/retrieval_plots
-```
-
-The retrieval example uses a Rodgers-style optimal-estimation residual with
-torch Jacobians and SciPy least-squares. It prints Jacobian, Gauss-Newton
-Hessian, posterior-covariance, averaging-kernel, and DFS diagnostics. In
-zero-noise/no-prior mode, the thermal, solar, and UV benchmark retrievals
-recover the generating truth.
-
-The optional `--plot-dir` argument saves one spectrum PNG per retrieval, each
-with pre-noise clean, post-noise observed, and fitted spectra on a log radiance
-scale, plus a signed post-noise-minus-fitted residual panel. The post-noise
-observed spectrum is the measurement used by the retrieval.
-
-Full-spectrum benchmark examples are included for local or external `.npz`
-bundles that follow the documented schema:
-
-```bash
-python3 examples/benchmark_tir_full_spectrum.py /path/to/tir_full_bundle.npz
 python3 examples/benchmark_uv_full_spectrum.py /path/to/uv_full_bundle.npz
+python3 examples/benchmark_tir_full_spectrum.py /path/to/tir_full_bundle.npz
 ```
 
-If the bundle includes saved Fortran radiance arrays such as `ref_total`, the
-benchmark table also reports total-radiance accuracy alongside timing.
+Bundle details are in
+[`docs/full_spectrum_benchmarks.md`](docs/full_spectrum_benchmarks.md).
 
-If you want to run directly from a source tree without installing, use:
-
-```bash
-PYTHONPATH=src python3 examples/run_tir_reference_case.py
-PYTHONPATH=src python3 examples/run_uv_reference_case.py
-PYTHONPATH=src python3 examples/run_analytic_cases.py
-PYTHONPATH=src python3 examples/build_thermal_source_from_temperature.py
-PYTHONPATH=src python3 examples/retrieve_synthetic_spectra.py
-PYTHONPATH=src python3 examples/benchmark_tir_full_spectrum.py /path/to/tir_full_bundle.npz
-PYTHONPATH=src python3 examples/benchmark_uv_full_spectrum.py /path/to/uv_full_bundle.npz
-```
-
-Run the test suite:
+## Tests
 
 ```bash
 python3 -m unittest discover -s tests -v
-```
-
-## Validation
-
-The package includes three validation layers:
-
-- analytic checks for closed-form solver identities
-- saved UV and TIR benchmark fixtures containing Python-ready inputs and Fortran reference outputs
-- NumPy versus PyTorch backend parity checks
-
-The benchmark fixtures are static subsets of the larger author-supplied cases.
-They are small enough for routine regression testing while still exercising the
-same 114-layer solver structure used by the benchmark datasets.
-
-Within the standalone test suite, the saved-file checks focus on the stable
-quantities for each packaged case:
-
-- UV fixture: saved 2S TOA radiance
-- TIR fixture: saved total TOA radiance and FO TOA radiance
-
-Details for the packaged reference fixtures are in [`docs/benchmark_cases.md`](docs/benchmark_cases.md).
-
-## Acknowledgments
-
-`py2sess` is a standalone Python implementation derived from the 2S-ESS
-methodology. Its validation workflow includes comparisons against
-author-provided benchmark outputs and saved-file reference cases.
-
-## Repository Layout
-
-- `src/py2sess`: core package
-- `src/py2sess/data/benchmark`: packaged UV and TIR benchmark fixtures
-- `tests`: standalone regression and analytic checks
-- `examples`: runnable demos
-- `docs/benchmark_cases.md`: packaged benchmark notes
-- `docs/full_spectrum_benchmarks.md`: full-spectrum benchmark bundle notes
-- `docs/retrieval_examples.md`: synthetic autograd retrieval examples
-- `docs/pypi_release.md`: PyPI release checklist
-
-## Development Checks
-
-Install the development extras, then run:
-
-```bash
-python3 -m pre_commit run --all-files
 python3 -m ruff check .
-python3 -m unittest discover -s tests -v
+python3 -m ruff format --check .
 ```
 
-The pre-commit setup follows the lightweight repository hygiene pattern used in
-`pyharp`, with an added `ruff` lint-and-format layer for the Python code.
+The packaged UV and TIR fixtures are small regression cases derived from the
+original 2S-ESS benchmark outputs. Large full-spectrum bundles and generated
+reports should stay outside git, for example under ignored local directories
+such as `benchmark_bundles/`, `outputs/`, `local_outputs/`, or
+`paper_outputs/`.
 
-## Notes
+## References
 
-- CPU float64 is the parity-oriented reference path.
-- PyTorch support is optional.
-- The packaged benchmark cases are validation fixtures, not full-spectrum performance datasets.
-- The large full-spectrum benchmark bundles are intended to remain local or be
-  hosted separately rather than committed to the GitHub repository.
+- Fortran repository: [vnatraj1/2S-ESS](https://github.com/vnatraj1/2S-ESS)
+- Paper: [Natraj et al., 2022, JQSRT](https://www.sciencedirect.com/science/article/pii/S002240732200351X)
