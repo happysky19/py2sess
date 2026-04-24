@@ -316,7 +316,7 @@ def _prepare_brdf(
     if not isinstance(brdf, dict):
         raise ValueError("brdf must be a mapping with keys 'brdf_f_0', 'brdf_f', and 'ubrdf_f'")
     if "kernel_specs" in brdf:
-        generated = solar_obs_brdf_from_kernels(
+        coeffs = solar_obs_brdf_from_kernels(
             kernel_specs=list(brdf["kernel_specs"]),
             user_obsgeoms=user_obsgeoms if user_obsgeoms is not None else brdf.get("user_obsgeoms"),
             stream_value=float(
@@ -327,9 +327,9 @@ def _prepare_brdf(
             n_geoms=n_geoms,
         )
         return PreparedBrdf(
-            brdf_f_0=np.asarray(generated.brdf_f_0, dtype=float),
-            brdf_f=np.asarray(generated.brdf_f, dtype=float),
-            ubrdf_f=np.asarray(generated.ubrdf_f, dtype=float),
+            brdf_f_0=np.asarray(coeffs.brdf_f_0, dtype=float),
+            brdf_f=np.asarray(coeffs.brdf_f, dtype=float),
+            ubrdf_f=np.asarray(coeffs.ubrdf_f, dtype=float),
         )
     brdf_f_0 = np.asarray(brdf.get("brdf_f_0"), dtype=float)
     brdf_f = np.asarray(brdf.get("brdf_f"), dtype=float)
@@ -455,14 +455,14 @@ def prepare_inputs(
             if brdf is None or not isinstance(brdf, dict):
                 raise ValueError("do_brdf_surface=True requires thermal brdf coefficients")
             if "kernel_specs" in brdf:
-                generated = thermal_brdf_from_kernels(
+                coeffs = thermal_brdf_from_kernels(
                     kernel_specs=list(brdf["kernel_specs"]),
                     user_angles=angles,
                     do_surface_emission=float(emissivity) != 0.0,
                 )
-                brdf_f = np.asarray(generated.brdf_f, dtype=float)
-                ubrdf_f = np.asarray(generated.ubrdf_f, dtype=float)
-                emissivity = generated.emissivity
+                brdf_f = np.asarray(coeffs.brdf_f, dtype=float)
+                ubrdf_f = np.asarray(coeffs.ubrdf_f, dtype=float)
+                emissivity = coeffs.emissivity
             else:
                 brdf_f = np.asarray(brdf.get("brdf_f"), dtype=float)
                 ubrdf_f = np.asarray(brdf.get("ubrdf_f"), dtype=float)

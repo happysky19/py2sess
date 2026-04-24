@@ -14,7 +14,6 @@ from .core.fo_solar_obs import FoSolarObsResult, solve_fo_solar_obs
 from .core.fo_thermal import FoThermalResult, solve_fo_thermal
 from .core.lattice_result import add_lattice_axes, lattice_shape, reshape_lattice_array
 from .core.preprocess import PreparedInputs, prepare_inputs
-from .core.result_components import build_solar_components, build_thermal_components
 from .core.solver import solve_optimized_solar_obs
 
 _MODE_TO_SOURCE_MODE = {
@@ -104,8 +103,7 @@ class TwoStreamEssOptions:
     fo_thermal_source_delta_m_scaling
         Optional override for the thermal FO source-side delta-M multiplier
         used by the raw Fortran FO thermal core. ``None`` disables source-side
-        scaling, matching the corrected FO thermal handling described by the
-        code author.
+        scaling, matching the current validated FO thermal path.
     """
 
     nlyr: int
@@ -321,14 +319,14 @@ class TwoStreamEssResult:
 
     def solar_components(self) -> dict[str, Any]:
         """Returns the available solar-component breakdown as a flat mapping."""
-        return build_solar_components(
-            intensity_toa=self.intensity_toa,
-            intensity_boa=self.intensity_boa,
-            fo_intensity_total=self.fo_intensity_total,
-            fo_intensity_ss=self.fo_intensity_ss,
-            fo_intensity_db=self.fo_intensity_db,
-            combined_intensity_toa=self.combined_intensity_toa,
-        )
+        return {
+            "twostream_toa": self.intensity_toa,
+            "twostream_boa": self.intensity_boa,
+            "fo_total": self.fo_intensity_total,
+            "fo_ss": self.fo_intensity_ss,
+            "fo_db": self.fo_intensity_db,
+            "combined_toa": self.combined_intensity_toa,
+        }
 
     def solar_components_lattice(self) -> dict[str, Any]:
         """Returns the solar-component breakdown reshaped to lattice form."""
@@ -350,19 +348,23 @@ class TwoStreamEssResult:
 
     def thermal_components(self) -> dict[str, Any]:
         """Returns the available thermal-component breakdown as a flat mapping."""
-        return build_thermal_components(
-            intensity_toa=self.intensity_toa,
-            intensity_boa=self.intensity_boa,
-            fo_mu1=self.fo_mu1,
-            fo_thermal_atmos_up_toa=self.fo_thermal_atmos_up_toa,
-            fo_thermal_surface_toa=self.fo_thermal_surface_toa,
-            fo_thermal_total_up_toa=self.fo_thermal_total_up_toa,
-            fo_thermal_atmos_dn_toa=self.fo_thermal_atmos_dn_toa,
-            fo_thermal_atmos_up_boa=self.fo_thermal_atmos_up_boa,
-            fo_thermal_surface_boa=self.fo_thermal_surface_boa,
-            fo_thermal_total_up_boa=self.fo_thermal_total_up_boa,
-            fo_thermal_atmos_dn_boa=self.fo_thermal_atmos_dn_boa,
-        )
+        return {
+            "twostream_toa": self.intensity_toa,
+            "twostream_boa": self.intensity_boa,
+            "fo_mu1": self.fo_mu1,
+            "fo_toa_up": {
+                "atmosphere": self.fo_thermal_atmos_up_toa,
+                "surface": self.fo_thermal_surface_toa,
+                "total": self.fo_thermal_total_up_toa,
+            },
+            "fo_toa_down_atmosphere": self.fo_thermal_atmos_dn_toa,
+            "fo_boa_up": {
+                "atmosphere": self.fo_thermal_atmos_up_boa,
+                "surface": self.fo_thermal_surface_boa,
+                "total": self.fo_thermal_total_up_boa,
+            },
+            "fo_boa_down_atmosphere": self.fo_thermal_atmos_dn_boa,
+        }
 
     def intensity_toa_lattice(self) -> np.ndarray:
         """Returns TOA intensity reshaped to the original lattice grid."""
@@ -2865,8 +2867,8 @@ class TwoStreamEss:
         z: Any | None = None,
         angles: Any | None = None,
         stream: float | None = None,
-        fbeam: float = 1.0,
-        albedo: float = 0.0,
+        fbeam: Any = 1.0,
+        albedo: Any = 0.0,
         delta_m_scaling: Any | None = None,
         view_angles: Any | None = None,
         beam_szas: Any | None = None,
@@ -2875,8 +2877,8 @@ class TwoStreamEss:
         surface_leaving: Any | None = None,
         earth_radius: float = 6371.0,
         planck: Any | None = None,
-        surface_planck: float = 0.0,
-        emissivity: float = 0.0,
+        surface_planck: Any = 0.0,
+        emissivity: Any = 0.0,
         geometry: str = "pseudo_spherical",
         n_moments: int = 5000,
         nfine: int = 3,
@@ -2902,7 +2904,7 @@ class TwoStreamEss:
         view_angles, beam_szas, relazms
             Advanced lattice-style or thermal viewing-angle inputs.
         brdf, surface_leaving
-            Optional surface supplements for preprocessing compatibility.
+            Optional BRDF and surface-leaving inputs passed to the solver core.
         earth_radius
             Planetary radius used by spherical geometry paths.
         planck, surface_planck, emissivity

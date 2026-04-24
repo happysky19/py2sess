@@ -17,7 +17,7 @@ Set `TwoStreamEssOptions(output_levels=True)` when you need
 upwelling radiance profiles; profile arrays use the final axis for levels,
 ordered from TOA to BOA.
 
-| New API name | Meaning | Shape | Default | Old Python name | Fortran/internal name |
+| Public name | Meaning | Shape | Default | Old Python name | Fortran/internal name |
 |---|---|---:|---|---|---|
 | `nlyr` | Number of atmospheric layers | scalar | required | `n_layers` | `NLAYERS` |
 | `mode` | Source mode: `solar`, `solar_lattice`, or `thermal` | scalar | `solar` | `source_mode` | source-mode branch in the master drivers |
@@ -46,13 +46,14 @@ ordered from TOA to BOA.
 | `geometry` | FO geometry method: `pseudo_spherical` or `regular_pseudo_spherical` | scalar | `pseudo_spherical` | `fo_geometry_mode` | `FO_SSGeometry_Master_Obs_EPS`, `FO_SSGeometry_Master_Obs_RPS`, `FO_DTGeometry_Master_EPS`, `FO_DTGeometry_Master_PP_RPS` |
 | `earth_radius` | Planet radius for spherical paths, km | scalar | `6371.0` | `earth_radius` | `EARTH_RADIUS` |
 | `include_fo` | Attach first-order outputs to a main 2S run | scalar | `False` | `include_fo` | FO master-call branch |
+| `fo_exact_scatter` | Precomputed solar single-scatter phase term; required for batched solar FO | `(..., nlyr)` or `(..., nlyr, ngeom)` | `None` | `exact_scatter` | `FO_EXACTSCAT` |
 | `n_moments` / `fo_n_moments` | Phase-function moments used by solar FO | scalar | `5000` | `n_moments` / `fo_n_moments` | `NMOMENTS_INPUT`-style FO moment controls |
 | `nfine` / `fo_nfine` | Fine-layer quadrature divisions for EPS FO integration | scalar | `3` | `nfine` / `fo_nfine` | `NFINEDIVS` |
 
 ## Defaults
 
 - `stream=None` becomes `1 / sqrt(3)` for solar modes and `0.5` for thermal.
-- `fbeam=None` is not needed; the public default is `1.0`.
+- `fbeam` defaults to `1.0`.
 - `delta_m_scaling=None` becomes a zero vector with length `nlyr`.
 - `geometry="pseudo_spherical"` maps to the EPS FO geometry path.
 - Solar and thermal source handling are mode-exclusive. A single `TwoStreamEss`
@@ -64,9 +65,9 @@ ordered from TOA to BOA.
 - `result.radiance_2s` returns the two-stream TOA radiance.
 - `result.radiance_fo` returns the attached first-order component when
   available.
-- `result.radiance_total` returns the best available total radiance. For solar and thermal
-  `include_fo=True`, this is `2S + FO`; otherwise it falls back to the primary
-  2S output available for the requested method.
+- `result.radiance_total` returns the best available total radiance. For solar
+  and thermal `include_fo=True`, this is `2S + FO`; otherwise it falls back to
+  the primary 2S output available for the requested method.
 - Batched profile results are available as `result.radiance_profile_2s`,
   `result.radiance_profile_fo`, and `result.radiance_profile_total` when
   `output_levels=True`.

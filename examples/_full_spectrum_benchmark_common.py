@@ -19,7 +19,6 @@ class BenchmarkRow:
     wall_seconds: float
     rt_seconds: float
     setup_seconds: float
-    prep_seconds: float | None = None
     fo_seconds: float | None = None
     two_stream_seconds: float | None = None
     max_abs_diff: float | None = None
@@ -110,16 +109,11 @@ def scalar_value(value: np.ndarray | float | int) -> float:
     return float(array.reshape(-1)[0])
 
 
-def relative_diff(value: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    """Returns a stable elementwise relative difference."""
-    scale = np.maximum(np.abs(reference), 1.0e-15)
-    return np.abs(value - reference) / scale
-
-
 def accuracy_summary(value: np.ndarray, reference: np.ndarray) -> tuple[float, float]:
     """Returns the max absolute diff and max relative diff in percent."""
     abs_diff = float(np.max(np.abs(value - reference)))
-    rel_diff_pct = float(np.max(relative_diff(value, reference)) * 100.0)
+    scale = np.maximum(np.abs(reference), 1.0e-15)
+    rel_diff_pct = float(np.max(np.abs(value - reference) / scale) * 100.0)
     return abs_diff, rel_diff_pct
 
 

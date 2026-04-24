@@ -51,7 +51,7 @@ def _exp_cutoff(values: np.ndarray, cutoff: float) -> np.ndarray:
 
 
 def _exp_cutoff_owned(values: np.ndarray, cutoff: float) -> np.ndarray:
-    """Returns the cutoff exponential in place when ``values`` is temporary."""
+    """Applies the cutoff exponential in place."""
     if values.size == 0 or float(np.max(values)) <= cutoff:
         np.exp(-values, out=values)
         return values

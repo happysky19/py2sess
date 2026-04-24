@@ -120,7 +120,8 @@ def benchmark_numpy(
 
     wall_seconds = time.perf_counter() - wall_start
     rt_seconds = fo_seconds + two_stream_seconds
-    _ = checksum
+    if not np.isfinite(checksum):
+        raise RuntimeError("benchmark output checksum is not finite")
     return BenchmarkRow(
         backend="numpy",
         wavelengths=wavelengths,
@@ -173,7 +174,8 @@ def benchmark_numpy_forward(
     max_rel_diff_pct = None
     if "ref_total" in bundle:
         max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
-    _ = checksum
+    if not np.isfinite(checksum):
+        raise RuntimeError("benchmark output checksum is not finite")
     chunk_size = min(wavelengths, 30_000)
     return BenchmarkRow(
         backend="numpy-forward-levels" if output_levels else "numpy-forward",
@@ -287,7 +289,8 @@ def benchmark_torch(
 
     wall_seconds = time.perf_counter() - wall_start
     rt_seconds = fo_seconds + two_stream_seconds
-    _ = checksum
+    if not np.isfinite(checksum):
+        raise RuntimeError("benchmark output checksum is not finite")
     return BenchmarkRow(
         backend=f"torch-{torch_device_name}-{torch_dtype_name}",
         wavelengths=wavelengths,
@@ -358,7 +361,8 @@ def benchmark_torch_forward(
     max_rel_diff_pct = None
     if "ref_total" in bundle:
         max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
-    _ = checksum
+    if not np.isfinite(checksum):
+        raise RuntimeError("benchmark output checksum is not finite")
     chunk_size = min(wavelengths, 30_000)
     return BenchmarkRow(
         backend=(

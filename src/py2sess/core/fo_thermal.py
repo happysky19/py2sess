@@ -72,17 +72,17 @@ class FoThermalResult:
 
     @property
     def radiance_up_toa(self) -> np.ndarray:
-        """Compatibility alias for total upwelling TOA radiance."""
+        """Total upwelling radiance at TOA."""
         return self.intensity_total_up_toa
 
     @property
     def radiance_up_boa(self) -> np.ndarray:
-        """Compatibility alias for total upwelling BOA radiance."""
+        """Total upwelling radiance at BOA."""
         return self.intensity_total_up_boa
 
     @property
     def radiance_up_profile(self) -> np.ndarray | None:
-        """Compatibility alias for the total upwelling radiance profile."""
+        """Total upwelling radiance profile when level output is available."""
         return self.intensity_total_up_profile
 
     def toa_up_components(self) -> dict[str, Any]:

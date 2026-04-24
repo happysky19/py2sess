@@ -8,9 +8,6 @@ from py2sess import (
     TwoStreamEss,
     TwoStreamEssOptions,
     TwoStreamEssBatchResult,
-    load_tir_benchmark_case,
-    load_uv_benchmark_case,
-    thermal_source_from_temperature_profile,
     thermal_source_from_temperature_profile_torch,
 )
 from py2sess.core.backend import has_torch, to_numpy
@@ -19,7 +16,6 @@ from py2sess.core.backend import has_torch, to_numpy
 class ApiTests(unittest.TestCase):
     def test_package_exports_are_available(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3))
-        self.assertEqual(solver.options.nlyr, 3)
         self.assertEqual(solver.options.nlyr, 3)
         self.assertTrue(callable(thermal_source_from_temperature_profile_torch))
 
@@ -513,23 +509,6 @@ class ApiTests(unittest.TestCase):
         np.testing.assert_allclose(
             to_numpy(torch_result.radiance_fo), numpy_result.radiance_fo, rtol=1.0e-12, atol=1e-12
         )
-
-    def test_reference_case_loaders_return_expected_dimensions(self) -> None:
-        tir = load_tir_benchmark_case()
-        uv = load_uv_benchmark_case()
-        self.assertEqual(tir.n_layers, 114)
-        self.assertEqual(uv.n_layers, 114)
-        self.assertGreater(tir.n_wavelengths, 0)
-        self.assertGreater(uv.n_wavelengths, 0)
-
-    def test_thermal_source_helper_returns_expected_sizes(self) -> None:
-        source = thermal_source_from_temperature_profile(
-            [220.0, 230.0, 240.0, 250.0],
-            280.0,
-            wavenumber_band_cm_inv=(900.0, 901.0),
-        )
-        self.assertEqual(source.thermal_bb_input.shape, (4,))
-        self.assertGreater(source.surfbb, 0.0)
 
 
 if __name__ == "__main__":

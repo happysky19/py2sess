@@ -12,6 +12,12 @@ PYTHONPATH=src python3 examples/benchmark_tir_full_spectrum.py /path/to/tir_full
 PYTHONPATH=src python3 examples/benchmark_uv_full_spectrum.py /path/to/uv_full_bundle.npz
 ```
 
+To sweep UV and TIR with 1, 2, and 4 threads:
+
+```bash
+scripts/run_full_benchmark_threads.sh /path/to/uv_full_bundle.npz /path/to/tir_full_bundle.npz
+```
+
 The benchmark table reports:
 
 - `load (s)`: one-time bundle read and slice time, printed in the header
@@ -20,6 +26,7 @@ The benchmark table reports:
 - `setup (s)`: `wall (s) - rt (s)`
 - `fo (s)`, `2s (s)`: component timings when available
 - `#wavelength/s`: spectral throughput based on `rt (s)`
+- `chunk`: low-level chunk size or public `.forward()` internal endpoint chunk size
 - `max abs diff`, `max rel (%)`: optional total-radiance accuracy relative to
   bundled saved Fortran outputs when `ref_total` is present
 
