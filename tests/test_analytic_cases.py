@@ -52,7 +52,7 @@ class BoundaryConditionAnalyticTests(unittest.TestCase):
             result.intensity_toa, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14
         )
         np.testing.assert_allclose(
-            result.fo_radiance, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14
+            result.radiance_fo, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14
         )
         np.testing.assert_allclose(
             result.combined_intensity_toa, np.zeros(1, dtype=float), rtol=0.0, atol=1.0e-14

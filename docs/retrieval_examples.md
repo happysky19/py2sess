@@ -1,9 +1,7 @@
 # Synthetic Retrieval Examples
 
 `examples/retrieve_synthetic_spectra.py` demonstrates how to use `py2sess` in
-small differentiable retrieval workflows. Reusable retrieval utilities live in
-`py2sess.retrieval`; the example script is a driver that builds synthetic
-solar, UV, and thermal cases.
+small differentiable retrieval workflows.
 
 The script creates spectra with `py2sess` and retrieves small state vectors
 with a Rodgers-style optimal-estimation residual:
@@ -37,10 +35,9 @@ The script currently includes four workflows:
   retrieves scalar albedo and optical-depth multipliers from the packaged UV
   benchmark geometry.
 
-The solar and UV retrieval examples use the differentiable 2S torch kernel.
-Thermal retrieval uses the differentiable thermal FO + 2S torch batch helper.
-Torch solar FO batch support exists for forward calculations, but these compact
-retrieval examples keep solar/UV state vectors on the 2S path.
+The solar and UV retrieval examples use the differentiable 2S torch kernel
+only. The package currently includes a batched NumPy FO solar helper for
+benchmark parity, but not a torch-native FO solar helper.
 
 ## Run
 
@@ -114,15 +111,3 @@ DFS = trace(A)
 
 When `prior-mode=off`, `S_a^-1` is zero and the retrieval reduces to
 Jacobian-based nonlinear least squares.
-
-## Reusable Helpers
-
-The `py2sess.retrieval` module exposes the pieces used by the example:
-
-- `RodgersObjective` for the stacked measurement/prior residual.
-- `RodgersPrior` for Gaussian background constraints.
-- `optimal_estimation_least_squares` for the SciPy solve.
-- `forward_value_and_jacobian` for dense torch Jacobians.
-- `finite_difference_jacobian` and `relative_jacobian_error` for gradient checks.
-- `noise_std`, `add_noise`, and `measurement_error` for synthetic measurement noise.
-- `save_retrieval_chart` for local spectrum plots.

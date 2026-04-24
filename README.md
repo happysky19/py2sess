@@ -215,12 +215,9 @@ python3 examples/retrieve_synthetic_spectra.py \
   --plot-dir outputs/retrieval_plots
 ```
 
-The retrieval example uses the reusable `py2sess.retrieval` helpers for a
-Rodgers-style optimal-estimation residual with torch Jacobians and SciPy
-least-squares. It prints Jacobian, Gauss-Newton Hessian,
-posterior-covariance, averaging-kernel, and DFS diagnostics. In
-zero-noise/no-prior mode, the well-posed thermal, solar, and UV benchmark
-retrievals recover the generating truth.
+The retrieval example remains a standalone script in this branch. Reusable
+retrieval APIs will be handled separately so the public forward API stays small
+and easy to review.
 
 The optional `--plot-dir` argument saves one spectrum PNG per retrieval, each
 with pre-noise clean, post-noise observed, and fitted spectra on a log radiance

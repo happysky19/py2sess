@@ -33,6 +33,26 @@ _GEOMETRY_TO_FO_MODE = {
 
 
 @dataclass(frozen=True)
+class _CoreOptions:
+    """Internal option shape expected by the Fortran-style solver core."""
+
+    n_layers: int
+    source_mode: str
+    do_upwelling: bool
+    do_dnwelling: bool
+    do_plane_parallel: bool
+    do_delta_scaling: bool
+    do_level_output: bool
+    do_mvout_only: bool
+    do_additional_mvout: bool
+    do_surface_leaving: bool
+    do_sl_isotropic: bool
+    do_brdf_surface: bool
+    bvp_solver: str
+    thermal_tcutoff: float
+
+
+@dataclass(frozen=True)
 class TwoStreamEssOptions:
     """Configuration for a forward-model run.
 
@@ -121,66 +141,6 @@ class TwoStreamEssOptions:
             raise ValueError("backend='torch' requires torch to be installed")
         if self.bvp_solver not in {"scipy", "banded", "pentadiag"}:
             raise ValueError("bvp_solver must be 'scipy', 'banded', or 'pentadiag'")
-
-    @property
-    def n_layers(self) -> int:
-        """Internal compatibility alias for the original Fortran-port name."""
-        return self.nlyr
-
-    @property
-    def source_mode(self) -> str:
-        """Internal source-mode selector used by the solver core."""
-        return _MODE_TO_SOURCE_MODE[self.mode]
-
-    @property
-    def do_upwelling(self) -> bool:
-        """Internal compatibility alias."""
-        return self.upwelling
-
-    @property
-    def do_dnwelling(self) -> bool:
-        """Internal compatibility alias."""
-        return self.downwelling
-
-    @property
-    def do_plane_parallel(self) -> bool:
-        """Internal compatibility alias."""
-        return self.plane_parallel
-
-    @property
-    def do_delta_scaling(self) -> bool:
-        """Internal compatibility alias."""
-        return self.delta_scaling
-
-    @property
-    def do_level_output(self) -> bool:
-        """Internal compatibility alias."""
-        return self.output_levels
-
-    @property
-    def do_mvout_only(self) -> bool:
-        """Internal compatibility alias."""
-        return self.mvout_only
-
-    @property
-    def do_additional_mvout(self) -> bool:
-        """Internal compatibility alias."""
-        return self.additional_mvout
-
-    @property
-    def do_surface_leaving(self) -> bool:
-        """Internal compatibility alias."""
-        return self.surface_leaving
-
-    @property
-    def do_sl_isotropic(self) -> bool:
-        """Internal compatibility alias."""
-        return self.sl_isotropic
-
-    @property
-    def do_brdf_surface(self) -> bool:
-        """Internal compatibility alias."""
-        return self.brdf_surface
 
     @property
     def effective_fo_optical_deltam_scaling(self) -> bool:
@@ -297,11 +257,6 @@ class TwoStreamEssResult:
         if self.fo_intensity_total is not None:
             return self.fo_intensity_total
         return self.fo_thermal_total_up_toa
-
-    @property
-    def fo_radiance(self) -> np.ndarray | None:
-        """Compatibility alias for the preferred ``radiance_fo`` name."""
-        return self.radiance_fo
 
     @property
     def radiance_total(self) -> np.ndarray:
@@ -452,6 +407,30 @@ class TwoStreamEss:
     def __init__(self, options: TwoStreamEssOptions):
         self.options = options
 
+    @property
+    def _source_mode(self) -> str:
+        """Returns the internal source-mode selector for the configured mode."""
+        return _MODE_TO_SOURCE_MODE[self.options.mode]
+
+    def _core_options(self) -> _CoreOptions:
+        """Returns the private option adapter expected by core solver modules."""
+        return _CoreOptions(
+            n_layers=self.options.nlyr,
+            source_mode=self._source_mode,
+            do_upwelling=self.options.upwelling,
+            do_dnwelling=self.options.downwelling,
+            do_plane_parallel=self.options.plane_parallel,
+            do_delta_scaling=self.options.delta_scaling,
+            do_level_output=self.options.output_levels,
+            do_mvout_only=self.options.mvout_only,
+            do_additional_mvout=self.options.additional_mvout,
+            do_surface_leaving=self.options.surface_leaving,
+            do_sl_isotropic=self.options.sl_isotropic,
+            do_brdf_surface=self.options.brdf_surface,
+            bvp_solver=self.options.bvp_solver,
+            thermal_tcutoff=self.options.thermal_tcutoff,
+        )
+
     @staticmethod
     def _validate_fo_geometry_mode(fo_geometry_mode: str) -> None:
         """Validates the named FO solar geometry mode."""
@@ -484,7 +463,7 @@ class TwoStreamEss:
         if angles is None:
             return None
         arr = np.asarray(to_numpy(angles), dtype=float)
-        source_mode = self.options.source_mode
+        source_mode = self._source_mode
         if source_mode == "solar_obs":
             if arr.ndim == 1 and arr.size == 3:
                 return arr.reshape(1, 3)
@@ -511,7 +490,7 @@ class TwoStreamEss:
 
     def _default_stream(self) -> float:
         """Returns the public API default two-stream quadrature cosine."""
-        if self.options.source_mode == "thermal":
+        if self._source_mode == "thermal":
             return 0.5
         return 1.0 / math.sqrt(3.0)
 
@@ -534,7 +513,7 @@ class TwoStreamEss:
         geometry: str,
     ) -> dict[str, Any]:
         """Translates friendly public names to the solver's internal names."""
-        source_mode = self.options.source_mode
+        source_mode = self._source_mode
         user_obsgeoms = None
         user_angles = None
         user_relazms = None
@@ -586,7 +565,7 @@ class TwoStreamEss:
         if shape is None:
             shape = np.asarray(tau_arr).shape
         shape = tuple(int(dim) for dim in shape)
-        return len(shape) > 1 and shape[-1] == self.options.n_layers
+        return len(shape) > 1 and shape[-1] == self.options.nlyr
 
     @staticmethod
     def _require_finite(name: str, value: np.ndarray) -> None:
@@ -816,7 +795,7 @@ class TwoStreamEss:
         n_geometries: int,
     ):
         """Returns the exact-scatter torch batch slice for one solar geometry."""
-        n_layers = self.options.n_layers
+        n_layers = self.options.nlyr
         scatter = value_to_torch(fo_exact_scatter, context)
         if n_geometries == 1:
             return self._broadcast_batch_layers_torch(
@@ -850,7 +829,7 @@ class TwoStreamEss:
         n_geometries: int,
     ) -> np.ndarray:
         """Returns the exact-scatter batch slice for one solar geometry."""
-        n_layers = self.options.n_layers
+        n_layers = self.options.nlyr
         scatter = np.asarray(to_numpy(fo_exact_scatter), dtype=float)
         if n_geometries == 1:
             return self._broadcast_batch_layers(
@@ -894,9 +873,9 @@ class TwoStreamEss:
                 "batched solar forward_fo requires fo_exact_scatter with the same "
                 "leading batch dimensions as tau"
             )
-        if self.options.do_plane_parallel or mapped["fo_geometry_mode"] != "eps":
+        if self.options.plane_parallel or mapped["fo_geometry_mode"] != "eps":
             raise ValueError("batched solar forward_fo currently supports pseudo_spherical only")
-        n_layers = self.options.n_layers
+        n_layers = self.options.nlyr
         tau_arr = np.asarray(to_numpy(mapped["tau_arr"]), dtype=float)
         if tau_arr.ndim <= 1 or tau_arr.shape[-1] != n_layers:
             raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward_fo")
@@ -932,7 +911,7 @@ class TwoStreamEss:
             d2s_scaling=np.zeros(n_layers, dtype=float),
             earth_radius=earth_radius,
         )
-        want_profiles = self.options.do_level_output
+        want_profiles = self.options.output_levels
         total_by_geometry: list[np.ndarray] = []
         ss_by_geometry: list[np.ndarray] = []
         db_by_geometry: list[np.ndarray] = []
@@ -1068,7 +1047,7 @@ class TwoStreamEss:
                 "batched solar forward_fo requires fo_exact_scatter with the same "
                 "leading batch dimensions as tau"
             )
-        if self.options.do_plane_parallel or mapped["fo_geometry_mode"] != "eps":
+        if self.options.plane_parallel or mapped["fo_geometry_mode"] != "eps":
             raise ValueError("batched solar forward_fo currently supports pseudo_spherical only")
         context = self._select_torch_context(
             detect_torch_context(
@@ -1080,7 +1059,7 @@ class TwoStreamEss:
                 fo_exact_scatter,
             )
         )
-        n_layers = self.options.n_layers
+        n_layers = self.options.nlyr
         tau_arr = value_to_torch(mapped["tau_arr"], context)
         if tau_arr.ndim <= 1 or int(tau_arr.shape[-1]) != n_layers:
             raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward_fo")
@@ -1123,7 +1102,7 @@ class TwoStreamEss:
             d2s_scaling=np.zeros(n_layers, dtype=float),
             earth_radius=earth_radius,
         )
-        want_profiles = self.options.do_level_output
+        want_profiles = self.options.output_levels
         total_by_geometry = []
         ss_by_geometry = []
         db_by_geometry = []
@@ -1276,22 +1255,22 @@ class TwoStreamEss:
     ) -> TwoStreamEssBatchResult:
         """Runs the public batch path, keeping fast endpoint kernels as default."""
         if (
-            not self.options.do_upwelling
-            or self.options.do_dnwelling
-            or self.options.do_mvout_only
-            or self.options.do_additional_mvout
+            not self.options.upwelling
+            or self.options.downwelling
+            or self.options.mvout_only
+            or self.options.additional_mvout
         ):
             raise ValueError(
                 "batched forward currently supports the default upwelling TOA endpoint only"
             )
         if brdf is not None or surface_leaving is not None:
             raise ValueError("batched forward does not support brdf or surface_leaving inputs")
-        if self.options.do_brdf_surface or self.options.do_surface_leaving:
+        if self.options.brdf_surface or self.options.surface_leaving:
             raise ValueError(
                 "batched forward does not support brdf_surface or surface_leaving options"
             )
         if self.options.backend == "torch":
-            if self.options.source_mode == "solar_obs":
+            if self._source_mode == "solar_obs":
                 return self._forward_solar_obs_batched_torch(
                     mapped=mapped,
                     albedo=albedo,
@@ -1300,7 +1279,7 @@ class TwoStreamEss:
                     fo_nfine=fo_nfine,
                     fo_exact_scatter=fo_exact_scatter,
                 )
-            if self.options.source_mode == "thermal":
+            if self._source_mode == "thermal":
                 return self._forward_thermal_batched_torch(
                     mapped=mapped,
                     albedo=albedo,
@@ -1313,7 +1292,7 @@ class TwoStreamEss:
             raise NotImplementedError(
                 "batched forward currently supports backend='numpy' or 'torch'"
             )
-        if self.options.source_mode == "solar_obs":
+        if self._source_mode == "solar_obs":
             return self._forward_solar_obs_batched_numpy(
                 mapped=mapped,
                 albedo=albedo,
@@ -1322,7 +1301,7 @@ class TwoStreamEss:
                 fo_nfine=fo_nfine,
                 fo_exact_scatter=fo_exact_scatter,
             )
-        if self.options.source_mode == "thermal":
+        if self._source_mode == "thermal":
             return self._forward_thermal_batched_numpy(
                 mapped=mapped,
                 albedo=albedo,
@@ -1357,11 +1336,11 @@ class TwoStreamEss:
                 "batched solar include_fo=True requires fo_exact_scatter with the "
                 "same leading batch dimensions as tau"
             )
-        if include_fo and (self.options.do_plane_parallel or mapped["fo_geometry_mode"] != "eps"):
+        if include_fo and (self.options.plane_parallel or mapped["fo_geometry_mode"] != "eps"):
             raise ValueError(
                 "batched solar include_fo=True currently supports pseudo_spherical geometry only"
             )
-        n_layers = self.options.n_layers
+        n_layers = self.options.nlyr
         tau_arr = np.asarray(to_numpy(mapped["tau_arr"]), dtype=float)
         if tau_arr.ndim <= 1 or tau_arr.shape[-1] != n_layers:
             raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward")
@@ -1399,13 +1378,13 @@ class TwoStreamEss:
             earth_radius=earth_radius,
         )
         geometry = prepared.geometry
-        want_profiles = self.options.do_level_output
+        want_profiles = self.options.output_levels
         two_stream_by_geometry: list[np.ndarray] = []
         fo_by_geometry: list[np.ndarray] = []
         two_stream_profile_by_geometry: list[np.ndarray] = []
         fo_profile_by_geometry: list[np.ndarray] = []
         for geom_index, user_obsgeom in enumerate(prepared.user_obsgeoms):
-            if self.options.do_plane_parallel:
+            if self.options.plane_parallel:
                 secant = float(geometry.average_secant_pp[geom_index])
                 chapman = np.triu(np.full((n_layers, n_layers), secant, dtype=float))
             else:
@@ -1551,7 +1530,7 @@ class TwoStreamEss:
                 "batched solar include_fo=True requires fo_exact_scatter with the "
                 "same leading batch dimensions as tau"
             )
-        if include_fo and (self.options.do_plane_parallel or mapped["fo_geometry_mode"] != "eps"):
+        if include_fo and (self.options.plane_parallel or mapped["fo_geometry_mode"] != "eps"):
             raise ValueError(
                 "batched solar include_fo=True currently supports pseudo_spherical geometry only"
             )
@@ -1566,7 +1545,7 @@ class TwoStreamEss:
                 fo_exact_scatter,
             )
         )
-        n_layers = self.options.n_layers
+        n_layers = self.options.nlyr
         tau_arr = value_to_torch(mapped["tau_arr"], context)
         if tau_arr.ndim <= 1 or int(tau_arr.shape[-1]) != n_layers:
             raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward")
@@ -1615,14 +1594,14 @@ class TwoStreamEss:
             earth_radius=earth_radius,
         )
         geometry = prepared.geometry
-        want_profiles = self.options.do_level_output
+        want_profiles = self.options.output_levels
         two_stream_by_geometry = []
         fo_by_geometry = []
         two_stream_profile_by_geometry = []
         fo_profile_by_geometry = []
         with self._torch_grad_context():
             for geom_index, user_obsgeom in enumerate(prepared.user_obsgeoms):
-                if self.options.do_plane_parallel:
+                if self.options.plane_parallel:
                     secant = float(geometry.average_secant_pp[geom_index])
                     chapman = np.triu(np.full((n_layers, n_layers), secant, dtype=float))
                 else:
@@ -1762,7 +1741,7 @@ class TwoStreamEss:
             precompute_fo_thermal_geometry_numpy,
         )
 
-        n_layers = self.options.n_layers
+        n_layers = self.options.nlyr
         tau_arr = np.asarray(to_numpy(mapped["tau_arr"]), dtype=float)
         if tau_arr.ndim <= 1 or tau_arr.shape[-1] != n_layers:
             raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward")
@@ -1800,7 +1779,7 @@ class TwoStreamEss:
             raise ValueError("angles are required for mode='thermal'")
         if np.any((angles < 0.0) | (angles > 90.0)):
             raise ValueError("thermal angles must satisfy 0 <= vza <= 90")
-        want_profiles = self.options.do_level_output
+        want_profiles = self.options.output_levels
         two_stream_by_geometry: list[np.ndarray] = []
         fo_by_geometry: list[np.ndarray] = []
         two_stream_profile_by_geometry: list[np.ndarray] = []
@@ -1951,7 +1930,7 @@ class TwoStreamEss:
                 emissivity,
             )
         )
-        n_layers = self.options.n_layers
+        n_layers = self.options.nlyr
         tau_arr = value_to_torch(mapped["tau_arr"], context)
         if tau_arr.ndim <= 1 or int(tau_arr.shape[-1]) != n_layers:
             raise ValueError(f"tau must have shape (..., {n_layers}) for batched forward")
@@ -2017,7 +1996,7 @@ class TwoStreamEss:
             if mapped["height_grid"] is None
             else np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
         )
-        want_profiles = self.options.do_level_output
+        want_profiles = self.options.output_levels
         two_stream_by_geometry = []
         fo_by_geometry = []
         two_stream_profile_by_geometry = []
@@ -2399,7 +2378,7 @@ class TwoStreamEss:
             thermal_bb_input,
         )
         return prepare_inputs(
-            options=self.options,
+            options=self._core_options(),
             tau_arr=to_numpy(tau_arr),
             omega_arr=to_numpy(omega_arr),
             asymm_arr=to_numpy(asymm_arr),
@@ -2484,14 +2463,14 @@ class TwoStreamEss:
         """
         if (
             self.options.backend == "torch"
-            and self.options.source_mode in {"solar_obs", "solar_lat"}
+            and self._source_mode in {"solar_obs", "solar_lat"}
             and torch_context is not None
         ):
             from .core.solver_torch import solve_optimized_solar_obs_torch
 
             return solve_optimized_solar_obs_torch(
                 prepared,
-                self.options,
+                self._core_options(),
                 tau_arr=tau_arr,
                 omega_arr=omega_arr,
                 asymm_arr=asymm_arr,
@@ -2499,20 +2478,20 @@ class TwoStreamEss:
             )
         if (
             self.options.backend == "torch"
-            and self.options.source_mode == "thermal"
+            and self._source_mode == "thermal"
             and torch_context is not None
         ):
             from .core.solver_torch import solve_optimized_thermal_torch
 
             return solve_optimized_thermal_torch(
                 prepared,
-                self.options,
+                self._core_options(),
                 tau_arr=tau_arr,
                 omega_arr=omega_arr,
                 asymm_arr=asymm_arr,
                 d2s_scaling=d2s_scaling,
             )
-        return solve_optimized_solar_obs(prepared, self.options)
+        return solve_optimized_solar_obs(prepared, self._core_options())
 
     def _solve_fo_forward(
         self,
@@ -2543,7 +2522,7 @@ class TwoStreamEss:
         FoSolarObsResult or FoThermalResult
             First-order solver output for the requested source mode.
         """
-        if self.options.source_mode in {"solar_obs", "solar_lat"}:
+        if self._source_mode in {"solar_obs", "solar_lat"}:
             self._validate_fo_geometry_mode(fo_geometry_mode)
         fo_tau_arr = tau_arr
         fo_prepared = prepared
@@ -2562,8 +2541,8 @@ class TwoStreamEss:
             from .core.fo_thermal_torch import solve_fo_thermal_torch
 
             fo_exact_scatter_t = value_to_torch(fo_exact_scatter, torch_context)
-            if self.options.source_mode in {"solar_obs", "solar_lat"}:
-                if self.options.do_plane_parallel:
+            if self._source_mode in {"solar_obs", "solar_lat"}:
+                if self.options.plane_parallel:
                     return solve_fo_solar_obs_plane_parallel_torch(
                         tau_arr=fo_tau_arr,
                         omega_arr=omega_arr,
@@ -2603,7 +2582,7 @@ class TwoStreamEss:
                     nfine=fo_nfine,
                     exact_scatter=fo_exact_scatter_t,
                 )
-            if self.options.source_mode == "thermal":
+            if self._source_mode == "thermal":
                 if user_angles is None:
                     raise ValueError(
                         "backend='torch' thermal include_fo requires user_angles tensor input"
@@ -2622,34 +2601,34 @@ class TwoStreamEss:
                     surfbb=surfbb,
                     emissivity=emissivity,
                     earth_radius=earth_radius,
-                    do_plane_parallel=self.options.do_plane_parallel,
+                    do_plane_parallel=self.options.plane_parallel,
                     do_optical_deltam_scaling=self.options.effective_fo_optical_deltam_scaling,
                     do_source_deltam_scaling=self.options.effective_fo_thermal_source_deltam_scaling,
                     nfine=fo_nfine,
                 )
             raise NotImplementedError(
                 "include_fo with backend='torch' is currently implemented for "
-                "source_mode='solar_obs', 'solar_lat', and 'thermal' only"
+                "mode='solar', 'solar_lattice', and 'thermal' only"
             )
-        if self.options.source_mode in {"solar_obs", "solar_lat"}:
+        if self._source_mode in {"solar_obs", "solar_lat"}:
             return solve_fo_solar_obs(
                 fo_prepared,
-                do_plane_parallel=self.options.do_plane_parallel,
+                do_plane_parallel=self.options.plane_parallel,
                 geometry_mode=fo_geometry_mode,
                 n_moments=fo_n_moments,
                 nfine=fo_nfine,
                 exact_scatter=None if fo_exact_scatter is None else to_numpy(fo_exact_scatter),
             )
-        if self.options.source_mode == "thermal":
+        if self._source_mode == "thermal":
             return solve_fo_thermal(
                 prepared,
-                do_plane_parallel=self.options.do_plane_parallel,
+                do_plane_parallel=self.options.plane_parallel,
                 do_optical_deltam_scaling=self.options.effective_fo_optical_deltam_scaling,
                 do_source_deltam_scaling=self.options.effective_fo_thermal_source_deltam_scaling,
                 nfine=fo_nfine,
             )
         raise NotImplementedError(
-            "include_fo is implemented for source_mode='solar_obs', 'solar_lat', and 'thermal' only"
+            "include_fo is implemented for mode='solar', 'solar_lattice', and 'thermal' only"
         )
 
     def _build_forward_result(
@@ -2837,7 +2816,7 @@ class TwoStreamEss:
             self.options.backend == "torch"
             and fo_user_obsgeoms is None
             and prepared.user_obsgeoms is not None
-            and self.options.source_mode in {"solar_obs", "solar_lat"}
+            and self._source_mode in {"solar_obs", "solar_lat"}
         ):
             fo_user_obsgeoms = value_to_torch(prepared.user_obsgeoms, torch_context)
         with self._torch_grad_context():
@@ -2972,18 +2951,18 @@ class TwoStreamEss:
         thermal_bb_input = mapped["thermal_bb_input"]
         surfbb = mapped["surfbb"]
         fo_geometry_mode = mapped["fo_geometry_mode"]
-        if self.options.source_mode in {"solar_obs", "solar_lat"}:
+        if self._source_mode in {"solar_obs", "solar_lat"}:
             self._validate_fo_geometry_mode(fo_geometry_mode)
         if d2s_scaling is None:
-            d2s_scaling = np.zeros(self.options.n_layers, dtype=float)
+            d2s_scaling = np.zeros(self.options.nlyr, dtype=float)
         if self._public_forward_is_batched(tau_arr):
             if brdf is not None or surface_leaving is not None:
                 raise ValueError("batched forward_fo does not support brdf or surface_leaving")
-            if self.options.do_brdf_surface or self.options.do_surface_leaving:
+            if self.options.brdf_surface or self.options.surface_leaving:
                 raise ValueError(
                     "batched forward_fo does not support brdf_surface or surface_leaving options"
                 )
-            if self.options.source_mode != "solar_obs":
+            if self._source_mode != "solar_obs":
                 raise ValueError("batched forward_fo currently supports mode='solar' only")
             if self.options.backend == "torch":
                 return self._forward_fo_solar_obs_batched_torch(
@@ -3000,7 +2979,7 @@ class TwoStreamEss:
                 nfine=nfine,
                 fo_exact_scatter=fo_exact_scatter,
             )
-        if self.options.source_mode == "solar_lat":
+        if self._source_mode == "solar_lat":
             prepared, torch_context = self._prepare_forward_with_context(
                 tau_arr=tau_arr,
                 omega_arr=omega_arr,
@@ -3042,7 +3021,7 @@ class TwoStreamEss:
                     fo_tau_arr = tau_arr
                     if self.options.effective_fo_optical_deltam_scaling:
                         fo_tau_arr = tau_arr * (1.0 - omega_arr * d2s_scaling)
-                    if self.options.do_plane_parallel:
+                    if self.options.plane_parallel:
                         result = solve_fo_solar_obs_plane_parallel_torch(
                             tau_arr=fo_tau_arr,
                             omega_arr=omega_arr,
@@ -3095,7 +3074,7 @@ class TwoStreamEss:
                 )
             result = solve_fo_solar_obs(
                 prepared,
-                do_plane_parallel=self.options.do_plane_parallel,
+                do_plane_parallel=self.options.plane_parallel,
                 geometry_mode=fo_geometry_mode,
                 n_moments=n_moments,
                 nfine=nfine,
@@ -3134,7 +3113,7 @@ class TwoStreamEss:
                 fo_tau_arr = tau_arr
                 if self.options.effective_fo_optical_deltam_scaling:
                     fo_tau_arr = tau_arr * (1.0 - omega_arr * d2s_scaling)
-                if self.options.source_mode == "solar_obs" and self.options.do_plane_parallel:
+                if self._source_mode == "solar_obs" and self.options.plane_parallel:
                     return solve_fo_solar_obs_plane_parallel_torch(
                         tau_arr=fo_tau_arr,
                         omega_arr=omega_arr,
@@ -3146,7 +3125,7 @@ class TwoStreamEss:
                         n_moments=n_moments,
                         exact_scatter=fo_exact_scatter_t,
                     )
-                if self.options.source_mode == "solar_obs" and fo_geometry_mode == "rps":
+                if self._source_mode == "solar_obs" and fo_geometry_mode == "rps":
                     return solve_fo_solar_obs_rps_torch(
                         tau_arr=fo_tau_arr,
                         omega_arr=omega_arr,
@@ -3160,7 +3139,7 @@ class TwoStreamEss:
                         n_moments=n_moments,
                         exact_scatter=fo_exact_scatter_t,
                     )
-                if self.options.source_mode == "solar_obs" and fo_geometry_mode == "eps":
+                if self._source_mode == "solar_obs" and fo_geometry_mode == "eps":
                     return solve_fo_solar_obs_eps_torch(
                         tau_arr=fo_tau_arr,
                         omega_arr=omega_arr,
@@ -3175,7 +3154,7 @@ class TwoStreamEss:
                         nfine=nfine,
                         exact_scatter=fo_exact_scatter_t,
                     )
-                if self.options.source_mode == "thermal":
+                if self._source_mode == "thermal":
                     if user_angles is None:
                         raise ValueError(
                             "backend='torch' thermal forward_fo requires user_angles tensor input"
@@ -3192,7 +3171,7 @@ class TwoStreamEss:
                         thermal_bb_input=thermal_bb_input,
                         surfbb=surfbb,
                         emissivity=emissivity,
-                        do_plane_parallel=self.options.do_plane_parallel,
+                        do_plane_parallel=self.options.plane_parallel,
                         height_grid=height_grid,
                         earth_radius=earth_radius,
                         do_optical_deltam_scaling=self.options.effective_fo_optical_deltam_scaling,
@@ -3201,7 +3180,7 @@ class TwoStreamEss:
                     )
             raise NotImplementedError(
                 "backend='torch' forward_fo is currently implemented for "
-                "source_mode='solar_obs', 'solar_lat', and 'thermal' only"
+                "mode='solar', 'solar_lattice', and 'thermal' only"
             )
         prepared = self._prepare_forward(
             tau_arr=tau_arr,
@@ -3221,10 +3200,10 @@ class TwoStreamEss:
             emissivity=emissivity,
             earth_radius=earth_radius,
         )
-        if self.options.source_mode == "thermal":
+        if self._source_mode == "thermal":
             return solve_fo_thermal(
                 prepared,
-                do_plane_parallel=self.options.do_plane_parallel,
+                do_plane_parallel=self.options.plane_parallel,
                 do_optical_deltam_scaling=self.options.effective_fo_optical_deltam_scaling,
                 do_source_deltam_scaling=self.options.effective_fo_thermal_source_deltam_scaling,
                 nfine=nfine,
@@ -3236,7 +3215,7 @@ class TwoStreamEss:
             )
         result = solve_fo_solar_obs(
             prepared,
-            do_plane_parallel=self.options.do_plane_parallel,
+            do_plane_parallel=self.options.plane_parallel,
             geometry_mode=fo_geometry_mode,
             n_moments=n_moments,
             nfine=nfine,

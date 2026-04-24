@@ -20,7 +20,7 @@ class ApiTests(unittest.TestCase):
     def test_package_exports_are_available(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3))
         self.assertEqual(solver.options.nlyr, 3)
-        self.assertEqual(solver.options.n_layers, 3)
+        self.assertEqual(solver.options.nlyr, 3)
         self.assertTrue(callable(thermal_source_from_temperature_profile_torch))
 
     def test_minimal_solar_fo_call_uses_public_names_and_defaults(self) -> None:

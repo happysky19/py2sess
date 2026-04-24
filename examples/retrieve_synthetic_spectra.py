@@ -1,7 +1,7 @@
 """Synthetic retrieval workflows using py2sess and torch autograd.
 
-This example demonstrates how to wrap py2sess torch forward kernels in small
-inverse problems.
+This example keeps the py2sess core unchanged and demonstrates how to wrap the
+existing torch forward kernels in small inverse problems.
 
 The workflows are intentionally compact:
 
@@ -23,37 +23,337 @@ The workflows are intentionally compact:
    Retrieves scalar optical-depth and albedo multipliers from the packaged UV
    benchmark geometry.
 
-The solar and UV examples use the differentiable 2S torch kernel. Thermal uses
-FO + 2S through the differentiable torch thermal batch helper.
+The solar and UV examples use the differentiable 2S torch kernel only. The
+current standalone package has a batched NumPy FO solar helper for benchmark
+parity, but not a torch-native FO solar helper, so those retrievals are limited
+to the differentiable 2S path.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from dataclasses import dataclass
+import os
 from pathlib import Path
+import re
+import tempfile
+from typing import Literal
 
 import numpy as np
 import torch
+from scipy.optimize import least_squares
 
 from py2sess import thermal_source_from_temperature_profile_torch
 from py2sess.core.solar_obs_batch_torch import solve_solar_obs_batch_torch
 from py2sess.core.thermal_batch_torch import solve_thermal_batch_torch
 from py2sess.reference_cases import load_uv_benchmark_case
-from py2sess.retrieval import (
-    NoiseMode,
-    PriorMode,
-    RetrievalResult,
-    RodgersPrior,
-    add_noise,
-    as_numpy,
-    measurement_error,
-    optimal_estimation_least_squares,
-    save_retrieval_chart,
-    spectrum_comparison,
-)
 
 
 torch.set_default_dtype(torch.float64)
+
+
+PriorMode = Literal["off", "weak"]
+NoiseMode = Literal["absolute", "relative", "hybrid"]
+
+
+@dataclass(frozen=True)
+class RetrievalDiagnostics:
+    """Optimal-estimation diagnostics at the retrieved state."""
+
+    n_observations: int
+    n_state: int
+    n_function_evaluations: int
+    n_jacobian_evaluations: int | None
+    jacobian_condition: float
+    hessian_condition: float
+    jacobian_singular_values: np.ndarray
+    measurement_jacobian: np.ndarray
+    measurement_hessian: np.ndarray
+    gauss_newton_hessian: np.ndarray
+    prior_precision: np.ndarray
+    posterior_covariance: np.ndarray
+    averaging_kernel: np.ndarray
+    degrees_of_freedom: float
+    measurement_error: np.ndarray
+
+
+@dataclass(frozen=True)
+class SpectrumComparison:
+    """Pre-noise, post-noise, and fitted spectra for charting retrieval results."""
+
+    x: np.ndarray
+    pre_noise: np.ndarray
+    post_noise: np.ndarray
+    fitted: np.ndarray
+    x_label: str
+    y_label: str
+    group_labels: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RodgersPrior:
+    """Gaussian background prior in the retrieval state space."""
+
+    background: np.ndarray
+    inverse_sqrt_covariance: np.ndarray
+
+    @classmethod
+    def from_precision(cls, background: np.ndarray, precision: np.ndarray) -> "RodgersPrior":
+        """Builds a prior from ``S_a^-1``."""
+        background = np.asarray(background, dtype=float)
+        precision = np.asarray(precision, dtype=float)
+        cholesky = np.linalg.cholesky(precision)
+        return cls(background=background, inverse_sqrt_covariance=cholesky.T)
+
+    def residual_and_jacobian(self, state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Returns ``S_a^-1/2 (x - x_a)`` and its Jacobian."""
+        residual = self.inverse_sqrt_covariance @ (state - self.background)
+        return residual, self.inverse_sqrt_covariance
+
+    @property
+    def precision(self) -> np.ndarray:
+        """Returns ``S_a^-1``."""
+        return self.inverse_sqrt_covariance.T @ self.inverse_sqrt_covariance
+
+
+@dataclass(frozen=True)
+class RetrievalResult:
+    """Small container for retrieval summary values."""
+
+    name: str
+    initial_objective: float
+    initial_data_loss: float
+    final_objective: float
+    final_data_loss: float
+    prior_mode: PriorMode
+    noise_model: NoiseMode
+    noise_fraction: float
+    truth: dict[str, float | np.ndarray]
+    estimate: dict[str, float | np.ndarray]
+    diagnostics: RetrievalDiagnostics
+    spectrum: SpectrumComparison
+
+
+def _as_numpy(value: torch.Tensor) -> np.ndarray:
+    """Converts a torch tensor to a NumPy array for printing."""
+    return value.detach().cpu().numpy()
+
+
+def _as_array(value: torch.Tensor | np.ndarray) -> np.ndarray:
+    """Converts torch or NumPy values to a floating NumPy array."""
+    if isinstance(value, torch.Tensor):
+        return _as_numpy(value)
+    return np.asarray(value, dtype=float)
+
+
+def _noise_std(
+    pre_noise: torch.Tensor,
+    noise_fraction: float,
+    noise_model: NoiseMode,
+) -> torch.Tensor:
+    """Returns per-channel radiance-noise standard deviations."""
+    scale = torch.clamp(torch.mean(torch.abs(pre_noise)), min=1.0e-12)
+    fraction = noise_fraction if noise_fraction > 0.0 else 1.0
+    absolute = torch.full_like(pre_noise, fraction * scale)
+    relative = fraction * torch.clamp(torch.abs(pre_noise), min=1.0e-6 * scale)
+    if noise_model == "absolute":
+        return absolute
+    if noise_model == "relative":
+        return relative
+    if noise_model == "hybrid":
+        return torch.sqrt(absolute**2 + relative**2)
+    raise ValueError(f"unknown noise model: {noise_model}")
+
+
+def _add_noise(
+    pre_noise: torch.Tensor,
+    noise_fraction: float,
+    noise_model: NoiseMode,
+) -> torch.Tensor:
+    """Returns a noisy copy of a clean synthetic spectrum."""
+    if noise_fraction <= 0.0:
+        return pre_noise.clone()
+    std = _noise_std(pre_noise, noise_fraction, noise_model)
+    return pre_noise + std * torch.randn_like(pre_noise)
+
+
+def _spectrum_comparison(
+    *,
+    x: torch.Tensor | np.ndarray,
+    pre_noise: torch.Tensor,
+    post_noise: torch.Tensor,
+    fitted: torch.Tensor,
+    n_spectra: int,
+    n_wavelengths: int,
+    x_label: str,
+    y_label: str,
+    group_labels: tuple[str, ...],
+) -> SpectrumComparison:
+    """Builds consistently shaped spectrum data for charting."""
+    shape = (n_spectra, n_wavelengths)
+    return SpectrumComparison(
+        x=_as_array(x),
+        pre_noise=_as_numpy(pre_noise).reshape(shape),
+        post_noise=_as_numpy(post_noise).reshape(shape),
+        fitted=_as_numpy(fitted).reshape(shape),
+        x_label=x_label,
+        y_label=y_label,
+        group_labels=group_labels,
+    )
+
+
+def _condition_number(singular_values: np.ndarray) -> float:
+    """Returns a stable condition number from descending singular values."""
+    if singular_values.size == 0:
+        return float("nan")
+    smallest = float(singular_values[-1])
+    if smallest <= np.finfo(float).eps:
+        return float("inf")
+    return float(singular_values[0] / smallest)
+
+
+def _forward_value_and_jacobian(
+    forward_model: Callable[[torch.Tensor], torch.Tensor],
+    state: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluates a torch forward model and its dense state Jacobian."""
+    state_tensor = torch.as_tensor(state, dtype=torch.float64)
+
+    def flattened_forward(current_state: torch.Tensor) -> torch.Tensor:
+        return forward_model(current_state).reshape(-1)
+
+    value = flattened_forward(state_tensor)
+    jacobian = torch.func.jacfwd(flattened_forward)(state_tensor)
+    return _as_numpy(value), _as_numpy(jacobian)
+
+
+def _forward_value(
+    forward_model: Callable[[torch.Tensor], torch.Tensor],
+    state: np.ndarray,
+) -> np.ndarray:
+    """Evaluates a torch forward model as a NumPy vector."""
+    state_tensor = torch.as_tensor(state, dtype=torch.float64)
+    return _as_numpy(forward_model(state_tensor).reshape(-1))
+
+
+def _empty_prior(_state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Returns an empty residual/Jacobian block for no-prior retrievals."""
+    return np.empty(0, dtype=float), np.empty((0, _state.size), dtype=float)
+
+
+def _measurement_error(
+    pre_noise: torch.Tensor,
+    noise_fraction: float,
+    noise_model: NoiseMode,
+) -> np.ndarray:
+    """Builds a diagonal measurement-error standard deviation vector."""
+    return _as_numpy(_noise_std(pre_noise, noise_fraction, noise_model).reshape(-1))
+
+
+def _optimal_estimation_least_squares(
+    *,
+    initial_state: np.ndarray,
+    observed: torch.Tensor,
+    measurement_error: np.ndarray,
+    forward_model: Callable[[torch.Tensor], torch.Tensor],
+    prior: RodgersPrior | None = None,
+    max_nfev: int = 80,
+) -> tuple[np.ndarray, float, float, float, float, RetrievalDiagnostics]:
+    """Solves a small Rodgers-style retrieval with torch Jacobians.
+
+    The minimized residual is
+
+    ``[S_e^-1/2 (F(x) - y), S_a^-1/2 (x - x_a)]``.
+    """
+    initial_state = np.asarray(initial_state, dtype=float)
+    observed_np = _as_numpy(observed.reshape(-1))
+    measurement_error = np.asarray(measurement_error, dtype=float).reshape(-1)
+    if observed_np.shape != measurement_error.shape:
+        raise ValueError("measurement_error must have the same flattened size as observed")
+    if not np.all(np.isfinite(measurement_error)) or np.any(measurement_error <= 0.0):
+        raise ValueError("measurement_error must contain finite positive values")
+
+    def residual_parts(state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        model = _forward_value(forward_model, state)
+        data_residual = (model - observed_np) / measurement_error
+        if prior is None:
+            prior_residual, _prior_jacobian = _empty_prior(state)
+        else:
+            prior_residual, _prior_jacobian = prior.residual_and_jacobian(state)
+        return data_residual, prior_residual
+
+    def objective_values(state: np.ndarray) -> tuple[float, float]:
+        data_residual, prior_residual = residual_parts(state)
+        data_loss = float(np.mean(data_residual**2))
+        objective = 0.5 * float(data_residual @ data_residual + prior_residual @ prior_residual)
+        return objective, data_loss
+
+    def residual(state: np.ndarray) -> np.ndarray:
+        data_residual, prior_residual = residual_parts(state)
+        return np.concatenate((data_residual, prior_residual))
+
+    def jacobian(state: np.ndarray) -> np.ndarray:
+        _model, model_jacobian = _forward_value_and_jacobian(forward_model, state)
+        data_jacobian = model_jacobian / measurement_error[:, None]
+        if prior is None:
+            _prior, prior_jacobian = _empty_prior(state)
+        else:
+            _prior, prior_jacobian = prior.residual_and_jacobian(state)
+        return np.vstack((data_jacobian, prior_jacobian))
+
+    initial_objective, initial_data_loss = objective_values(initial_state)
+    solution = least_squares(
+        residual,
+        initial_state,
+        jac=jacobian,
+        method="trf",
+        x_scale="jac",
+        ftol=1.0e-13,
+        xtol=1.0e-13,
+        gtol=1.0e-13,
+        max_nfev=max_nfev,
+    )
+    if not solution.success:
+        raise RuntimeError(f"least_squares did not converge: {solution.message}")
+    final_objective, final_data_loss = objective_values(solution.x)
+
+    _model, model_jacobian = _forward_value_and_jacobian(forward_model, solution.x)
+    measurement_jacobian = model_jacobian / measurement_error[:, None]
+    measurement_hessian = measurement_jacobian.T @ measurement_jacobian
+    prior_precision = np.zeros((solution.x.size, solution.x.size), dtype=float)
+    if prior is not None:
+        prior_precision = prior.precision
+    gauss_newton_hessian = measurement_hessian + prior_precision
+    posterior_covariance = np.linalg.pinv(gauss_newton_hessian, rcond=1.0e-12)
+    averaging_kernel = posterior_covariance @ measurement_hessian
+    singular_values = np.linalg.svd(measurement_jacobian, compute_uv=False)
+    hessian_singular_values = np.linalg.svd(gauss_newton_hessian, compute_uv=False)
+    diagnostics = RetrievalDiagnostics(
+        n_observations=int(observed_np.size),
+        n_state=int(solution.x.size),
+        n_function_evaluations=int(solution.nfev),
+        n_jacobian_evaluations=None if solution.njev is None else int(solution.njev),
+        jacobian_condition=_condition_number(singular_values),
+        hessian_condition=_condition_number(hessian_singular_values),
+        jacobian_singular_values=singular_values,
+        measurement_jacobian=measurement_jacobian,
+        measurement_hessian=measurement_hessian,
+        gauss_newton_hessian=gauss_newton_hessian,
+        prior_precision=prior_precision,
+        posterior_covariance=posterior_covariance,
+        averaging_kernel=averaging_kernel,
+        degrees_of_freedom=float(np.trace(averaging_kernel)),
+        measurement_error=measurement_error,
+    )
+    return (
+        solution.x,
+        initial_objective,
+        initial_data_loss,
+        final_objective,
+        final_data_loss,
+        diagnostics,
+    )
 
 
 def _thermal_forward(
@@ -172,7 +472,7 @@ def retrieve_thermal_synthetic(
             true_coeffs,
             true_surf_raw,
         )
-        post_noise = add_noise(pre_noise, noise_fraction, noise_model)
+        post_noise = _add_noise(pre_noise, noise_fraction, noise_model)
 
     state_size = 5 if fit_temperature else 2
     initial_state = np.zeros(state_size, dtype=float)
@@ -208,7 +508,7 @@ def retrieve_thermal_synthetic(
             prior_stdev = np.array([0.18, 6.0, 6.0, 6.0, 0.6], dtype=float)
             prior_precision = np.diag(1.0 / prior_stdev**2)
             d2_matrix = np.diff(np.eye(n_layers + 1), n=2, axis=0)
-            curvature_jacobian = d2_matrix @ as_numpy(temp_basis)
+            curvature_jacobian = d2_matrix @ _as_numpy(temp_basis)
             curvature_stdev = 10.0
             prior_precision[1:4, 1:4] += (
                 curvature_jacobian.T @ curvature_jacobian
@@ -222,10 +522,10 @@ def retrieve_thermal_synthetic(
         final_objective,
         final_data_loss,
         diagnostics,
-    ) = optimal_estimation_least_squares(
+    ) = _optimal_estimation_least_squares(
         initial_state=initial_state,
         observed=post_noise,
-        measurement_error=measurement_error(pre_noise, noise_fraction, noise_model),
+        measurement_error=_measurement_error(pre_noise, noise_fraction, noise_model),
         forward_model=forward_from_state,
         prior=prior,
         max_nfev=120,
@@ -256,15 +556,15 @@ def retrieve_thermal_synthetic(
         truth={
             "tau_scale": float(true_tau_scale),
             "surface_temperature": float(true_surface_temperature),
-            "temperature": as_numpy(true_temperature),
+            "temperature": _as_numpy(true_temperature),
         },
         estimate={
             "tau_scale": float(tau_scale),
             "surface_temperature": float(surface_temperature),
-            "temperature": as_numpy(temperature),
+            "temperature": _as_numpy(temperature),
         },
         diagnostics=diagnostics,
-        spectrum=spectrum_comparison(
+        spectrum=_spectrum_comparison(
             x=wavenumber,
             pre_noise=pre_noise,
             post_noise=post_noise,
@@ -388,7 +688,7 @@ def retrieve_solar_synthetic(
             flux_factor=flux_factor,
             geometry=geometry,
         )
-        post_noise = add_noise(pre_noise, noise_fraction, noise_model)
+        post_noise = _add_noise(pre_noise, noise_fraction, noise_model)
 
     albedo_background = torch.tensor(0.25, dtype=dtype)
     initial_state = np.array([0.0, float(torch.logit(albedo_background))], dtype=float)
@@ -420,10 +720,10 @@ def retrieve_solar_synthetic(
         final_objective,
         final_data_loss,
         diagnostics,
-    ) = optimal_estimation_least_squares(
+    ) = _optimal_estimation_least_squares(
         initial_state=initial_state,
         observed=post_noise,
-        measurement_error=measurement_error(pre_noise, noise_fraction, noise_model),
+        measurement_error=_measurement_error(pre_noise, noise_fraction, noise_model),
         forward_model=forward_from_state,
         prior=prior,
         max_nfev=80,
@@ -461,7 +761,7 @@ def retrieve_solar_synthetic(
             "albedo": float(albedo),
         },
         diagnostics=diagnostics,
-        spectrum=spectrum_comparison(
+        spectrum=_spectrum_comparison(
             x=np.arange(n_wavelengths, dtype=float),
             pre_noise=pre_noise,
             post_noise=post_noise,
@@ -546,7 +846,7 @@ def retrieve_uv_benchmark_synthetic(
             flux_factor=flux_factor,
             case=case,
         )
-        post_noise = add_noise(pre_noise, noise_fraction, noise_model)
+        post_noise = _add_noise(pre_noise, noise_fraction, noise_model)
 
     initial_state = np.array([np.log(0.9), np.log(1.1)], dtype=float)
 
@@ -577,10 +877,10 @@ def retrieve_uv_benchmark_synthetic(
         final_objective,
         final_data_loss,
         diagnostics,
-    ) = optimal_estimation_least_squares(
+    ) = _optimal_estimation_least_squares(
         initial_state=initial_state,
         observed=post_noise,
-        measurement_error=measurement_error(pre_noise, noise_fraction, noise_model),
+        measurement_error=_measurement_error(pre_noise, noise_fraction, noise_model),
         forward_model=forward_from_state,
         prior=prior,
         max_nfev=80,
@@ -617,7 +917,7 @@ def retrieve_uv_benchmark_synthetic(
             "albedo_scale": float(albedo_scale),
         },
         diagnostics=diagnostics,
-        spectrum=spectrum_comparison(
+        spectrum=_spectrum_comparison(
             x=case.wavelengths,
             pre_noise=pre_noise,
             post_noise=post_noise,
@@ -639,6 +939,107 @@ def _format_array(values: np.ndarray) -> str:
 def _format_singular_values(values: np.ndarray) -> str:
     """Formats singular values for compact console output."""
     return np.array2string(values, precision=3, suppress_small=False, max_line_width=120)
+
+
+def _slugify(value: str) -> str:
+    """Builds a stable filesystem-safe slug."""
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return slug or "retrieval"
+
+
+def _import_pyplot():
+    """Imports matplotlib lazily for optional chart generation."""
+    os.environ.setdefault("MPLCONFIGDIR", tempfile.gettempdir())
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "Plotting requires matplotlib. Install py2sess with the plot extra."
+        ) from exc
+    return plt
+
+
+def _plot_spectrum_comparison(
+    *,
+    ax_fit,
+    ax_diff,
+    spectrum: SpectrumComparison,
+) -> None:
+    """Plots pre-noise, post-noise, fitted spectra, and signed fit residuals."""
+    colors = ("#0f766e", "#7c3aed", "#0369a1", "#be123c")
+    labels = spectrum.group_labels or tuple(
+        f"spectrum {index + 1}" for index in range(spectrum.pre_noise.shape[0])
+    )
+    for index, (pre_noise, post_noise, fitted) in enumerate(
+        zip(spectrum.pre_noise, spectrum.post_noise, spectrum.fitted)
+    ):
+        color = colors[index % len(colors)]
+        label = labels[index] if index < len(labels) else f"spectrum {index + 1}"
+        ax_fit.plot(
+            spectrum.x,
+            pre_noise,
+            color=color,
+            linewidth=2.2,
+            label=f"{label} pre-noise",
+        )
+        ax_fit.plot(
+            spectrum.x,
+            post_noise,
+            color=color,
+            linewidth=1.7,
+            linestyle=":",
+            label=f"{label} post-noise",
+        )
+        ax_fit.plot(
+            spectrum.x,
+            fitted,
+            color=color,
+            linewidth=1.8,
+            linestyle="--",
+            label=f"{label} fitted",
+        )
+        ax_diff.plot(
+            spectrum.x,
+            post_noise - fitted,
+            color=color,
+            linewidth=2.0,
+            label=f"{label} post-noise - fitted",
+        )
+
+    ax_fit.set_xlabel(spectrum.x_label)
+    ax_fit.set_ylabel(spectrum.y_label)
+    ax_fit.set_yscale("log")
+    ax_fit.legend(frameon=False, fontsize=9)
+    ax_fit.grid(True, color="#d6d3d1", linewidth=0.8, alpha=0.7)
+
+    ax_diff.set_xlabel(spectrum.x_label)
+    ax_diff.set_ylabel(f"post-noise - fitted {spectrum.y_label}")
+    ax_diff.axhline(0.0, color="#57534e", linewidth=0.9, alpha=0.7)
+    ax_diff.legend(frameon=False, fontsize=9)
+    ax_diff.grid(True, color="#d6d3d1", linewidth=0.8, alpha=0.7)
+
+
+def save_retrieval_chart(result: RetrievalResult, output_dir: Path | str) -> Path:
+    """Saves a two-panel pre-noise/post-noise/fitted spectrum chart."""
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    plt = _import_pyplot()
+
+    fig, (ax_fit, ax_diff) = plt.subplots(1, 2, figsize=(11.0, 4.6), constrained_layout=True)
+    fig.patch.set_facecolor("white")
+    fig.suptitle(result.name, fontsize=14, fontweight="bold")
+    ax_fit.set_title("Pre-noise, post-noise, and fitted radiance")
+    ax_diff.set_title("Post-noise - fitted")
+    _plot_spectrum_comparison(ax_fit=ax_fit, ax_diff=ax_diff, spectrum=result.spectrum)
+
+    for axis in (ax_fit, ax_diff):
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+
+    path = output_path / f"{_slugify(result.name)}.png"
+    fig.savefig(path, dpi=180, facecolor="white")
+    plt.close(fig)
+    return path
 
 
 def _print_result(result: RetrievalResult) -> None:

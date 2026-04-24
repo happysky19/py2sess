@@ -477,8 +477,8 @@ def main() -> None:
             "solar_forward_zero_flux",
             value=float(
                 max(
-                    np.max(np.abs(solar_zero_flux.intensity_toa)),
-                    np.max(np.abs(solar_zero_flux.combined_intensity_toa)),
+                    np.max(np.abs(solar_zero_flux.radiance_2s)),
+                    np.max(np.abs(solar_zero_flux.radiance_total)),
                 )
             ),
             tolerance=1.0e-14,
@@ -491,8 +491,8 @@ def main() -> None:
             "thermal_forward_zero_sources",
             value=float(
                 max(
-                    np.max(np.abs(thermal_zero.intensity_toa)),
-                    np.max(np.abs(thermal_zero.fo_thermal_total_up_toa)),
+                    np.max(np.abs(thermal_zero.radiance_2s)),
+                    np.max(np.abs(thermal_zero.radiance_fo)),
                 )
             ),
             tolerance=1.0e-14,
@@ -505,8 +505,8 @@ def main() -> None:
             "thermal_forward_zero_sources_nonblack_surface",
             value=float(
                 max(
-                    np.max(np.abs(thermal_zero_nonblack.intensity_toa)),
-                    np.max(np.abs(thermal_zero_nonblack.fo_thermal_total_up_toa)),
+                    np.max(np.abs(thermal_zero_nonblack.radiance_2s)),
+                    np.max(np.abs(thermal_zero_nonblack.radiance_fo)),
                 )
             ),
             tolerance=1.0e-14,
