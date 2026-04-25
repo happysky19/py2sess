@@ -13,24 +13,33 @@ if TYPE_CHECKING:  # pragma: no cover
     from .core.fo_solar_obs import FoSolarObsResult, fo_scatter_term_henyey_greenstein
     from .core.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch
     from .core.fo_thermal import FoThermalResult
-    from .core.surface_leaving import (
+    from .optical.surface_leaving import (
         SurfaceLeavingCoefficients,
         morcasiwat_reflectance,
         seawater_refractive_index,
         surface_leaving_from_water,
     )
-    from .core.thermal_source import (
+    from .optical.planck import (
         ThermalSourceInputs,
         planck_radiance_wavelength,
         planck_radiance_wavenumber,
         planck_radiance_wavenumber_band,
         thermal_source_from_temperature_profile,
     )
-    from .core.thermal_source_torch import (
+    from .optical.planck_torch import (
         ThermalSourceTorchInputs,
         planck_radiance_wavelength_torch,
         planck_radiance_wavenumber_torch,
         thermal_source_from_temperature_profile_torch,
+    )
+    from .retrieval import (
+        NoiseModel,
+        OptimalEstimationProblem,
+        OptimalEstimationResult,
+        RetrievalDiagnostics,
+        evaluate_jacobian,
+        retrieval_diagnostics,
+        solve_optimal_estimation,
     )
     from .reference_cases import (
         TirBenchmarkCase,
@@ -65,6 +74,13 @@ __all__ = [
     "morcasiwat_reflectance",
     "seawater_refractive_index",
     "surface_leaving_from_water",
+    "NoiseModel",
+    "OptimalEstimationProblem",
+    "OptimalEstimationResult",
+    "RetrievalDiagnostics",
+    "evaluate_jacobian",
+    "retrieval_diagnostics",
+    "solve_optimal_estimation",
 ]
 
 
@@ -107,7 +123,7 @@ def __getattr__(name: str):
             "thermal_source_from_temperature_profile_torch",
         }
         module = import_module(
-            ".core.thermal_source_torch" if name in torch_names else ".core.thermal_source",
+            ".optical.planck_torch" if name in torch_names else ".optical.planck",
             __name__,
         )
 
@@ -127,9 +143,21 @@ def __getattr__(name: str):
         "seawater_refractive_index",
         "surface_leaving_from_water",
     }:
-        from .core import surface_leaving
+        from .optical import surface_leaving
 
         value = getattr(surface_leaving, name)
+    elif name in {
+        "NoiseModel",
+        "OptimalEstimationProblem",
+        "OptimalEstimationResult",
+        "RetrievalDiagnostics",
+        "evaluate_jacobian",
+        "retrieval_diagnostics",
+        "solve_optimal_estimation",
+    }:
+        from . import retrieval
+
+        value = getattr(retrieval, name)
     else:
         raise AttributeError(f"module 'py2sess' has no attribute {name!r}")
     globals()[name] = value

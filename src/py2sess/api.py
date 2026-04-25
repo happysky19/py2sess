@@ -17,7 +17,7 @@ from .core.fo_solar_obs import (
 )
 from .core.fo_thermal import FoThermalResult, solve_fo_thermal
 from .core.lattice_result import add_lattice_axes, lattice_shape, reshape_lattice_array
-from .core.optical import (
+from .optical.delta_m import (
     default_delta_m_truncation_factor,
     validate_delta_m_truncation_factor,
 )
@@ -733,7 +733,7 @@ class TwoStreamEss:
         width: int,
     ):
         """Broadcasts or derives the public delta-M truncation factor for torch."""
-        from .core.optical_torch import (
+        from .optical.delta_m_torch import (
             default_delta_m_truncation_factor_torch,
             validate_delta_m_truncation_factor_torch,
         )
@@ -754,7 +754,7 @@ class TwoStreamEss:
     @staticmethod
     def _resolve_truncation_factor_torch(value: Any | None, *, asymm, omega, context: TorchContext):
         """Returns the scalar torch delta-M truncation factor."""
-        from .core.optical_torch import (
+        from .optical.delta_m_torch import (
             default_delta_m_truncation_factor_torch,
             validate_delta_m_truncation_factor_torch,
         )

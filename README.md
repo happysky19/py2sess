@@ -124,6 +124,7 @@ For the complete argument table and Fortran-name crosswalk, see
 python3 examples/run_uv_reference_case.py
 python3 examples/run_tir_reference_case.py
 python3 examples/build_thermal_source_from_temperature.py
+python3 examples/retrieve_synthetic_spectra.py --case uv --noise-level 0
 ```
 
 Full-spectrum benchmark scripts accept local `.npz` bundles:
@@ -135,6 +136,7 @@ python3 examples/benchmark_tir_full_spectrum.py /path/to/tir_full_bundle.npz
 
 Bundle details are in
 [`docs/full_spectrum_benchmarks.md`](docs/full_spectrum_benchmarks.md).
+Rodgers-style synthetic retrieval notes are in [`docs/retrieval.md`](docs/retrieval.md).
 
 ## Tests
 
