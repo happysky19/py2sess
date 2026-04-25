@@ -14,7 +14,7 @@ from py2sess import (
     solve_optimal_estimation,
     thermal_source_from_temperature_profile_torch,
 )
-from py2sess.core.backend import has_torch
+from py2sess.rtsolver.backend import has_torch
 
 
 def _finite_difference(forward_model, state, steps):

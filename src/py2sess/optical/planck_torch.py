@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.backend import _load_torch
+from ..rtsolver.backend import _load_torch
 from .planck import (
     _BOLTZMANN_CONSTANT,
     _CM_TO_METERS,

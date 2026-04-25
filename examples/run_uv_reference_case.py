@@ -6,7 +6,7 @@ import numpy as np
 
 from py2sess import TwoStreamEss, TwoStreamEssOptions
 from py2sess.reference_cases import load_uv_benchmark_case
-from py2sess.core.backend import has_torch, to_numpy
+from py2sess.rtsolver.backend import has_torch, to_numpy
 
 
 def _relative_diff(value: np.ndarray, reference: np.ndarray) -> np.ndarray:

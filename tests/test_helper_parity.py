@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 
 from py2sess import load_tir_benchmark_case, load_uv_benchmark_case
-from py2sess.core.geometry import auxgeom_solar_obs, chapman_factors
+from py2sess.rtsolver.geometry import auxgeom_solar_obs, chapman_factors
 from py2sess.optical.brdf_solar_obs import solar_obs_brdf_from_kernels
 from py2sess.optical.brdf_thermal import thermal_brdf_from_kernels
 from py2sess.optical.delta_m import (

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..core.backend import _load_torch
+from ..rtsolver.backend import _load_torch
 
 torch = _load_torch()
 

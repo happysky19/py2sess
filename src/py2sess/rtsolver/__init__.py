@@ -1,4 +1,4 @@
-"""Core radiative-transfer kernels and numerical helpers."""
+"""Radiative-transfer kernels and numerical helpers."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def __getattr__(name: str):
     try:
         module_name, attr_name = _LAZY_EXPORTS[name]
     except KeyError as exc:
-        raise AttributeError(f"module 'py2sess.core' has no attribute {name!r}") from exc
+        raise AttributeError(f"module 'py2sess.rtsolver' has no attribute {name!r}") from exc
     value = getattr(import_module(module_name, __name__), attr_name)
     globals()[name] = value
     return value

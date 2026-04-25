@@ -6,7 +6,7 @@ import subprocess
 import sys
 import unittest
 
-from py2sess.core.backend import has_torch
+from py2sess.rtsolver.backend import has_torch
 
 
 ROOT = Path(__file__).resolve().parents[1]

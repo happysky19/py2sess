@@ -19,12 +19,12 @@ from _full_spectrum_benchmark_common import (
     scalar_value,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
-from py2sess.core.backend import has_torch
-from py2sess.core.fo_solar_obs_batch_numpy import (
+from py2sess.rtsolver.backend import has_torch
+from py2sess.rtsolver.fo_solar_obs_batch_numpy import (
     fo_solar_obs_batch_precompute,
     solve_fo_solar_obs_eps_batch_numpy,
 )
-from py2sess.core.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
+from py2sess.rtsolver.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
 
 
 def _public_bvp_solver(engine: str) -> str:
@@ -205,8 +205,8 @@ def benchmark_torch(
         raise RuntimeError("PyTorch is not installed")
     import torch
 
-    from py2sess.core.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
-    from py2sess.core.solar_obs_batch_torch import solve_solar_obs_batch_torch
+    from py2sess.rtsolver.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
+    from py2sess.rtsolver.solar_obs_batch_torch import solve_solar_obs_batch_torch
 
     wall_start = time.perf_counter()
     device = torch.device(torch_device_name)

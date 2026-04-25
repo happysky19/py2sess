@@ -172,7 +172,7 @@ def _qsprep_obs_batch_torch(delta_tau, chapman, user_secant: float):
     }
 
 
-def _hom_solution_solar_batch_torch(
+def _hom_solution_solar_obs_batch_torch(
     *,
     fourier: int,
     stream_value: float,
@@ -199,7 +199,7 @@ def _hom_solution_solar_batch_torch(
     return eigenvalue, eigentrans, xpos1, xpos2, norm_saved
 
 
-def _hom_user_solution_solar_batch_torch(
+def _hom_user_solution_solar_obs_batch_torch(
     *,
     fourier: int,
     stream_value: float,
@@ -564,7 +564,7 @@ def solve_solar_obs_batch_torch(
     for fourier in (0, 1):
         surface_factor = 2.0 if fourier == 0 else 1.0
         delta_factor = 1.0 if fourier == 0 else 2.0
-        eigenvalue, eigentrans, xpos1, xpos2, norm_saved = _hom_solution_solar_batch_torch(
+        eigenvalue, eigentrans, xpos1, xpos2, norm_saved = _hom_solution_solar_obs_batch_torch(
             fourier=fourier,
             stream_value=stream_value,
             pxsq=float(pxsq_t[fourier]),
@@ -572,7 +572,7 @@ def solve_solar_obs_batch_torch(
             omega_asymm_3=omega_asymm_3,
             delta_tau=delta_tau,
         )
-        u_xpos, u_xneg = _hom_user_solution_solar_batch_torch(
+        u_xpos, u_xneg = _hom_user_solution_solar_obs_batch_torch(
             fourier=fourier,
             stream_value=stream_value,
             px11=px11,

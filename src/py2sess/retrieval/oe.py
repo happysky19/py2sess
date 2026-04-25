@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.backend import _load_torch
+from ..rtsolver.backend import _load_torch
 
 
 def _require_torch():

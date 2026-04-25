@@ -12,7 +12,7 @@ from py2sess import (
     fo_scatter_term_henyey_greenstein_torch,
     thermal_source_from_temperature_profile_torch,
 )
-from py2sess.core.backend import has_torch, to_numpy
+from py2sess.rtsolver.backend import has_torch, to_numpy
 
 
 class ApiTests(unittest.TestCase):

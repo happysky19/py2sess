@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from .api import TwoStreamEss, TwoStreamEssBatchResult, TwoStreamEssOptions, TwoStreamEssResult
-    from .core.fo_solar_obs import FoSolarObsResult, fo_scatter_term_henyey_greenstein
-    from .core.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch
-    from .core.fo_thermal import FoThermalResult
+    from .rtsolver.fo_solar_obs import FoSolarObsResult, fo_scatter_term_henyey_greenstein
+    from .rtsolver.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch
+    from .rtsolver.fo_thermal import FoThermalResult
     from .optical.surface_leaving import (
         SurfaceLeavingCoefficients,
         morcasiwat_reflectance,
@@ -96,13 +96,13 @@ def __getattr__(name: str):
 
         value = getattr(api, name)
     elif name == "FoSolarObsResult":
-        from .core.fo_solar_obs import FoSolarObsResult as value
+        from .rtsolver.fo_solar_obs import FoSolarObsResult as value
     elif name == "fo_scatter_term_henyey_greenstein":
-        from .core.fo_solar_obs import fo_scatter_term_henyey_greenstein as value
+        from .rtsolver.fo_solar_obs import fo_scatter_term_henyey_greenstein as value
     elif name == "fo_scatter_term_henyey_greenstein_torch":
-        from .core.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch as value
+        from .rtsolver.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch as value
     elif name == "FoThermalResult":
-        from .core.fo_thermal import FoThermalResult as value
+        from .rtsolver.fo_thermal import FoThermalResult as value
     elif name in {
         "ThermalSourceInputs",
         "ThermalSourceTorchInputs",
