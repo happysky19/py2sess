@@ -25,6 +25,8 @@ The benchmark table reports:
   angular factors from `heights`, `user_obsgeom`, and `stream_value`
 - `optical preprocessing`: one-time generation of `g`, delta-M truncation
   factor, and solar FO scatter terms when physical optical inputs are present
+- `thermal source`: one-time generation of thermal Planck/source inputs from
+  temperatures when temperature fields are present
 - `wall (s)`: total backend wall time after bundle load
 - `rt (s)`: solver runtime only
 - `setup (s)`: `wall (s) - rt (s)`
@@ -80,9 +82,20 @@ Required arrays:
 - `user_angle`
 - `tau_arr`
 - `omega_arr`
+- `albedo`
+
+Provide either direct thermal source inputs or generated thermal source inputs.
+
+Thermal source inputs, direct:
+
 - `thermal_bb_input`
 - `surfbb`
-- `albedo`
+
+Thermal source inputs, generated:
+
+- `level_temperature_k`
+- `surface_temperature_k`
+- exactly one of `wavenumber_cm_inv` or `wavelength_microns`
 
 Optional surface input:
 
@@ -111,6 +124,9 @@ Expected shapes:
 - `asymm_arr`, `d2s_scaling`: `(n_wavelengths, n_layers)` when using legacy
   derived optical inputs
 - `thermal_bb_input`: `(n_wavelengths, n_layers + 1)`
+- `level_temperature_k`: `(n_layers + 1,)`
+- `surface_temperature_k`: scalar or `(n_wavelengths,)`
+- `wavenumber_cm_inv`, `wavelength_microns`: `(n_wavelengths,)`
 - `surfbb`, `albedo`, `emissivity`, `wavelengths`: `(n_wavelengths,)`
 - `heights`: `(n_layers + 1,)`
 - `user_angle`: scalar or length-1 array

@@ -114,6 +114,21 @@ class BenchmarkExampleTests(unittest.TestCase):
         self.assertIn("optical preprocessing: python-generated", output)
         self.assertIn("emissivity: 1 - albedo", output)
 
+    def test_tir_benchmark_can_generate_thermal_source_from_temperature(self) -> None:
+        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
+        omitted = {"thermal_bb_input", "surfbb", "ref_2s", "ref_fo", "ref_total"}
+        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
+            trimmed = Path(tmpdir) / "tir_temperature_source.npz"
+            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
+            n_rows = int(data["tau_arr"].shape[0])
+            n_levels = int(data["tau_arr"].shape[1]) + 1
+            arrays["level_temperature_k"] = np.linspace(220.0, 270.0, n_levels)
+            arrays["surface_temperature_k"] = np.array([285.0], dtype=float)
+            arrays["wavenumber_cm_inv"] = np.linspace(700.0, 900.0, n_rows)
+            np.savez_compressed(trimmed, **arrays)
+            output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
+        self.assertIn("thermal source: temperature (wavenumber_cm_inv)", output)
+
 
 if __name__ == "__main__":
     unittest.main()

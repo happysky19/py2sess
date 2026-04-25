@@ -29,7 +29,7 @@ class ThermalSourceInputs:
     """Thermal source inputs for public ``forward`` calls."""
 
     planck: np.ndarray
-    surface_planck: float
+    surface_planck: float | np.ndarray
 
 
 def _as_float_array(name: str, values: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
@@ -57,7 +57,31 @@ def _validate_temperature(
     return array
 
 
-def planck_radiance_wavelength(temperature_k, wavelength_microns: float) -> np.ndarray:
+def _validate_positive_coordinate(name: str, value) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float64)
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must be finite")
+    if np.any(array <= 0.0):
+        raise ValueError(f"{name} must be positive")
+    return array
+
+
+def _profile_spectral_grid(spectral_coordinate: np.ndarray, level_temperature: np.ndarray):
+    if level_temperature.ndim != 1:
+        raise ValueError("level_temperature_k must be one-dimensional")
+    if spectral_coordinate.ndim == 0:
+        return spectral_coordinate, level_temperature
+    spectral = spectral_coordinate.reshape(spectral_coordinate.shape + (1,))
+    levels = level_temperature.reshape((1,) * spectral_coordinate.ndim + level_temperature.shape)
+    return spectral, levels
+
+
+def _scalar_or_array(value) -> float | np.ndarray:
+    array = np.asarray(value, dtype=np.float64)
+    return float(array) if array.ndim == 0 else array
+
+
+def planck_radiance_wavelength(temperature_k, wavelength_microns) -> np.ndarray:
     """Evaluate the Planck function in wavelength form.
 
     Parameters
@@ -65,7 +89,7 @@ def planck_radiance_wavelength(temperature_k, wavelength_microns: float) -> np.n
     temperature_k
         Scalar or array of temperatures in Kelvin.
     wavelength_microns
-        Wavelength in microns.
+        Scalar or array of wavelengths in microns.
 
     Returns
     -------
@@ -73,11 +97,9 @@ def planck_radiance_wavelength(temperature_k, wavelength_microns: float) -> np.n
         Spectral radiance values in SI wavelength units.
     """
 
-    if not np.isfinite(wavelength_microns) or wavelength_microns <= 0.0:
-        raise ValueError("wavelength_microns must be positive and finite")
-
     temperature = _validate_temperature("temperature_k", temperature_k)
-    wavelength_m = wavelength_microns * _MICRONS_TO_METERS
+    wavelength = _validate_positive_coordinate("wavelength_microns", wavelength_microns)
+    wavelength_m = wavelength * _MICRONS_TO_METERS
     exponent = (_PLANCK_CONSTANT * _LIGHT_SPEED) / (
         wavelength_m * _BOLTZMANN_CONSTANT * temperature
     )
@@ -86,7 +108,7 @@ def planck_radiance_wavelength(temperature_k, wavelength_microns: float) -> np.n
     return numerator / denominator
 
 
-def planck_radiance_wavenumber(temperature_k, wavenumber_cm_inv: float) -> np.ndarray:
+def planck_radiance_wavenumber(temperature_k, wavenumber_cm_inv) -> np.ndarray:
     """Evaluate the Planck function in wavenumber form.
 
     Parameters
@@ -94,7 +116,7 @@ def planck_radiance_wavenumber(temperature_k, wavenumber_cm_inv: float) -> np.nd
     temperature_k
         Scalar or array of temperatures in Kelvin.
     wavenumber_cm_inv
-        Wavenumber in inverse centimeters.
+        Scalar or array of wavenumbers in inverse centimeters.
 
     Returns
     -------
@@ -102,11 +124,9 @@ def planck_radiance_wavenumber(temperature_k, wavenumber_cm_inv: float) -> np.nd
         Spectral radiance values in SI wavenumber units.
     """
 
-    if not np.isfinite(wavenumber_cm_inv) or wavenumber_cm_inv <= 0.0:
-        raise ValueError("wavenumber_cm_inv must be positive and finite")
-
     temperature = _validate_temperature("temperature_k", temperature_k)
-    wavenumber_m_inv = wavenumber_cm_inv / _CM_TO_METERS
+    wavenumber = _validate_positive_coordinate("wavenumber_cm_inv", wavenumber_cm_inv)
+    wavenumber_m_inv = wavenumber / _CM_TO_METERS
     exponent = (_PLANCK_CONSTANT * _LIGHT_SPEED * wavenumber_m_inv) / (
         _BOLTZMANN_CONSTANT * temperature
     )
@@ -250,7 +270,7 @@ def planck_radiance_wavenumber_band(
 
 def thermal_source_from_temperature_profile(
     level_temperature_k,
-    surface_temperature_k: float,
+    surface_temperature_k,
     *,
     wavelength_microns: float | None = None,
     wavenumber_cm_inv: float | None = None,
@@ -265,7 +285,7 @@ def thermal_source_from_temperature_profile(
     level_temperature_k
         One-dimensional model-level temperatures in Kelvin.
     surface_temperature_k
-        Surface temperature in Kelvin.
+        Scalar or spectral-array surface temperature in Kelvin.
     wavelength_microns
         Wavelength in microns for the Planck evaluation.
     wavenumber_cm_inv
@@ -282,9 +302,7 @@ def thermal_source_from_temperature_profile(
 
     level_temperature = _as_float_array("level_temperature_k", level_temperature_k)
     _validate_temperature("level_temperature_k", level_temperature)
-    surface_temperature = float(
-        _validate_temperature("surface_temperature_k", surface_temperature_k)
-    )
+    surface_temperature = _validate_temperature("surface_temperature_k", surface_temperature_k)
 
     provided = sum(
         value is not None
@@ -294,14 +312,18 @@ def thermal_source_from_temperature_profile(
         raise ValueError("Specify exactly one spectral coordinate")
 
     if wavelength_microns is not None:
-        planck = planck_radiance_wavelength(level_temperature, wavelength_microns)
-        surface_planck = float(planck_radiance_wavelength(surface_temperature, wavelength_microns))
+        spectral = _validate_positive_coordinate("wavelength_microns", wavelength_microns)
+        spectral_grid, level_grid = _profile_spectral_grid(spectral, level_temperature)
+        planck = planck_radiance_wavelength(level_grid, spectral_grid)
+        surface_planck = planck_radiance_wavelength(surface_temperature, spectral)
     elif wavenumber_cm_inv is not None:
-        planck = planck_radiance_wavenumber(level_temperature, wavenumber_cm_inv)
-        surface_planck = float(planck_radiance_wavenumber(surface_temperature, wavenumber_cm_inv))
+        spectral = _validate_positive_coordinate("wavenumber_cm_inv", wavenumber_cm_inv)
+        spectral_grid, level_grid = _profile_spectral_grid(spectral, level_temperature)
+        planck = planck_radiance_wavenumber(level_grid, spectral_grid)
+        surface_planck = planck_radiance_wavenumber(surface_temperature, spectral)
     else:
         low, high = wavenumber_band_cm_inv
         planck = planck_radiance_wavenumber_band(level_temperature, low, high)
-        surface_planck = float(planck_radiance_wavenumber_band(surface_temperature, low, high))
+        surface_planck = planck_radiance_wavenumber_band(surface_temperature, low, high)
 
-    return ThermalSourceInputs(planck=planck, surface_planck=surface_planck)
+    return ThermalSourceInputs(planck=planck, surface_planck=_scalar_or_array(surface_planck))

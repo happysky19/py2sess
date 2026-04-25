@@ -19,7 +19,11 @@ from _full_spectrum_benchmark_common import (
     require_keys,
     scalar_value,
 )
-from py2sess import TwoStreamEss, TwoStreamEssOptions
+from py2sess import (
+    thermal_source_from_temperature_profile,
+    TwoStreamEss,
+    TwoStreamEssOptions,
+)
 from py2sess.optical.phase import build_two_stream_phase_inputs
 from py2sess.rtsolver import precompute_fo_thermal_geometry_numpy
 from py2sess.rtsolver.backend import has_torch
@@ -51,12 +55,14 @@ _TIR_BASE_KEYS = (
     "user_angle",
     "tau_arr",
     "omega_arr",
-    "thermal_bb_input",
-    "surfbb",
     "albedo",
 )
 
 _TIR_OPTIONAL_KEYS = ("stream_value", "ref_total", "emissivity")
+
+_TIR_DIRECT_SOURCE_KEYS = ("thermal_bb_input", "surfbb")
+_TIR_TEMPERATURE_SOURCE_KEYS = ("level_temperature_k", "surface_temperature_k")
+_TIR_SOURCE_COORDINATE_KEYS = ("wavenumber_cm_inv", "wavelength_microns")
 
 
 def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
@@ -71,6 +77,18 @@ def _select_optical_keys(
     if not use_dumped_derived_optics and set(_TIR_PHYSICAL_OPTICS_KEYS).issubset(available):
         return _TIR_PHYSICAL_OPTICS_KEYS
     return _TIR_DUMPED_OPTICS_KEYS
+
+
+def _select_source_keys(
+    available: set[str],
+    *,
+    use_dumped_thermal_source: bool,
+) -> tuple[str, ...]:
+    has_temperature = set(_TIR_TEMPERATURE_SOURCE_KEYS).issubset(available)
+    coordinates = tuple(key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available)
+    if not use_dumped_thermal_source and has_temperature and len(coordinates) >= 1:
+        return _TIR_TEMPERATURE_SOURCE_KEYS + coordinates
+    return _TIR_DIRECT_SOURCE_KEYS
 
 
 def _prepare_optics(
@@ -98,6 +116,52 @@ def _prepare_optics(
     prepared["asymm_arr"] = optics.g
     prepared["d2s_scaling"] = optics.delta_m_truncation_factor
     return prepared, time.perf_counter() - start, "python-generated"
+
+
+def _prepare_thermal_source(
+    bundle: dict[str, np.ndarray],
+    *,
+    use_dumped_thermal_source: bool,
+) -> tuple[dict[str, np.ndarray], float, str]:
+    source_coordinates = [key for key in _TIR_SOURCE_COORDINATE_KEYS if key in bundle]
+    has_temperature = _has_keys(bundle, _TIR_TEMPERATURE_SOURCE_KEYS)
+    if not use_dumped_thermal_source and has_temperature and source_coordinates:
+        if len(source_coordinates) != 1:
+            raise ValueError(
+                "temperature-based thermal source requires exactly one of "
+                "wavenumber_cm_inv or wavelength_microns"
+            )
+        start = time.perf_counter()
+        coordinate_name = source_coordinates[0]
+        kwargs = {coordinate_name: bundle[coordinate_name]}
+        source = thermal_source_from_temperature_profile(
+            bundle["level_temperature_k"],
+            bundle["surface_temperature_k"],
+            **kwargs,
+        )
+        prepared = dict(bundle)
+        prepared["thermal_bb_input"] = np.asarray(source.planck, dtype=float)
+        prepared["surfbb"] = np.asarray(source.surface_planck, dtype=float)
+        _validate_thermal_source_shapes(prepared)
+        return prepared, time.perf_counter() - start, f"temperature ({coordinate_name})"
+
+    require_keys(bundle, _TIR_DIRECT_SOURCE_KEYS, label="TIR thermal source")
+    return bundle, 0.0, "bundle"
+
+
+def _validate_thermal_source_shapes(bundle: dict[str, np.ndarray]) -> None:
+    n_rows, n_layers = bundle["tau_arr"].shape
+    planck = np.asarray(bundle["thermal_bb_input"], dtype=float)
+    surface = np.asarray(bundle["surfbb"], dtype=float)
+    expected_planck = (n_rows, n_layers + 1)
+    if planck.shape == (n_layers + 1,) and n_rows == 1:
+        bundle["thermal_bb_input"] = planck.reshape(1, n_layers + 1)
+    elif planck.shape != expected_planck:
+        raise ValueError(f"thermal source planck must have shape {expected_planck}")
+    if surface.shape == () and n_rows == 1:
+        bundle["surfbb"] = surface.reshape(1)
+    elif surface.shape != (n_rows,):
+        raise ValueError(f"surface_planck must have shape ({n_rows},)")
 
 
 def _prepare_surface(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], str]:
@@ -503,6 +567,11 @@ def main() -> None:
         action="store_true",
         help="Use stored g and delta-M factor instead of Python preprocessing.",
     )
+    parser.add_argument(
+        "--use-dumped-thermal-source",
+        action="store_true",
+        help="Use stored thermal_bb_input/surfbb instead of temperature-based source generation.",
+    )
     args = parser.parse_args()
 
     load_start = time.perf_counter()
@@ -511,13 +580,17 @@ def main() -> None:
         available,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
     )
+    source_keys = _select_source_keys(
+        available,
+        use_dumped_thermal_source=args.use_dumped_thermal_source,
+    )
     bundle = load_bundle(
         args.bundle,
-        keys=_TIR_BASE_KEYS + _TIR_OPTIONAL_KEYS + optical_keys,
+        keys=_TIR_BASE_KEYS + _TIR_OPTIONAL_KEYS + optical_keys + source_keys,
     )
     require_keys(
         bundle,
-        _TIR_BASE_KEYS + optical_keys,
+        _TIR_BASE_KEYS + optical_keys + source_keys,
         label="TIR",
     )
     total_rows = int(bundle["tau_arr"].shape[0])
@@ -526,11 +599,12 @@ def main() -> None:
     bundle["wavelengths"] = bundle["wavelengths"][:wavelengths]
     bundle["tau_arr"] = bundle["tau_arr"][:wavelengths]
     bundle["omega_arr"] = bundle["omega_arr"][:wavelengths]
-    bundle["thermal_bb_input"] = bundle["thermal_bb_input"][:wavelengths]
-    bundle["surfbb"] = bundle["surfbb"][:wavelengths]
     bundle["albedo"] = bundle["albedo"][:wavelengths]
     if "emissivity" in bundle:
         bundle["emissivity"] = bundle["emissivity"][:wavelengths]
+    for key in _TIR_DIRECT_SOURCE_KEYS + ("surface_temperature_k",) + _TIR_SOURCE_COORDINATE_KEYS:
+        if key in bundle and np.asarray(bundle[key]).shape[:1] == (total_rows,):
+            bundle[key] = bundle[key][:wavelengths]
     for key in _TIR_DUMPED_OPTICS_KEYS:
         if key in bundle:
             bundle[key] = bundle[key][:wavelengths]
@@ -542,6 +616,10 @@ def main() -> None:
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
+    )
+    bundle, source_seconds, source_mode = _prepare_thermal_source(
+        bundle,
+        use_dumped_thermal_source=args.use_dumped_thermal_source,
     )
     bundle, emissivity_mode = _prepare_surface(bundle)
     load_seconds = time.perf_counter() - load_start
@@ -559,6 +637,7 @@ def main() -> None:
         ),
     )
     print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
+    print(f"  thermal source: {source_mode}, {source_seconds:.3f} s")
     print(f"  emissivity: {emissivity_mode}")
 
     rows: list[BenchmarkRow] = []

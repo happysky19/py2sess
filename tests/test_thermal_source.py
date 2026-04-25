@@ -31,6 +31,26 @@ class ThermalSourceTests(unittest.TestCase):
         self.assertEqual(source.planck.shape, (4,))
         self.assertGreater(source.surface_planck, source.planck[-1])
 
+    def test_profile_helper_vectorizes_over_wavenumbers(self) -> None:
+        level_temperature = np.array([220.0, 230.0, 240.0, 250.0], dtype=float)
+        surface_temperature = 280.0
+        wavenumber = np.array([700.0, 800.0, 900.0], dtype=float)
+        source = thermal_source_from_temperature_profile(
+            level_temperature,
+            surface_temperature,
+            wavenumber_cm_inv=wavenumber,
+        )
+        expected_planck = np.vstack(
+            [planck_radiance_wavenumber(level_temperature, value) for value in wavenumber]
+        )
+        expected_surface = np.array(
+            [planck_radiance_wavenumber(surface_temperature, value) for value in wavenumber]
+        )
+        self.assertEqual(source.planck.shape, (3, 4))
+        self.assertEqual(source.surface_planck.shape, (3,))
+        np.testing.assert_allclose(source.planck, expected_planck)
+        np.testing.assert_allclose(source.surface_planck, expected_surface)
+
     def test_profile_helper_returns_constant_planck_for_constant_temperature(self) -> None:
         temperature = 250.0
         source = thermal_source_from_temperature_profile(
