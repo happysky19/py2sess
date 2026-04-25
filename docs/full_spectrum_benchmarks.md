@@ -159,7 +159,11 @@ Optical phase inputs, preferred:
 - `rayleigh_fraction`
 - `aerosol_fraction`
 - `aerosol_moments`
-- `aerosol_interp_fraction`
+
+Optional optical phase input:
+
+- `aerosol_interp_fraction`; when omitted, the UV benchmark derives it from
+  `wavelengths` using the Fortran reverse endpoint interpolation convention
 
 Legacy derived optical inputs:
 

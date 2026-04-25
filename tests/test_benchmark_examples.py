@@ -94,6 +94,7 @@ class BenchmarkExampleTests(unittest.TestCase):
             "pxsq",
             "px0x",
             "ulp",
+            "aerosol_interp_fraction",
         }
         with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
             trimmed = Path(tmpdir) / "uv_minimal.npz"

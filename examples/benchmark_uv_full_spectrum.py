@@ -20,7 +20,11 @@ from _full_spectrum_benchmark_common import (
     scalar_value,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
-from py2sess.optical.phase import build_solar_fo_scatter_term, build_two_stream_phase_inputs
+from py2sess.optical.phase import (
+    aerosol_interp_fraction,
+    build_solar_fo_scatter_term,
+    build_two_stream_phase_inputs,
+)
 from py2sess.rtsolver.backend import has_torch
 from py2sess.rtsolver.fo_solar_obs_batch_numpy import (
     fo_solar_obs_batch_precompute,
@@ -35,13 +39,14 @@ def _public_bvp_solver(engine: str) -> str:
     return "banded" if engine == "block" else "scipy"
 
 
-_UV_PHYSICAL_OPTICS_KEYS = (
+_UV_REQUIRED_PHYSICAL_OPTICS_KEYS = (
     "depol",
     "rayleigh_fraction",
     "aerosol_fraction",
     "aerosol_moments",
-    "aerosol_interp_fraction",
 )
+
+_UV_AEROSOL_INTERP_KEY = "aerosol_interp_fraction"
 
 _UV_DUMPED_OPTICS_KEYS = ("asymm", "scaling", "fo_exact_scatter")
 
@@ -67,8 +72,12 @@ def _select_optical_keys(
     *,
     use_dumped_derived_optics: bool,
 ) -> tuple[str, ...]:
-    if not use_dumped_derived_optics and set(_UV_PHYSICAL_OPTICS_KEYS).issubset(available):
-        return _UV_PHYSICAL_OPTICS_KEYS
+    has_physical_optics = set(_UV_REQUIRED_PHYSICAL_OPTICS_KEYS).issubset(available)
+    if not use_dumped_derived_optics and has_physical_optics:
+        keys = list(_UV_REQUIRED_PHYSICAL_OPTICS_KEYS)
+        if _UV_AEROSOL_INTERP_KEY in available:
+            keys.append(_UV_AEROSOL_INTERP_KEY)
+        return tuple(keys)
     return _UV_DUMPED_OPTICS_KEYS
 
 
@@ -119,21 +128,30 @@ def _prepare_optics(
     *,
     use_dumped_derived_optics: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
-    if use_dumped_derived_optics or not _has_keys(bundle, _UV_PHYSICAL_OPTICS_KEYS):
+    if use_dumped_derived_optics or not _has_keys(bundle, _UV_REQUIRED_PHYSICAL_OPTICS_KEYS):
         require_keys(bundle, _UV_DUMPED_OPTICS_KEYS, label="UV dumped optical")
         mode = "dumped-derived"
-        if not use_dumped_derived_optics and not _has_keys(bundle, _UV_PHYSICAL_OPTICS_KEYS):
+        if not use_dumped_derived_optics and not _has_keys(
+            bundle, _UV_REQUIRED_PHYSICAL_OPTICS_KEYS
+        ):
             mode = "dumped-derived (physical optical inputs unavailable)"
         return bundle, 0.0, mode
 
     start = time.perf_counter()
+    if "aerosol_interp_fraction" in bundle:
+        fac = bundle["aerosol_interp_fraction"]
+        mode = "python-generated"
+    else:
+        fac = aerosol_interp_fraction(bundle["wavelengths"], reverse=True)
+        mode = "python-generated (aerosol interpolation from wavelengths)"
+
     optics = build_two_stream_phase_inputs(
         ssa=bundle["omega"],
         depol=bundle["depol"],
         rayleigh_fraction=bundle["rayleigh_fraction"],
         aerosol_fraction=bundle["aerosol_fraction"],
         aerosol_moments=bundle["aerosol_moments"],
-        aerosol_interp_fraction=bundle["aerosol_interp_fraction"],
+        aerosol_interp_fraction=fac,
     )
     fo_scatter = build_solar_fo_scatter_term(
         ssa=bundle["omega"],
@@ -141,15 +159,16 @@ def _prepare_optics(
         rayleigh_fraction=bundle["rayleigh_fraction"],
         aerosol_fraction=bundle["aerosol_fraction"],
         aerosol_moments=bundle["aerosol_moments"],
-        aerosol_interp_fraction=bundle["aerosol_interp_fraction"],
+        aerosol_interp_fraction=fac,
         angles=bundle["user_obsgeom"],
         delta_m_truncation_factor=optics.delta_m_truncation_factor,
     )
     prepared = dict(bundle)
+    prepared["aerosol_interp_fraction"] = fac
     prepared["asymm"] = optics.g
     prepared["scaling"] = optics.delta_m_truncation_factor
     prepared["fo_exact_scatter"] = fo_scatter
-    return prepared, time.perf_counter() - start, "python-generated"
+    return prepared, time.perf_counter() - start, mode
 
 
 def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
