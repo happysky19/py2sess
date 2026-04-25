@@ -94,6 +94,13 @@ def _looks_like_row_index(values: np.ndarray) -> bool:
     return np.allclose(grid, row_numbers, rtol=0.0, atol=1.0e-12)
 
 
+def _positive_coordinate(name: str, values: np.ndarray) -> np.ndarray:
+    coordinate = np.asarray(values, dtype=float)
+    if np.any(coordinate <= 0.0):
+        raise ValueError(f"{name} must be positive")
+    return coordinate
+
+
 def _tir_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndarray, str]:
     if _TIR_AEROSOL_INTERP_KEY in bundle:
         return bundle[_TIR_AEROSOL_INTERP_KEY], "python-generated"
@@ -101,12 +108,10 @@ def _tir_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndar
     wavelengths = np.asarray(bundle["wavelengths"], dtype=float)
     coordinate_name = "wavelengths"
     if "wavelength_microns" in bundle and _looks_like_row_index(wavelengths):
-        wavelengths = np.asarray(bundle["wavelength_microns"], dtype=float)
+        wavelengths = _positive_coordinate("wavelength_microns", bundle["wavelength_microns"])
         coordinate_name = "wavelength_microns"
     elif "wavenumber_cm_inv" in bundle and _looks_like_row_index(wavelengths):
-        wavenumber = np.asarray(bundle["wavenumber_cm_inv"], dtype=float)
-        if np.any(wavenumber <= 0.0):
-            raise ValueError("wavenumber_cm_inv must be positive")
+        wavenumber = _positive_coordinate("wavenumber_cm_inv", bundle["wavenumber_cm_inv"])
         wavelengths = 10000.0 / wavenumber
         coordinate_name = "wavenumber_cm_inv"
 
@@ -115,6 +120,7 @@ def _tir_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndar
             "TIR aerosol interpolation requires aerosol_interp_fraction or a "
             "physical spectral coordinate when wavelengths contains row indices"
         )
+    _positive_coordinate(coordinate_name, wavelengths)
     return (
         aerosol_interp_fraction(wavelengths, reverse=True),
         f"python-generated (aerosol interpolation from {coordinate_name})",

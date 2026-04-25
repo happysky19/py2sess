@@ -117,6 +117,21 @@ class BenchmarkExampleTests(unittest.TestCase):
         self.assertIn("optical preprocessing: python-generated", output)
         self.assertIn("emissivity: 1 - albedo", output)
 
+    def test_tir_benchmark_can_use_wavenumber_for_optical_interpolation(self) -> None:
+        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
+        omitted = {"asymm_arr", "d2s_scaling", "aerosol_interp_fraction"}
+        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
+            trimmed = Path(tmpdir) / "tir_wavenumber_optics.npz"
+            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
+            arrays["wavenumber_cm_inv"] = 1.0e7 / np.array(data["wavelengths"])
+            arrays["wavelengths"] = np.arange(1, data["wavelengths"].size + 1, dtype=float)
+            np.savez_compressed(trimmed, **arrays)
+            output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
+        self.assertIn(
+            "optical preprocessing: python-generated (aerosol interpolation from wavenumber_cm_inv)",
+            output,
+        )
+
     def test_tir_benchmark_can_generate_thermal_source_from_temperature(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
         omitted = {"thermal_bb_input", "surfbb", "ref_2s", "ref_fo", "ref_total"}
