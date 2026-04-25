@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from .lattice_result import add_lattice_axes, lattice_shape, reshape_lattice_array
+from .optical import default_delta_m_truncation_factor, validate_delta_m_truncation_factor
 from .preprocess import PreparedInputs
 
 
@@ -522,20 +523,106 @@ def _fo_eps_geometry(
 
 
 def _phase_function_hg(mu: float, asymmetry: float, n_moments: int) -> float:
-    """Evaluates the truncated Henyey-Greenstein phase expansion."""
-    if n_moments <= 0:
+    """Evaluates the Henyey-Greenstein phase function."""
+    if n_moments < 0:
+        raise ValueError("n_moments must be non-negative")
+    if n_moments == 0:
         return 1.0
-    p_lm2 = 1.0
-    p_lm1 = mu
-    total = 1.0 + 3.0 * asymmetry * mu
-    g_pow = asymmetry
-    for moment in range(2, n_moments + 1):
-        p_l = ((2 * moment - 1) * mu * p_lm1 - (moment - 1) * p_lm2) / moment
-        g_pow *= asymmetry
-        total += (2 * moment + 1) * g_pow * p_l
-        p_lm2 = p_lm1
-        p_lm1 = p_l
-    return total
+    if abs(asymmetry) >= 1.0:
+        raise ValueError("g must satisfy -1 < g < 1 for Henyey-Greenstein scattering")
+    denominator = 1.0 + asymmetry * asymmetry - 2.0 * asymmetry * mu
+    return (1.0 - asymmetry * asymmetry) / (denominator**1.5)
+
+
+def _normalize_solar_obs_angles(angles) -> np.ndarray:
+    arr = np.asarray(angles, dtype=float)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("angles must be finite")
+    if arr.ndim == 1 and arr.size == 3:
+        return arr.reshape(1, 3)
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError("angles must have shape (3,) or (ngeom, 3)")
+    return arr
+
+
+def _solar_obs_scattering_cosines(angles) -> np.ndarray:
+    geoms = _normalize_solar_obs_angles(angles)
+    sza = np.deg2rad(geoms[:, 0])
+    vza = np.deg2rad(geoms[:, 1])
+    raz = np.deg2rad(geoms[:, 2])
+    mu1 = np.cos(vza)
+    cosscat = -(np.cos(vza) * np.cos(sza)) + np.sin(vza) * np.sin(sza) * np.cos(raz)
+    overhead = np.isclose(geoms[:, 0], 0.0)
+    if np.any(overhead):
+        cosscat = cosscat.copy()
+        cosscat[overhead] = np.where(np.isclose(mu1[overhead], 0.0), 0.0, -mu1[overhead])
+    return cosscat
+
+
+def _phase_function_hg_array(mu: np.ndarray, asymmetry: np.ndarray, n_moments: int) -> np.ndarray:
+    if n_moments < 0:
+        raise ValueError("n_moments must be non-negative")
+    mu_arr, asymm_arr = np.broadcast_arrays(np.asarray(mu, dtype=float), asymmetry)
+    if n_moments == 0:
+        return np.ones_like(mu_arr, dtype=float)
+    if np.any(np.abs(asymm_arr) >= 1.0):
+        raise ValueError("g must satisfy -1 < g < 1 for Henyey-Greenstein scattering")
+    denominator = 1.0 + asymm_arr * asymm_arr - 2.0 * asymm_arr * mu_arr
+    return (1.0 - asymm_arr * asymm_arr) / np.power(denominator, 1.5)
+
+
+def fo_scatter_term_henyey_greenstein(
+    *,
+    ssa,
+    g,
+    angles,
+    delta_m_truncation_factor=None,
+    n_moments: int = 5000,
+) -> np.ndarray:
+    """Build the solar FO scatter term for Henyey-Greenstein phase functions.
+
+    The returned value matches the Fortran convention:
+    ``phase_function(cos_scatter, g) * ssa / (1 - delta_m_truncation_factor * ssa)``.
+    A single geometry returns shape ``(..., nlyr)``. Multiple geometries return
+    ``(..., nlyr, ngeom)``. Any positive ``n_moments`` uses the closed-form HG
+    phase function; ``n_moments=0`` selects isotropic scattering.
+    """
+    ssa_arr = np.asarray(ssa, dtype=float)
+    g_arr = np.asarray(g, dtype=float)
+    if ssa_arr.ndim == 0 or g_arr.ndim == 0:
+        raise ValueError("ssa and g must have a layer axis")
+    if delta_m_truncation_factor is None:
+        scaling_arr = default_delta_m_truncation_factor(g_arr)
+    else:
+        scaling_arr = np.asarray(delta_m_truncation_factor, dtype=float)
+        if scaling_arr.ndim == 0 and ssa_arr.ndim > 0:
+            scaling_arr = np.full_like(ssa_arr, float(scaling_arr))
+    try:
+        target_shape = np.broadcast_shapes(ssa_arr.shape, g_arr.shape, scaling_arr.shape)
+    except ValueError as exc:
+        raise ValueError(
+            "ssa, g, and delta_m_truncation_factor must be broadcast-compatible"
+        ) from exc
+    if len(target_shape) == 0:
+        raise ValueError("ssa and g must have a layer axis")
+    ssa_b = np.broadcast_to(ssa_arr, target_shape).astype(float, copy=False)
+    g_b = np.broadcast_to(g_arr, target_shape).astype(float, copy=False)
+    scaling_b = np.broadcast_to(scaling_arr, target_shape).astype(float, copy=False)
+    if not (np.all(np.isfinite(ssa_b)) and np.all(np.isfinite(g_b))):
+        raise ValueError("ssa and g must be finite")
+    validate_delta_m_truncation_factor(scaling_b, ssa_b)
+
+    denominator = 1.0 - scaling_b * ssa_b
+    if np.any(np.abs(denominator) <= np.finfo(float).eps):
+        raise ValueError("1 - delta_m_truncation_factor * ssa is too close to zero")
+
+    cosscat = _solar_obs_scattering_cosines(angles)
+    mu = cosscat.reshape((1,) * (len(target_shape) - 1) + (1, cosscat.size))
+    phase = _phase_function_hg_array(mu, g_b[..., np.newaxis], int(n_moments))
+    exact = phase * (ssa_b / denominator)[..., np.newaxis]
+    if cosscat.size == 1:
+        exact = exact[..., 0]
+    return np.ascontiguousarray(exact, dtype=float)
 
 
 def _fo_rps_geometry(

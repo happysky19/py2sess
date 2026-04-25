@@ -6,6 +6,10 @@ import math
 
 from .backend import _load_torch
 from .fo_solar_obs import FoSolarObsResult, _find_sunpaths_direct, _fo_eps_geometry
+from .optical_torch import (
+    default_delta_m_truncation_factor_torch,
+    validate_delta_m_truncation_factor_torch,
+)
 
 torch = _load_torch()
 
@@ -16,19 +20,119 @@ def _fo_work_dtype(value):
 
 
 def _phase_function_hg_torch(mu, asymmetry, n_moments: int):
-    if n_moments <= 0:
+    if n_moments < 0:
+        raise ValueError("n_moments must be non-negative")
+    if n_moments == 0:
         return torch.ones_like(mu)
-    p_lm2 = torch.ones_like(mu)
-    p_lm1 = mu
-    total = 1.0 + 3.0 * asymmetry * mu
-    g_pow = asymmetry
-    for moment in range(2, n_moments + 1):
-        p_l = ((2 * moment - 1) * mu * p_lm1 - (moment - 1) * p_lm2) / moment
-        g_pow = g_pow * asymmetry
-        total = total + (2 * moment + 1) * g_pow * p_l
-        p_lm2 = p_lm1
-        p_lm1 = p_l
-    return total
+    if bool((torch.abs(asymmetry) >= 1.0).any()):
+        raise ValueError("g must satisfy -1 < g < 1 for Henyey-Greenstein scattering")
+    denominator = 1.0 + asymmetry * asymmetry - 2.0 * asymmetry * mu
+    return (1.0 - asymmetry * asymmetry) / torch.pow(denominator, 1.5)
+
+
+def _torch_context_from_values(*, dtype, device, values):
+    if torch is None:  # pragma: no cover
+        raise RuntimeError("PyTorch is not installed")
+    resolved_dtype = dtype
+    resolved_device = torch.device("cpu") if device is None else torch.device(device)
+    for value in values:
+        if torch.is_tensor(value):
+            if resolved_dtype is None:
+                resolved_dtype = value.dtype
+            if device is None:
+                resolved_device = value.device
+            break
+    if resolved_dtype is None:
+        resolved_dtype = torch.get_default_dtype()
+    return resolved_dtype, resolved_device
+
+
+def _as_tensor(value, *, dtype, device):
+    if torch.is_tensor(value):
+        if value.dtype != dtype or value.device != device:
+            return value.to(dtype=dtype, device=device)
+        return value
+    return torch.as_tensor(value, dtype=dtype, device=device)
+
+
+def _normalize_solar_obs_angles_torch(angles, *, dtype, device):
+    arr = _as_tensor(angles, dtype=dtype, device=device)
+    if not bool(torch.isfinite(arr).all()):
+        raise ValueError("angles must be finite")
+    if arr.ndim == 1 and int(arr.numel()) == 3:
+        return arr.reshape(1, 3)
+    if arr.ndim != 2 or int(arr.shape[1]) != 3:
+        raise ValueError("angles must have shape (3,) or (ngeom, 3)")
+    return arr
+
+
+def _solar_obs_scattering_cosines_torch(angles, *, dtype, device):
+    geoms = _normalize_solar_obs_angles_torch(angles, dtype=dtype, device=device)
+    deg2rad = torch.as_tensor(math.pi / 180.0, dtype=dtype, device=device)
+    sza = geoms[:, 0] * deg2rad
+    vza = geoms[:, 1] * deg2rad
+    raz = geoms[:, 2] * deg2rad
+    mu1 = torch.cos(vza)
+    cosscat = -(torch.cos(vza) * torch.cos(sza)) + torch.sin(vza) * torch.sin(sza) * torch.cos(raz)
+    overhead = torch.isclose(geoms[:, 0], torch.zeros_like(geoms[:, 0]))
+    if bool(overhead.any()):
+        nadir_limb = torch.isclose(mu1, torch.zeros_like(mu1))
+        overhead_values = torch.where(nadir_limb, torch.zeros_like(mu1), -mu1)
+        cosscat = torch.where(overhead, overhead_values, cosscat)
+    return cosscat
+
+
+def fo_scatter_term_henyey_greenstein_torch(
+    *,
+    ssa,
+    g,
+    angles,
+    delta_m_truncation_factor=None,
+    n_moments: int = 5000,
+    dtype=None,
+    device=None,
+):
+    """Build differentiable solar FO scatter terms for HG phase functions.
+
+    Any positive ``n_moments`` uses the closed-form HG phase function;
+    ``n_moments=0`` selects isotropic scattering.
+    """
+    if int(n_moments) < 0:
+        raise ValueError("n_moments must be non-negative")
+    dtype, device = _torch_context_from_values(
+        dtype=dtype,
+        device=device,
+        values=(ssa, g, angles, delta_m_truncation_factor),
+    )
+    ssa_t = _as_tensor(ssa, dtype=dtype, device=device)
+    g_t = _as_tensor(g, dtype=dtype, device=device)
+    if ssa_t.ndim == 0 or g_t.ndim == 0:
+        raise ValueError("ssa and g must have a layer axis")
+    if delta_m_truncation_factor is None:
+        scaling_t = default_delta_m_truncation_factor_torch(g_t)
+    else:
+        scaling_t = _as_tensor(delta_m_truncation_factor, dtype=dtype, device=device)
+    try:
+        ssa_b, g_b, scaling_b = torch.broadcast_tensors(ssa_t, g_t, scaling_t)
+    except RuntimeError as exc:
+        raise ValueError(
+            "ssa, g, and delta_m_truncation_factor must be broadcast-compatible"
+        ) from exc
+    if not bool(torch.isfinite(ssa_b).all() and torch.isfinite(g_b).all()):
+        raise ValueError("ssa and g must be finite")
+    validate_delta_m_truncation_factor_torch(scaling_b, ssa_b)
+    denominator = 1.0 - scaling_b * ssa_b
+    eps = torch.as_tensor(torch.finfo(dtype).eps, dtype=dtype, device=device)
+    if bool((torch.abs(denominator) <= eps).any()):
+        raise ValueError("1 - delta_m_truncation_factor * ssa is too close to zero")
+
+    cosscat = _solar_obs_scattering_cosines_torch(angles, dtype=dtype, device=device)
+    mu = cosscat.reshape((1,) * (ssa_b.ndim - 1) + (1, int(cosscat.numel())))
+    phase = _phase_function_hg_torch(mu, g_b.unsqueeze(-1), int(n_moments))
+    exact = phase * (ssa_b / denominator).unsqueeze(-1)
+    if int(cosscat.numel()) == 1:
+        exact = exact[..., 0]
+    return exact.contiguous()
 
 
 def solve_fo_solar_obs_plane_parallel_torch(

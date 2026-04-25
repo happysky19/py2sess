@@ -4,6 +4,29 @@ from __future__ import annotations
 
 import numpy as np
 
+_TRUNCATION_FACTOR_MAX = 1.0 - 1.0e-12
+
+
+def default_delta_m_truncation_factor(asymm: np.ndarray) -> np.ndarray:
+    """Returns the HG-like default delta-M truncation factor."""
+    asymm_arr = np.asarray(asymm, dtype=float)
+    return np.clip(asymm_arr * asymm_arr, 0.0, _TRUNCATION_FACTOR_MAX)
+
+
+def validate_delta_m_truncation_factor(
+    truncation_factor: np.ndarray,
+    omega: np.ndarray,
+) -> None:
+    """Validates public delta-M truncation factors before solver use."""
+    factor = np.asarray(truncation_factor, dtype=float)
+    ssa = np.asarray(omega, dtype=float)
+    if not np.all(np.isfinite(factor)):
+        raise ValueError("delta_m_truncation_factor must be finite")
+    if np.any((factor < 0.0) | (factor >= 1.0)):
+        raise ValueError("delta_m_truncation_factor must satisfy 0 <= f < 1")
+    if np.any(1.0 - ssa * factor <= 0.0):
+        raise ValueError("delta_m_truncation_factor gives non-positive 1 - ssa * f")
+
 
 def delta_m_scale_optical_properties(
     tau: np.ndarray,

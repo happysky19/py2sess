@@ -11,6 +11,7 @@ import numpy as np
 from .brdf_solar_obs import solar_obs_brdf_from_kernels
 from .brdf_thermal import thermal_brdf_from_kernels
 from .geometry import auxgeom_solar_obs, chapman_factors
+from .optical import default_delta_m_truncation_factor, validate_delta_m_truncation_factor
 
 
 DEFAULT_EARTH_RADIUS_KM = 6371.0
@@ -144,8 +145,8 @@ def _validate_inputs(
 
     do_postprocessing = options.do_additional_mvout or (not options.do_mvout_only)
 
-    if not options.do_plane_parallel and (earth_radius < 6320.0 or earth_radius > 6420.0):
-        earth_radius = DEFAULT_EARTH_RADIUS_KM
+    if not options.do_plane_parallel and (not np.isfinite(earth_radius) or earth_radius <= 0.0):
+        raise ValueError("earth_radius must be a positive finite radius in kilometers")
 
     if not np.all(np.isfinite(tau_arr)):
         raise ValueError("tau_arr must be finite")
@@ -153,8 +154,7 @@ def _validate_inputs(
         raise ValueError("omega_arr must be finite")
     if not np.all(np.isfinite(asymm_arr)):
         raise ValueError("asymm_arr must be finite")
-    if not np.all(np.isfinite(d2s_scaling)):
-        raise ValueError("d2s_scaling must be finite")
+    validate_delta_m_truncation_factor(d2s_scaling, omega_arr)
 
     return do_postprocessing, earth_radius
 
@@ -182,8 +182,7 @@ def _validate_inputs_thermal(
         raise ValueError("omega_arr must be finite")
     if not np.all(np.isfinite(asymm_arr)):
         raise ValueError("asymm_arr must be finite")
-    if not np.all(np.isfinite(d2s_scaling)):
-        raise ValueError("d2s_scaling must be finite")
+    validate_delta_m_truncation_factor(d2s_scaling, omega_arr)
     if not np.all(np.isfinite(thermal_bb_input)):
         raise ValueError("thermal_bb_input must be finite")
     return options.do_additional_mvout or (not options.do_mvout_only)
@@ -403,7 +402,8 @@ def prepare_inputs(
     stream_value, flux_factor, albedo
         Two-stream quadrature cosine and surface/source scalar inputs.
     d2s_scaling
-        Optional delta-M scaling factors; missing values default to zero.
+        Optional delta-M truncation factors; missing values default to the
+        HG-like factor ``asymm_arr**2``.
     brdf, surface_leaving
         Optional surface-supplement inputs.
     user_angles, beam_szas, user_relazms
@@ -422,9 +422,9 @@ def prepare_inputs(
     omega = _as_1d("omega_arr", omega_arr, options.n_layers)
     asymm = _as_1d("asymm_arr", asymm_arr, options.n_layers)
     d2s = (
-        np.zeros(options.n_layers, dtype=float)
+        default_delta_m_truncation_factor(asymm)
         if d2s_scaling is None
-        else _as_1d("d2s_scaling", d2s_scaling, options.n_layers)
+        else _as_1d("delta_m_truncation_factor", d2s_scaling, options.n_layers)
     )
     if options.source_mode == "thermal":
         angles = _as_1d(

@@ -6,6 +6,23 @@ from .backend import _load_torch
 
 torch = _load_torch()
 
+_TRUNCATION_FACTOR_MAX = 1.0 - 1.0e-12
+
+
+def default_delta_m_truncation_factor_torch(asymm):
+    """Returns the differentiable HG-like default delta-M truncation factor."""
+    return torch.clamp(asymm * asymm, min=0.0, max=_TRUNCATION_FACTOR_MAX)
+
+
+def validate_delta_m_truncation_factor_torch(truncation_factor, omega) -> None:
+    """Validates public delta-M truncation factors before solver use."""
+    if not bool(torch.all(torch.isfinite(truncation_factor)).item()):
+        raise ValueError("delta_m_truncation_factor must be finite")
+    if not bool(torch.all((truncation_factor >= 0.0) & (truncation_factor < 1.0)).item()):
+        raise ValueError("delta_m_truncation_factor must satisfy 0 <= f < 1")
+    if not bool(torch.all(1.0 - omega * truncation_factor > 0.0).item()):
+        raise ValueError("delta_m_truncation_factor gives non-positive 1 - ssa * f")
+
 
 def delta_m_scale_optical_properties_torch(
     tau,

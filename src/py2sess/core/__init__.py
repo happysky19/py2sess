@@ -10,6 +10,8 @@ __all__ = [
     "ThermalSourceInputs",
     "ThermalSourceTorchInputs",
     "ThermalBatchNumpyResult",
+    "fo_scatter_term_henyey_greenstein",
+    "fo_scatter_term_henyey_greenstein_torch",
     "planck_radiance_wavelength",
     "planck_radiance_wavelength_torch",
     "planck_radiance_wavenumber",
@@ -37,6 +39,14 @@ _LAZY_EXPORTS = {
     "ThermalSourceInputs": (".thermal_source", "ThermalSourceInputs"),
     "ThermalSourceTorchInputs": (".thermal_source_torch", "ThermalSourceTorchInputs"),
     "ThermalBatchNumpyResult": (".thermal_batch_numpy", "ThermalBatchNumpyResult"),
+    "fo_scatter_term_henyey_greenstein": (
+        ".fo_solar_obs",
+        "fo_scatter_term_henyey_greenstein",
+    ),
+    "fo_scatter_term_henyey_greenstein_torch": (
+        ".fo_solar_obs_torch",
+        "fo_scatter_term_henyey_greenstein_torch",
+    ),
     "planck_radiance_wavelength": (".thermal_source", "planck_radiance_wavelength"),
     "planck_radiance_wavelength_torch": (
         ".thermal_source_torch",

@@ -152,12 +152,11 @@ def solve_fo_solar_obs_eps_batch_torch(
     attenuation_nl = _exp_cutoff_torch(total_tau)
     cumsource_up = torch.zeros(batch_size, dtype=dtype, device=device)
     cumsource_db = 4.0 * precomputed.mu0 * albedo_t * attenuation_nl
-    profile_up = None
-    profile_db = None
+    profile_up_layers = []
+    profile_db_layers = []
+    surface_db = cumsource_db
     if return_profile:
-        profile_up = torch.zeros((batch_size, nlayers + 1), dtype=dtype, device=device)
-        profile_db = torch.empty((batch_size, nlayers + 1), dtype=dtype, device=device)
-        profile_db[:, nlayers] = cumsource_db
+        surface_up = torch.zeros_like(cumsource_up)
 
     if precomputed.do_nadir:
         v = 0
@@ -185,8 +184,8 @@ def solve_fo_solar_obs_eps_batch_torch(
             cumsource_db = lostrans * cumsource_db
             cumsource_up = lostrans * cumsource_up + source
             if return_profile:
-                profile_up[:, layer] = cumsource_up
-                profile_db[:, layer] = cumsource_db
+                profile_up_layers.append(cumsource_up)
+                profile_db_layers.append(cumsource_db)
     else:
         if precomputed.fine_path_matrix is None or precomputed.fine_column_index is None:
             raise ValueError("missing non-nadir FO batch geometry terms")
@@ -218,14 +217,16 @@ def solve_fo_solar_obs_eps_batch_torch(
             cumsource_db = lostrans * cumsource_db
             cumsource_up = lostrans * cumsource_up + source
             if return_profile:
-                profile_up[:, layer] = cumsource_up
-                profile_db[:, layer] = cumsource_db
+                profile_up_layers.append(cumsource_up)
+                profile_db_layers.append(cumsource_db)
             cot_1 = cot_2
 
     scale = 0.25 * flux_t / math.pi
     single_scatter = scale * cumsource_up
     direct_beam = scale * cumsource_db
     if return_profile:
+        profile_up = torch.stack([*reversed(profile_up_layers), surface_up], dim=1)
+        profile_db = torch.stack([*reversed(profile_db_layers), surface_db], dim=1)
         single_scatter_profile = scale.unsqueeze(1) * profile_up
         direct_beam_profile = scale.unsqueeze(1) * profile_db
         total_profile = single_scatter_profile + direct_beam_profile

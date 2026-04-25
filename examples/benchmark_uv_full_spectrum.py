@@ -163,9 +163,9 @@ def benchmark_numpy_forward(
         stream=scalar_value(bundle["stream_value"]),
         fbeam=bundle["flux_factor"],
         albedo=bundle["albedo"],
-        delta_m_scaling=bundle["scaling"],
+        delta_m_truncation_factor=bundle["scaling"],
         include_fo=True,
-        fo_exact_scatter=bundle["fo_exact_scatter"],
+        fo_scatter_term=bundle["fo_exact_scatter"],
     )
     total = np.asarray(result.radiance_total, dtype=float)
     checksum = float(np.sum(total))
@@ -350,9 +350,9 @@ def benchmark_torch_forward(
         stream=scalar_value(bundle["stream_value"]),
         fbeam=bundle["flux_factor"],
         albedo=bundle["albedo"],
-        delta_m_scaling=bundle["scaling"],
+        delta_m_truncation_factor=bundle["scaling"],
         include_fo=True,
-        fo_exact_scatter=bundle["fo_exact_scatter"],
+        fo_scatter_term=bundle["fo_exact_scatter"],
     )
     total = result.radiance_total.detach().cpu().numpy()
     checksum = float(np.sum(total))

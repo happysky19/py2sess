@@ -58,7 +58,8 @@ The packaged fixtures keep the new repository self-contained:
 
 For the packaged UV fixture, the standalone regression suite checks saved-file
 parity for 2S, FO, and total radiance. The packaged FO path uses the same
-`fo_exact_scatter` input and batched EPS solver as the full-spectrum UV
+Fortran-dumped `fo_exact_scatter` bundle field, passed through the public API
+as `fo_scatter_term`, and the same batched EPS solver as the full-spectrum UV
 benchmark.
 
 ## Runtime dimensions

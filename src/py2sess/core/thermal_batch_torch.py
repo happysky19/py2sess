@@ -271,7 +271,12 @@ def _two_stream_thermal_toa_batch(
         tterm_save=tterm_save,
     )
     bvp_engine = _canonical_torch_bvp_engine(bvp_engine)
-    if bvp_engine == "pentadiagonal":
+    needs_scattering_grad = omega_total.requires_grad or asymm_total.requires_grad
+    if needs_scattering_grad:
+        # The recurrence solvers update saved columns in place; dense solve keeps
+        # thermal scattering retrieval differentiable.
+        solve_bvp = solve_thermal_dense_bvp_batch_torch
+    elif bvp_engine == "pentadiagonal":
         solve_bvp = solve_thermal_bvp_batch_torch
     elif bvp_engine == "block":
         solve_bvp = solve_thermal_block_bvp_batch_torch
@@ -349,14 +354,21 @@ def _fo_thermal_toa_batch(
     nfine,
     fo_geometry=None,
     return_profile: bool = False,
+    do_optical_deltam_scaling: bool = True,
+    do_source_deltam_scaling: bool = False,
 ):
     """Computes batched FO thermal upwelling TOA radiance."""
     dtype = tau.dtype
     device = tau.device
-    deltaus = tau * (1.0 - omega * scaling)
+    if do_optical_deltam_scaling:
+        deltaus = tau * (1.0 - omega * scaling)
+    else:
+        deltaus = tau
     lower_bb = thermal_bb_input[:, :-1]
     upper_bb = thermal_bb_input[:, 1:]
     single_scatter_scale = 1.0 - omega
+    if do_source_deltam_scaling:
+        single_scatter_scale = single_scatter_scale / (1.0 - omega * scaling)
     therm0 = lower_bb * single_scatter_scale
     therm1 = ((upper_bb - lower_bb) / deltaus) * single_scatter_scale
     height_t = _as_tensor(heights, dtype=dtype, device=device)
@@ -438,6 +450,8 @@ def solve_thermal_batch_torch(
     bvp_engine: str = "auto",
     fo_geometry=None,
     return_profiles: bool = False,
+    do_fo_optical_deltam_scaling: bool = True,
+    do_fo_source_deltam_scaling: bool = False,
 ) -> ThermalBatchTorchResult:
     """Solves thermal observation-geometry spectra with torch tensors.
 
@@ -469,6 +483,9 @@ def solve_thermal_batch_torch(
         solve. ``"block"`` enables the opt-in CPU block-tridiagonal solver.
         ``"pentadiagonal"`` forces the experimental recurrence and is useful
         for lower precision speed studies.
+    do_fo_optical_deltam_scaling, do_fo_source_deltam_scaling
+        Delta-M controls for the FO thermal path. The default applies the
+        corrected optical-depth scaling and leaves source-side scaling off.
 
     Returns
     -------
@@ -552,6 +569,8 @@ def solve_thermal_batch_torch(
         nfine=nfine,
         fo_geometry=fo_geometry,
         return_profile=return_profiles,
+        do_optical_deltam_scaling=do_fo_optical_deltam_scaling,
+        do_source_deltam_scaling=do_fo_source_deltam_scaling,
     )
     if return_profiles:
         return ThermalBatchTorchResult(

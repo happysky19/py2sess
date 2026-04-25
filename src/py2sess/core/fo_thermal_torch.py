@@ -20,7 +20,7 @@ def solve_fo_thermal_torch(
     emissivity: float,
     do_plane_parallel: bool,
     do_optical_deltam_scaling: bool = True,
-    do_source_deltam_scaling: bool = True,
+    do_source_deltam_scaling: bool = False,
     height_grid=None,
     earth_radius: float = 6371.0,
     nfine: int = 3,

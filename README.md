@@ -101,8 +101,11 @@ Core inputs:
 | `surface_planck` | surface Planck radiance |
 | `emissivity` | surface emissivity |
 
-Optional controls include `stream`, `fbeam`, `delta_m_scaling`, `geometry`,
-`include_fo`, `fo_exact_scatter`, and `output_levels`.
+Optional controls include `stream`, `fbeam`, `delta_m_truncation_factor`, `geometry`,
+`include_fo`, `fo_scatter_term`, and `output_levels`. When
+`delta_m_truncation_factor` is omitted, py2sess uses the Henyey-Greenstein
+fallback `g**2`. Pass an explicit factor for mixed phase functions or when
+reusing full-spectrum optical-property fixtures.
 
 Result names:
 

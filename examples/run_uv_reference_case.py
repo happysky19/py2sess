@@ -53,9 +53,9 @@ def main() -> None:
         albedo=case.albedo,
         fbeam=case.flux_factor,
         stream=case.stream_value,
-        delta_m_scaling=case.scaling,
+        delta_m_truncation_factor=case.scaling,
         include_fo=True,
-        fo_exact_scatter=case.fo_exact_scatter,
+        fo_scatter_term=case.fo_exact_scatter,
     )
     numpy_2s = numpy_result.radiance_2s
     numpy_fo = numpy_result.radiance_fo
@@ -82,9 +82,9 @@ def main() -> None:
             albedo=case.albedo,
             fbeam=case.flux_factor,
             stream=case.stream_value,
-            delta_m_scaling=case.scaling,
+            delta_m_truncation_factor=case.scaling,
             include_fo=True,
-            fo_exact_scatter=case.fo_exact_scatter,
+            fo_scatter_term=case.fo_exact_scatter,
         )
         torch_2s = to_numpy(torch_result.radiance_2s)
         torch_fo = to_numpy(torch_result.radiance_fo)

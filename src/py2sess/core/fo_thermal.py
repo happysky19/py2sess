@@ -388,7 +388,7 @@ def solve_fo_thermal(
     *,
     do_plane_parallel: bool,
     do_optical_deltam_scaling: bool = True,
-    do_source_deltam_scaling: bool = True,
+    do_source_deltam_scaling: bool = False,
     nfine: int = 3,
 ) -> FoThermalResult:
     """Runs the optimized thermal FO observation-geometry solver.

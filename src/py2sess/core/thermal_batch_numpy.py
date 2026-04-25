@@ -400,12 +400,19 @@ def _fo_thermal_toa(
     nfine,
     geometry=None,
     return_profile: bool = False,
+    do_optical_deltam_scaling: bool = True,
+    do_source_deltam_scaling: bool = False,
 ):
     """Computes batched FO thermal upwelling TOA radiance."""
-    deltaus = tau * (1.0 - omega * scaling)
+    if do_optical_deltam_scaling:
+        deltaus = tau * (1.0 - omega * scaling)
+    else:
+        deltaus = tau
     lower_bb = thermal_bb_input[:, :-1]
     upper_bb = thermal_bb_input[:, 1:]
     single_scatter_scale = 1.0 - omega
+    if do_source_deltam_scaling:
+        single_scatter_scale = single_scatter_scale / (1.0 - omega * scaling)
     therm0 = lower_bb * single_scatter_scale
     therm1 = ((upper_bb - lower_bb) / deltaus) * single_scatter_scale
     extinction = deltaus / (heights[:-1] - heights[1:])
@@ -480,6 +487,8 @@ def solve_thermal_batch_numpy(
     bvp_engine: str = "auto",
     fo_geometry=None,
     return_profiles: bool = False,
+    do_fo_optical_deltam_scaling: bool = True,
+    do_fo_source_deltam_scaling: bool = False,
 ) -> ThermalBatchNumpyResult:
     """Solves thermal observation-geometry spectra with NumPy arrays.
 
@@ -505,6 +514,9 @@ def solve_thermal_batch_numpy(
     fo_geometry
         Optional cached FO thermal geometry from
         :func:`precompute_fo_thermal_geometry_numpy`.
+    do_fo_optical_deltam_scaling, do_fo_source_deltam_scaling
+        Delta-M controls for the FO thermal path. The default applies the
+        corrected optical-depth scaling and leaves source-side scaling off.
 
     Returns
     -------
@@ -549,6 +561,8 @@ def solve_thermal_batch_numpy(
         nfine=nfine,
         geometry=fo_geometry,
         return_profile=return_profiles,
+        do_optical_deltam_scaling=do_fo_optical_deltam_scaling,
+        do_source_deltam_scaling=do_fo_source_deltam_scaling,
     )
     if return_profiles:
         return ThermalBatchNumpyResult(

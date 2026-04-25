@@ -42,6 +42,11 @@ def _as_tensor(value, *, dtype, device):
     return torch.as_tensor(value, dtype=dtype, device=device)
 
 
+def _needs_autograd_safe_bvp(*values) -> bool:
+    """Returns true when the 2S BVP solve must preserve optical-property gradients."""
+    return bool(torch.is_grad_enabled() and any(value.requires_grad for value in values))
+
+
 def _taylor_series_2_vectorized_torch(
     order: int, small: float, eps, y, delta, fac1, fac2, sm: float
 ):
@@ -546,6 +551,9 @@ def solve_solar_obs_batch_torch(
     pi4 = 4.0 * np.pi
     omega_asymm_3 = 3.0 * omega_total * asymm_total
     all_layers_active = bool(misc["all_active"])
+    bvp_engine_for_call = bvp_engine
+    if _needs_autograd_safe_bvp(omega_t, asymm_t, scaling_t):
+        bvp_engine_for_call = "dense"
     total = torch.zeros(tau_t.shape[0], dtype=dtype, device=device)
     total_profile = None
     if return_profile:
@@ -607,11 +615,11 @@ def solve_solar_obs_batch_torch(
         else:
             direct_beam = torch.zeros_like(albedo_t)
             bvp_albedo = torch.zeros_like(albedo_t)
-        if bvp_engine == "pentadiagonal":
+        if bvp_engine_for_call == "pentadiagonal":
             solve_bvp = solve_solar_observation_bvp_batch_torch
-        elif bvp_engine == "block":
+        elif bvp_engine_for_call == "block":
             solve_bvp = solve_solar_observation_block_bvp_batch_torch
-        elif bvp_engine == "dense":
+        elif bvp_engine_for_call == "dense":
             solve_bvp = solve_solar_observation_dense_bvp_batch_torch
         else:
             solve_bvp = (

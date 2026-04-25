@@ -123,5 +123,5 @@ Expected shapes:
 
 - The TIR benchmark covers the standalone batched FO plus 2S path.
 - The UV benchmark covers the standalone FO plus 2S path, using a bundle that
-  already includes the FO exact-scatter input required by the standalone
-  solver.
+  already includes the Fortran-dumped `fo_exact_scatter` field. Public
+  `.forward()` calls pass that field as `fo_scatter_term`.

@@ -77,7 +77,7 @@ class ReferenceCaseTests(unittest.TestCase):
             angles=case.user_angle,
             stream=case.stream_value,
             albedo=case.albedo,
-            delta_m_scaling=case.d2s_scaling,
+            delta_m_truncation_factor=case.d2s_scaling,
             planck=case.thermal_bb_input,
             surface_planck=case.surfbb,
             emissivity=case.emissivity,
@@ -123,7 +123,7 @@ class ReferenceCaseTests(unittest.TestCase):
             angles=case.user_angle,
             stream=case.stream_value,
             albedo=case.albedo,
-            delta_m_scaling=case.d2s_scaling,
+            delta_m_truncation_factor=case.d2s_scaling,
             planck=case.thermal_bb_input,
             surface_planck=case.surfbb,
             emissivity=case.emissivity,
@@ -266,9 +266,9 @@ class ReferenceCaseTests(unittest.TestCase):
             stream=case.stream_value,
             fbeam=case.flux_factor,
             albedo=case.albedo,
-            delta_m_scaling=case.scaling,
+            delta_m_truncation_factor=case.scaling,
             include_fo=True,
-            fo_exact_scatter=case.fo_exact_scatter,
+            fo_scatter_term=case.fo_exact_scatter,
         )
         np.testing.assert_allclose(public.radiance_2s, two_stream)
         np.testing.assert_allclose(public.radiance_fo, fo)
@@ -328,9 +328,9 @@ class ReferenceCaseTests(unittest.TestCase):
             stream=case.stream_value,
             fbeam=case.flux_factor,
             albedo=case.albedo,
-            delta_m_scaling=case.scaling,
+            delta_m_truncation_factor=case.scaling,
             include_fo=True,
-            fo_exact_scatter=case.fo_exact_scatter,
+            fo_scatter_term=case.fo_exact_scatter,
         )
         np.testing.assert_allclose(
             to_numpy(public.radiance_2s), two_stream, rtol=1.0e-12, atol=1.0e-12
@@ -478,9 +478,9 @@ class ReferenceCaseTests(unittest.TestCase):
             stream=case.stream_value,
             fbeam=case.flux_factor[:rows],
             albedo=albedo,
-            delta_m_scaling=case.scaling[:rows],
+            delta_m_truncation_factor=case.scaling[:rows],
             include_fo=True,
-            fo_exact_scatter=case.fo_exact_scatter[:rows],
+            fo_scatter_term=case.fo_exact_scatter[:rows],
         )
         result.radiance_total.sum().backward()
         self.assertIsNotNone(tau.grad)
