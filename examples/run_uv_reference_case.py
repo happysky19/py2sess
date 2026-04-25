@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from py2sess import TwoStreamEss, TwoStreamEssOptions
+from py2sess.optical.phase import build_solar_fo_scatter_term, build_two_stream_phase_inputs
 from py2sess.reference_cases import load_uv_benchmark_case
 from py2sess.rtsolver.backend import has_torch, to_numpy
 
@@ -43,19 +44,37 @@ def _print_summary(
 def main() -> None:
     """Runs the packaged UV fixture."""
     case = load_uv_benchmark_case()
+    optics = build_two_stream_phase_inputs(
+        ssa=case.omega,
+        depol=case.depol,
+        rayleigh_fraction=case.rayleigh_fraction,
+        aerosol_fraction=case.aerosol_fraction,
+        aerosol_moments=case.aerosol_moments,
+        aerosol_interp_fraction=case.aerosol_interp_fraction,
+    )
+    fo_scatter = build_solar_fo_scatter_term(
+        ssa=case.omega,
+        depol=case.depol,
+        rayleigh_fraction=case.rayleigh_fraction,
+        aerosol_fraction=case.aerosol_fraction,
+        aerosol_moments=case.aerosol_moments,
+        aerosol_interp_fraction=case.aerosol_interp_fraction,
+        angles=case.user_obsgeom,
+        delta_m_truncation_factor=optics.delta_m_truncation_factor,
+    )
     solver = TwoStreamEss(TwoStreamEssOptions(nlyr=case.tau.shape[1], mode="solar"))
     numpy_result = solver.forward(
         tau=case.tau,
         ssa=case.omega,
-        g=case.asymm,
+        g=optics.g,
         z=case.heights,
         angles=case.user_obsgeom,
         albedo=case.albedo,
         fbeam=case.flux_factor,
         stream=case.stream_value,
-        delta_m_truncation_factor=case.scaling,
+        delta_m_truncation_factor=optics.delta_m_truncation_factor,
         include_fo=True,
-        fo_scatter_term=case.fo_exact_scatter,
+        fo_scatter_term=fo_scatter,
     )
     numpy_2s = numpy_result.radiance_2s
     numpy_fo = numpy_result.radiance_fo
@@ -76,15 +95,15 @@ def main() -> None:
         torch_result = torch_solver.forward(
             tau=case.tau,
             ssa=case.omega,
-            g=case.asymm,
+            g=optics.g,
             z=case.heights,
             angles=case.user_obsgeom,
             albedo=case.albedo,
             fbeam=case.flux_factor,
             stream=case.stream_value,
-            delta_m_truncation_factor=case.scaling,
+            delta_m_truncation_factor=optics.delta_m_truncation_factor,
             include_fo=True,
-            fo_scatter_term=case.fo_exact_scatter,
+            fo_scatter_term=fo_scatter,
         )
         torch_2s = to_numpy(torch_result.radiance_2s)
         torch_fo = to_numpy(torch_result.radiance_fo)

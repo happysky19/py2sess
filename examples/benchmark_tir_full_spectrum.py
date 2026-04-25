@@ -19,6 +19,7 @@ from _full_spectrum_benchmark_common import (
     scalar_value,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
+from py2sess.optical.phase import build_two_stream_phase_inputs
 from py2sess.rtsolver import precompute_fo_thermal_geometry_numpy
 from py2sess.rtsolver.backend import has_torch
 from py2sess.rtsolver.thermal_batch_numpy import _fo_thermal_toa, _two_stream_thermal_toa
@@ -31,6 +32,48 @@ def _public_bvp_solver(engine: str) -> str:
     if engine == "pentadiagonal":
         return "pentadiag"
     return "scipy"
+
+
+_TIR_PHYSICAL_OPTICS_KEYS = (
+    "depol",
+    "rayleigh_fraction",
+    "aerosol_fraction",
+    "aerosol_moments",
+    "aerosol_interp_fraction",
+)
+
+_TIR_DUMPED_OPTICS_KEYS = ("asymm_arr", "d2s_scaling")
+
+
+def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
+    return all(key in bundle for key in keys)
+
+
+def _prepare_optics(
+    bundle: dict[str, np.ndarray],
+    *,
+    use_dumped_derived_optics: bool,
+) -> tuple[dict[str, np.ndarray], float, str]:
+    if use_dumped_derived_optics or not _has_keys(bundle, _TIR_PHYSICAL_OPTICS_KEYS):
+        require_keys(bundle, _TIR_DUMPED_OPTICS_KEYS, label="TIR dumped optical")
+        mode = "dumped-derived"
+        if not use_dumped_derived_optics and not _has_keys(bundle, _TIR_PHYSICAL_OPTICS_KEYS):
+            mode = "dumped-derived (physical optical inputs unavailable)"
+        return bundle, 0.0, mode
+
+    start = time.perf_counter()
+    optics = build_two_stream_phase_inputs(
+        ssa=bundle["omega_arr"],
+        depol=bundle["depol"],
+        rayleigh_fraction=bundle["rayleigh_fraction"],
+        aerosol_fraction=bundle["aerosol_fraction"],
+        aerosol_moments=bundle["aerosol_moments"],
+        aerosol_interp_fraction=bundle["aerosol_interp_fraction"],
+    )
+    prepared = dict(bundle)
+    prepared["asymm_arr"] = optics.g
+    prepared["d2s_scaling"] = optics.delta_m_truncation_factor
+    return prepared, time.perf_counter() - start, "python-generated"
 
 
 def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
@@ -422,6 +465,11 @@ def main() -> None:
         action="store_true",
         help="Benchmark the public forward profile path instead of endpoint-only output.",
     )
+    parser.add_argument(
+        "--use-dumped-derived-optics",
+        action="store_true",
+        help="Use stored g and delta-M factor instead of Python preprocessing.",
+    )
     args = parser.parse_args()
 
     load_start = time.perf_counter()
@@ -434,8 +482,6 @@ def main() -> None:
             "user_angle",
             "tau_arr",
             "omega_arr",
-            "asymm_arr",
-            "d2s_scaling",
             "thermal_bb_input",
             "surfbb",
             "albedo",
@@ -448,13 +494,21 @@ def main() -> None:
     bundle["wavelengths"] = bundle["wavelengths"][:wavelengths]
     bundle["tau_arr"] = bundle["tau_arr"][:wavelengths]
     bundle["omega_arr"] = bundle["omega_arr"][:wavelengths]
-    bundle["asymm_arr"] = bundle["asymm_arr"][:wavelengths]
-    bundle["d2s_scaling"] = bundle["d2s_scaling"][:wavelengths]
     bundle["thermal_bb_input"] = bundle["thermal_bb_input"][:wavelengths]
     bundle["surfbb"] = bundle["surfbb"][:wavelengths]
     bundle["albedo"] = bundle["albedo"][:wavelengths]
+    for key in _TIR_DUMPED_OPTICS_KEYS:
+        if key in bundle:
+            bundle[key] = bundle[key][:wavelengths]
+    for key in ("depol", "rayleigh_fraction", "aerosol_fraction", "aerosol_interp_fraction"):
+        if key in bundle:
+            bundle[key] = bundle[key][:wavelengths]
     if "ref_total" in bundle:
         bundle["ref_total"] = bundle["ref_total"][:wavelengths]
+    bundle, optical_seconds, optical_mode = _prepare_optics(
+        bundle,
+        use_dumped_derived_optics=args.use_dumped_derived_optics,
+    )
     load_seconds = time.perf_counter() - load_start
 
     print_problem_header(
@@ -469,6 +523,7 @@ def main() -> None:
             "PyTorch warmup, and checksum reduction."
         ),
     )
+    print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
 
     rows: list[BenchmarkRow] = []
     if args.backend in {"numpy", "both"}:

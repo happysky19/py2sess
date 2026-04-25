@@ -19,6 +19,7 @@ from _full_spectrum_benchmark_common import (
     scalar_value,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
+from py2sess.optical.phase import build_solar_fo_scatter_term, build_two_stream_phase_inputs
 from py2sess.rtsolver.backend import has_torch
 from py2sess.rtsolver.fo_solar_obs_batch_numpy import (
     fo_solar_obs_batch_precompute,
@@ -30,6 +31,59 @@ from py2sess.rtsolver.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
 def _public_bvp_solver(engine: str) -> str:
     """Maps low-level benchmark BVP names to public option names."""
     return "banded" if engine == "block" else "scipy"
+
+
+_UV_PHYSICAL_OPTICS_KEYS = (
+    "depol",
+    "rayleigh_fraction",
+    "aerosol_fraction",
+    "aerosol_moments",
+    "aerosol_interp_fraction",
+)
+
+_UV_DUMPED_OPTICS_KEYS = ("asymm", "scaling", "fo_exact_scatter")
+
+
+def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
+    return all(key in bundle for key in keys)
+
+
+def _prepare_optics(
+    bundle: dict[str, np.ndarray],
+    *,
+    use_dumped_derived_optics: bool,
+) -> tuple[dict[str, np.ndarray], float, str]:
+    if use_dumped_derived_optics or not _has_keys(bundle, _UV_PHYSICAL_OPTICS_KEYS):
+        require_keys(bundle, _UV_DUMPED_OPTICS_KEYS, label="UV dumped optical")
+        mode = "dumped-derived"
+        if not use_dumped_derived_optics and not _has_keys(bundle, _UV_PHYSICAL_OPTICS_KEYS):
+            mode = "dumped-derived (physical optical inputs unavailable)"
+        return bundle, 0.0, mode
+
+    start = time.perf_counter()
+    optics = build_two_stream_phase_inputs(
+        ssa=bundle["omega"],
+        depol=bundle["depol"],
+        rayleigh_fraction=bundle["rayleigh_fraction"],
+        aerosol_fraction=bundle["aerosol_fraction"],
+        aerosol_moments=bundle["aerosol_moments"],
+        aerosol_interp_fraction=bundle["aerosol_interp_fraction"],
+    )
+    fo_scatter = build_solar_fo_scatter_term(
+        ssa=bundle["omega"],
+        depol=bundle["depol"],
+        rayleigh_fraction=bundle["rayleigh_fraction"],
+        aerosol_fraction=bundle["aerosol_fraction"],
+        aerosol_moments=bundle["aerosol_moments"],
+        aerosol_interp_fraction=bundle["aerosol_interp_fraction"],
+        angles=bundle["user_obsgeom"],
+        delta_m_truncation_factor=optics.delta_m_truncation_factor,
+    )
+    prepared = dict(bundle)
+    prepared["asymm"] = optics.g
+    prepared["scaling"] = optics.delta_m_truncation_factor
+    prepared["fo_exact_scatter"] = fo_scatter
+    return prepared, time.perf_counter() - start, "python-generated"
 
 
 def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
@@ -402,6 +456,11 @@ def main() -> None:
         action="store_true",
         help="Benchmark the public forward profile path instead of endpoint-only output.",
     )
+    parser.add_argument(
+        "--use-dumped-derived-optics",
+        action="store_true",
+        help="Use stored g, delta-M factor, and FO scatter instead of Python preprocessing.",
+    )
     args = parser.parse_args()
 
     load_start = time.perf_counter()
@@ -414,11 +473,8 @@ def main() -> None:
             "heights",
             "tau",
             "omega",
-            "asymm",
-            "scaling",
             "albedo",
             "flux_factor",
-            "fo_exact_scatter",
             "chapman",
             "x0",
             "user_stream",
@@ -437,15 +493,22 @@ def main() -> None:
     bundle["wavelengths"] = bundle["wavelengths"][:wavelengths]
     bundle["tau"] = bundle["tau"][:wavelengths]
     bundle["omega"] = bundle["omega"][:wavelengths]
-    bundle["asymm"] = bundle["asymm"][:wavelengths]
-    bundle["scaling"] = bundle["scaling"][:wavelengths]
     bundle["albedo"] = bundle["albedo"][:wavelengths]
     bundle["flux_factor"] = bundle["flux_factor"][:wavelengths]
-    bundle["fo_exact_scatter"] = bundle["fo_exact_scatter"][:wavelengths]
+    for key in _UV_DUMPED_OPTICS_KEYS:
+        if key in bundle:
+            bundle[key] = bundle[key][:wavelengths]
+    for key in ("depol", "rayleigh_fraction", "aerosol_fraction", "aerosol_interp_fraction"):
+        if key in bundle:
+            bundle[key] = bundle[key][:wavelengths]
     if "ref_total" in bundle:
         bundle["ref_total"] = bundle["ref_total"][:wavelengths]
     if "stream_value" not in bundle:
         bundle["stream_value"] = np.array([1.0 / np.sqrt(3.0)], dtype=float)
+    bundle, optical_seconds, optical_mode = _prepare_optics(
+        bundle,
+        use_dumped_derived_optics=args.use_dumped_derived_optics,
+    )
     load_seconds = time.perf_counter() - load_start
 
     print_problem_header(
@@ -460,6 +523,7 @@ def main() -> None:
             "PyTorch warmup, tensor conversion, and checksum reduction."
         ),
     )
+    print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
 
     rows: list[BenchmarkRow] = []
     if args.backend in {"numpy", "both"}:

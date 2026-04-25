@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from py2sess import TwoStreamEss, TwoStreamEssOptions
+from py2sess.optical.phase import build_two_stream_phase_inputs
 from py2sess.reference_cases import load_tir_benchmark_case
 from py2sess.rtsolver.backend import has_torch, to_numpy
 
@@ -44,17 +45,25 @@ def _print_summary(
 def main() -> None:
     """Runs the packaged TIR fixture."""
     case = load_tir_benchmark_case()
+    optics = build_two_stream_phase_inputs(
+        ssa=case.omega_arr,
+        depol=case.depol,
+        rayleigh_fraction=case.rayleigh_fraction,
+        aerosol_fraction=case.aerosol_fraction,
+        aerosol_moments=case.aerosol_moments,
+        aerosol_interp_fraction=case.aerosol_interp_fraction,
+    )
 
     solver = TwoStreamEss(TwoStreamEssOptions(nlyr=case.tau_arr.shape[1], mode="thermal"))
     numpy_result = solver.forward(
         tau=case.tau_arr,
         ssa=case.omega_arr,
-        g=case.asymm_arr,
+        g=optics.g,
         z=case.heights,
         angles=case.user_angle,
         stream=case.stream_value,
         albedo=case.albedo,
-        delta_m_truncation_factor=case.d2s_scaling,
+        delta_m_truncation_factor=optics.delta_m_truncation_factor,
         planck=case.thermal_bb_input,
         surface_planck=case.surfbb,
         emissivity=case.emissivity,
@@ -79,12 +88,12 @@ def main() -> None:
         torch_result = torch_solver.forward(
             tau=case.tau_arr,
             ssa=case.omega_arr,
-            g=case.asymm_arr,
+            g=optics.g,
             z=case.heights,
             angles=case.user_angle,
             stream=case.stream_value,
             albedo=case.albedo,
-            delta_m_truncation_factor=case.d2s_scaling,
+            delta_m_truncation_factor=optics.delta_m_truncation_factor,
             planck=case.thermal_bb_input,
             surface_planck=case.surfbb,
             emissivity=case.emissivity,

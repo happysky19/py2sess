@@ -21,6 +21,8 @@ scripts/run_full_benchmark_threads.sh /path/to/uv_full_bundle.npz /path/to/tir_f
 The benchmark table reports:
 
 - `load (s)`: one-time bundle read and slice time, printed in the header
+- `optical preprocessing`: one-time generation of `g`, delta-M truncation
+  factor, and solar FO scatter terms when physical optical inputs are present
 - `wall (s)`: total backend wall time after bundle load
 - `rt (s)`: solver runtime only
 - `setup (s)`: `wall (s) - rt (s)`
@@ -43,6 +45,23 @@ Use `--output-levels` only when timing profile output. Profile timing is not
 the endpoint performance target because it allocates and returns
 `radiance_profile_*` arrays.
 
+By default, the scripts generate derived optical inputs from physical
+Rayleigh/aerosol fractions when the bundle contains them. Pass
+`--use-dumped-derived-optics` to use stored Fortran-derived `g`, delta-M
+factor, and solar FO scatter terms instead. Older bundles without physical
+optical fields automatically fall back to the stored derived arrays.
+
+To enrich a local bundle with physical optical fields from the original
+Fortran text dump:
+
+```bash
+python3 scripts/enrich_full_benchmark_optics.py uv /path/to/UV_Dump.dat /path/to/uv_full_bundle.npz /path/to/uv_full_bundle_with_optics.npz
+python3 scripts/enrich_full_benchmark_optics.py tir /path/to/TIR_Dump.dat /path/to/tir_full_bundle.npz /path/to/tir_full_bundle_with_optics.npz
+```
+
+The enrichment step writes a new local bundle and leaves the original bundle
+unchanged.
+
 Generated benchmark reports should stay local, for example under `outputs/`,
 `local_outputs/`, or `paper_outputs/`, which are ignored by git.
 
@@ -55,15 +74,30 @@ Required arrays:
 - `user_angle`
 - `tau_arr`
 - `omega_arr`
-- `asymm_arr`
-- `d2s_scaling`
 - `thermal_bb_input`
 - `surfbb`
 - `albedo`
 
+Optical phase inputs, preferred:
+
+- `depol`
+- `rayleigh_fraction`
+- `aerosol_fraction`
+- `aerosol_moments`
+- `aerosol_interp_fraction`
+
+Legacy derived optical inputs:
+
+- `asymm_arr`
+- `d2s_scaling`
+
 Expected shapes:
 
 - `tau_arr`, `omega_arr`, `asymm_arr`, `d2s_scaling`: `(n_wavelengths, n_layers)`
+- `depol`, `aerosol_interp_fraction`: `(n_wavelengths,)`
+- `rayleigh_fraction`: `(n_wavelengths, n_layers)`
+- `aerosol_fraction`: `(n_wavelengths, n_layers, n_aerosol)`
+- `aerosol_moments`: `(2, n_moments + 1, n_aerosol)`
 - `thermal_bb_input`: `(n_wavelengths, n_layers + 1)`
 - `surfbb`, `albedo`, `wavelengths`: `(n_wavelengths,)`
 - `heights`: `(n_layers + 1,)`
@@ -84,11 +118,8 @@ Required arrays:
 - `heights`
 - `tau`
 - `omega`
-- `asymm`
-- `scaling`
 - `albedo`
 - `flux_factor`
-- `fo_exact_scatter`
 - `chapman`
 - `x0`
 - `user_stream`
@@ -98,6 +129,20 @@ Required arrays:
 - `pxsq`
 - `px0x`
 - `ulp`
+
+Optical phase inputs, preferred:
+
+- `depol`
+- `rayleigh_fraction`
+- `aerosol_fraction`
+- `aerosol_moments`
+- `aerosol_interp_fraction`
+
+Legacy derived optical inputs:
+
+- `asymm`
+- `scaling`
+- `fo_exact_scatter`
 
 Optional arrays:
 
@@ -110,6 +155,10 @@ Expected shapes:
 
 - `tau`, `omega`, `asymm`, `scaling`: `(n_wavelengths, n_layers)`
 - `fo_exact_scatter`: `(n_wavelengths, n_layers)`
+- `depol`, `aerosol_interp_fraction`: `(n_wavelengths,)`
+- `rayleigh_fraction`: `(n_wavelengths, n_layers)`
+- `aerosol_fraction`: `(n_wavelengths, n_layers, n_aerosol)`
+- `aerosol_moments`: `(2, n_moments + 1, n_aerosol)`
 - `albedo`, `flux_factor`, `wavelengths`: `(n_wavelengths,)`
 - `user_obsgeom`: `(1, 3)` for the current bundled observation-geometry case
 - `heights`: `(n_layers + 1,)`
@@ -122,6 +171,6 @@ Expected shapes:
 ## Scope
 
 - The TIR benchmark covers the standalone batched FO plus 2S path.
-- The UV benchmark covers the standalone FO plus 2S path, using a bundle that
-  already includes the Fortran-dumped `fo_exact_scatter` field. Public
-  `.forward()` calls pass that field as `fo_scatter_term`.
+- The UV benchmark covers the standalone FO plus 2S path. If physical optical
+  phase inputs are present, Python generates the solar `fo_scatter_term`;
+  otherwise the script uses the stored `fo_exact_scatter` field.

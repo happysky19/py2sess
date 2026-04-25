@@ -4,18 +4,28 @@ from __future__ import annotations
 
 from ..rtsolver.backend import _load_torch
 
-torch = _load_torch()
+torch = None
 
 _TRUNCATION_FACTOR_MAX = 1.0 - 1.0e-12
 
 
+def _require_torch():
+    global torch
+    torch = _load_torch()
+    if torch is None:  # pragma: no cover
+        raise RuntimeError("PyTorch is not installed")
+    return torch
+
+
 def default_delta_m_truncation_factor_torch(asymm):
     """Returns the differentiable HG-like default delta-M truncation factor."""
+    torch = _require_torch()
     return torch.clamp(asymm * asymm, min=0.0, max=_TRUNCATION_FACTOR_MAX)
 
 
 def validate_delta_m_truncation_factor_torch(truncation_factor, omega) -> None:
     """Validates public delta-M truncation factors before solver use."""
+    torch = _require_torch()
     if not bool(torch.all(torch.isfinite(truncation_factor)).item()):
         raise ValueError("delta_m_truncation_factor must be finite")
     if not bool(torch.all((truncation_factor >= 0.0) & (truncation_factor < 1.0)).item()):
@@ -49,6 +59,7 @@ def delta_m_scale_optical_properties_torch(
         Delta-scaled optical thickness, single-scattering albedo, and
         asymmetry-parameter tensors.
     """
+    torch = _require_torch()
     omfac = 1.0 - omega * scaling
     m1fac = 1.0 - scaling
     delta_tau = omfac * tau

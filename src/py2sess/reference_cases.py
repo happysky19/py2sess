@@ -24,6 +24,11 @@ class TirBenchmarkCase:
     omega_arr: np.ndarray
     asymm_arr: np.ndarray
     d2s_scaling: np.ndarray
+    depol: np.ndarray
+    rayleigh_fraction: np.ndarray
+    aerosol_fraction: np.ndarray
+    aerosol_moments: np.ndarray
+    aerosol_interp_fraction: np.ndarray
     thermal_bb_input: np.ndarray
     surfbb: np.ndarray
     albedo: np.ndarray
@@ -56,6 +61,11 @@ class UvBenchmarkCase:
     omega: np.ndarray
     asymm: np.ndarray
     scaling: np.ndarray
+    depol: np.ndarray
+    rayleigh_fraction: np.ndarray
+    aerosol_fraction: np.ndarray
+    aerosol_moments: np.ndarray
+    aerosol_interp_fraction: np.ndarray
     albedo: np.ndarray
     flux_factor: np.ndarray
     fo_exact_scatter: np.ndarray
@@ -104,6 +114,11 @@ def load_tir_benchmark_case() -> TirBenchmarkCase:
         omega_arr=data["omega_arr"],
         asymm_arr=data["asymm_arr"],
         d2s_scaling=data["d2s_scaling"],
+        depol=data["depol"],
+        rayleigh_fraction=data["rayleigh_fraction"],
+        aerosol_fraction=data["aerosol_fraction"],
+        aerosol_moments=data["aerosol_moments"],
+        aerosol_interp_fraction=data["aerosol_interp_fraction"],
         thermal_bb_input=data["thermal_bb_input"],
         surfbb=data["surfbb"],
         albedo=data["albedo"],
@@ -126,6 +141,11 @@ def load_uv_benchmark_case() -> UvBenchmarkCase:
         omega=data["omega"],
         asymm=data["asymm"],
         scaling=data["scaling"],
+        depol=data["depol"],
+        rayleigh_fraction=data["rayleigh_fraction"],
+        aerosol_fraction=data["aerosol_fraction"],
+        aerosol_moments=data["aerosol_moments"],
+        aerosol_interp_fraction=data["aerosol_interp_fraction"],
         albedo=data["albedo"],
         flux_factor=data["flux_factor"],
         fo_exact_scatter=data["fo_exact_scatter"],

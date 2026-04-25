@@ -7,6 +7,20 @@ from .delta_m import (
     delta_m_scale_optical_properties,
     validate_delta_m_truncation_factor,
 )
+from .phase import (
+    TwoStreamPhaseInputs,
+    aerosol_interp_fraction,
+    build_solar_fo_scatter_term,
+    build_two_stream_phase_inputs,
+    ssa_from_optical_depth,
+)
+from .phase_torch import (
+    TwoStreamPhaseTorchInputs,
+    aerosol_interp_fraction_torch,
+    build_solar_fo_scatter_term_torch,
+    build_two_stream_phase_inputs_torch,
+    ssa_from_optical_depth_torch,
+)
 from .planck import (
     ThermalSourceInputs,
     planck_radiance_wavelength,
@@ -31,6 +45,16 @@ __all__ = [
     "default_delta_m_truncation_factor",
     "delta_m_scale_optical_properties",
     "validate_delta_m_truncation_factor",
+    "TwoStreamPhaseInputs",
+    "TwoStreamPhaseTorchInputs",
+    "aerosol_interp_fraction",
+    "aerosol_interp_fraction_torch",
+    "build_solar_fo_scatter_term",
+    "build_solar_fo_scatter_term_torch",
+    "build_two_stream_phase_inputs",
+    "build_two_stream_phase_inputs_torch",
+    "ssa_from_optical_depth",
+    "ssa_from_optical_depth_torch",
     "ThermalSourceInputs",
     "ThermalSourceTorchInputs",
     "planck_radiance_wavelength",

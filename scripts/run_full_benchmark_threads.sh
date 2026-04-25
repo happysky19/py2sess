@@ -15,6 +15,8 @@ Environment:
   LIMIT=                 Optional spectral-row limit
   CHUNK_SIZE=            Optional chunk-size override
   OUTPUT_LEVELS=0        Set to 1 to benchmark profile output
+  USE_DUMPED_DERIVED_OPTICS=0
+                        Set to 1 to bypass Python optical preprocessing
 USAGE
 }
 
@@ -63,6 +65,10 @@ fi
 
 if [[ "$OUTPUT_LEVELS" == "1" ]]; then
   common_args+=(--output-levels)
+fi
+
+if [[ "${USE_DUMPED_DERIVED_OPTICS:-0}" == "1" ]]; then
+  common_args+=(--use-dumped-derived-optics)
 fi
 
 run_case() {

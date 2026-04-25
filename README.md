@@ -107,6 +107,10 @@ Optional controls include `stream`, `fbeam`, `delta_m_truncation_factor`, `geome
 fallback `g**2`. Pass an explicit factor for mixed phase functions or when
 reusing full-spectrum optical-property fixtures.
 
+For mixed Rayleigh/aerosol phase inputs, `py2sess.optical.phase` can generate
+`g`, `delta_m_truncation_factor`, and solar `fo_scatter_term` from
+Rayleigh/aerosol fractions and endpoint aerosol moments.
+
 Result names:
 
 - `result.radiance`: preferred total radiance
