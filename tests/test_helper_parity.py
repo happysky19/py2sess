@@ -6,23 +6,23 @@ import unittest
 import numpy as np
 
 from py2sess import load_tir_benchmark_case, load_uv_benchmark_case
-from py2sess.core.brdf_solar_obs import solar_obs_brdf_from_kernels
-from py2sess.core.brdf_thermal import thermal_brdf_from_kernels
-from py2sess.core.geometry import auxgeom_solar_obs, chapman_factors
-from py2sess.core.optical import (
+from py2sess.rtsolver.geometry import auxgeom_solar_obs, chapman_factors
+from py2sess.optical.brdf_solar_obs import solar_obs_brdf_from_kernels
+from py2sess.optical.brdf_thermal import thermal_brdf_from_kernels
+from py2sess.optical.delta_m import (
     default_delta_m_truncation_factor,
     delta_m_scale_optical_properties,
 )
-from py2sess.core.surface_leaving import (
-    morcasiwat_reflectance,
-    seawater_refractive_index,
-    surface_leaving_from_water,
-)
-from py2sess.core.thermal_source import (
+from py2sess.optical.planck import (
     planck_radiance_wavelength,
     planck_radiance_wavenumber,
     planck_radiance_wavenumber_band,
     thermal_source_from_temperature_profile,
+)
+from py2sess.optical.surface_leaving import (
+    morcasiwat_reflectance,
+    seawater_refractive_index,
+    surface_leaving_from_water,
 )
 
 GEOMETRY_RTOL = 1.0e-11

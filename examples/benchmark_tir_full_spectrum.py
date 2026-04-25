@@ -19,9 +19,9 @@ from _full_spectrum_benchmark_common import (
     scalar_value,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
-from py2sess.core import precompute_fo_thermal_geometry_numpy
-from py2sess.core.backend import has_torch
-from py2sess.core.thermal_batch_numpy import _fo_thermal_toa, _two_stream_thermal_toa
+from py2sess.rtsolver import precompute_fo_thermal_geometry_numpy
+from py2sess.rtsolver.backend import has_torch
+from py2sess.rtsolver.thermal_batch_numpy import _fo_thermal_toa, _two_stream_thermal_toa
 
 
 def _public_bvp_solver(engine: str) -> str:
@@ -211,7 +211,7 @@ def benchmark_torch(
         raise RuntimeError("PyTorch is not installed")
     import torch
 
-    from py2sess.core.thermal_batch_torch import (
+    from py2sess.rtsolver.thermal_batch_torch import (
         _as_tensor,
         _fo_thermal_toa_batch,
         _two_stream_thermal_toa_batch,

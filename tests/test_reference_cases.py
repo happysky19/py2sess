@@ -10,13 +10,13 @@ from py2sess import (
     load_tir_benchmark_case,
     load_uv_benchmark_case,
 )
-from py2sess.core.backend import has_torch, to_numpy
-from py2sess.core.fo_solar_obs_batch_numpy import (
+from py2sess.rtsolver.backend import has_torch, to_numpy
+from py2sess.rtsolver.fo_solar_obs_batch_numpy import (
     fo_solar_obs_batch_precompute,
     solve_fo_solar_obs_eps_batch_numpy,
 )
-from py2sess.core.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
-from py2sess.core.thermal_batch_numpy import solve_thermal_batch_numpy
+from py2sess.rtsolver.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
+from py2sess.rtsolver.thermal_batch_numpy import solve_thermal_batch_numpy
 
 
 def _relative_diff(value: np.ndarray, reference: np.ndarray) -> np.ndarray:
@@ -90,7 +90,7 @@ class ReferenceCaseTests(unittest.TestCase):
     def test_public_forward_tir_fixture_torch_matches_batch_kernel(self) -> None:
         if not has_torch():
             self.skipTest("torch not installed")
-        from py2sess.core.thermal_batch_torch import solve_thermal_batch_torch
+        from py2sess.rtsolver.thermal_batch_torch import solve_thermal_batch_torch
 
         case = load_tir_benchmark_case()
         kernel = solve_thermal_batch_torch(
@@ -145,7 +145,7 @@ class ReferenceCaseTests(unittest.TestCase):
     def test_tir_torch_matches_numpy_component_split(self) -> None:
         if not has_torch():
             self.skipTest("torch not installed")
-        from py2sess.core.thermal_batch_torch import solve_thermal_batch_torch
+        from py2sess.rtsolver.thermal_batch_torch import solve_thermal_batch_torch
 
         case = load_tir_benchmark_case()
         numpy_result = solve_thermal_batch_numpy(
@@ -343,7 +343,7 @@ class ReferenceCaseTests(unittest.TestCase):
     def test_uv_torch_matches_numpy_2s(self) -> None:
         if not has_torch():
             self.skipTest("torch not installed")
-        from py2sess.core.solar_obs_batch_torch import solve_solar_obs_batch_torch
+        from py2sess.rtsolver.solar_obs_batch_torch import solve_solar_obs_batch_torch
 
         case = load_uv_benchmark_case()
         numpy_two_stream = solve_solar_obs_batch_numpy(
@@ -390,7 +390,7 @@ class ReferenceCaseTests(unittest.TestCase):
     def test_uv_torch_matches_numpy_fo(self) -> None:
         if not has_torch():
             self.skipTest("torch not installed")
-        from py2sess.core.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
+        from py2sess.rtsolver.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
 
         case = load_uv_benchmark_case()
         fo_precomputed = fo_solar_obs_batch_precompute(
@@ -427,7 +427,7 @@ class ReferenceCaseTests(unittest.TestCase):
             self.skipTest("torch not installed")
         import torch
 
-        from py2sess.core.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
+        from py2sess.rtsolver.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
 
         case = load_uv_benchmark_case()
         rows = 4

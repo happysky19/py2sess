@@ -10,7 +10,10 @@ from typing import Any
 import numpy as np
 
 from .lattice_result import add_lattice_axes, lattice_shape, reshape_lattice_array
-from .optical import default_delta_m_truncation_factor, validate_delta_m_truncation_factor
+from ..optical.delta_m import (
+    default_delta_m_truncation_factor,
+    validate_delta_m_truncation_factor,
+)
 from .preprocess import PreparedInputs
 
 

@@ -9,20 +9,26 @@ from typing import Any
 
 import numpy as np
 
-from .core.backend import TorchContext, detect_torch_context, has_torch, to_numpy, value_to_torch
-from .core.fo_solar_obs import (
+from .rtsolver.backend import (
+    TorchContext,
+    detect_torch_context,
+    has_torch,
+    to_numpy,
+    value_to_torch,
+)
+from .rtsolver.fo_solar_obs import (
     FoSolarObsResult,
     fo_scatter_term_henyey_greenstein,
     solve_fo_solar_obs,
 )
-from .core.fo_thermal import FoThermalResult, solve_fo_thermal
-from .core.lattice_result import add_lattice_axes, lattice_shape, reshape_lattice_array
-from .core.optical import (
+from .rtsolver.fo_thermal import FoThermalResult, solve_fo_thermal
+from .rtsolver.lattice_result import add_lattice_axes, lattice_shape, reshape_lattice_array
+from .optical.delta_m import (
     default_delta_m_truncation_factor,
     validate_delta_m_truncation_factor,
 )
-from .core.preprocess import PreparedInputs, prepare_inputs
-from .core.solver import solve_optimized_solar_obs
+from .rtsolver.preprocess import PreparedInputs, prepare_inputs
+from .rtsolver.solver import solve_optimized_solar_obs
 
 _MODE_TO_SOURCE_MODE = {
     "solar": "solar_obs",
@@ -635,7 +641,7 @@ class TwoStreamEss:
     @staticmethod
     def _require_finite_torch(name: str, value: Any) -> None:
         """Raises a public error when a torch batch input contains non-finite values."""
-        from .core.backend import _load_torch
+        from .rtsolver.backend import _load_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -654,7 +660,7 @@ class TwoStreamEss:
         default: float | None = None,
     ):
         """Broadcasts a layer-shaped public input to flattened torch batch rows."""
-        from .core.backend import _load_torch
+        from .rtsolver.backend import _load_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -687,7 +693,7 @@ class TwoStreamEss:
         batch_shape: tuple[int, ...],
     ):
         """Broadcasts a scalar-or-batch public input to flattened torch rows."""
-        from .core.backend import _load_torch
+        from .rtsolver.backend import _load_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -733,7 +739,7 @@ class TwoStreamEss:
         width: int,
     ):
         """Broadcasts or derives the public delta-M truncation factor for torch."""
-        from .core.optical_torch import (
+        from .optical.delta_m_torch import (
             default_delta_m_truncation_factor_torch,
             validate_delta_m_truncation_factor_torch,
         )
@@ -754,7 +760,7 @@ class TwoStreamEss:
     @staticmethod
     def _resolve_truncation_factor_torch(value: Any | None, *, asymm, omega, context: TorchContext):
         """Returns the scalar torch delta-M truncation factor."""
-        from .core.optical_torch import (
+        from .optical.delta_m_torch import (
             default_delta_m_truncation_factor_torch,
             validate_delta_m_truncation_factor_torch,
         )
@@ -824,7 +830,7 @@ class TwoStreamEss:
         """Reshapes flattened torch endpoint rows back to public batch/geometry shape."""
         if len(values_by_geometry) == 1:
             return values_by_geometry[0].reshape(batch_shape), ()
-        from .core.backend import _load_torch
+        from .rtsolver.backend import _load_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -855,7 +861,7 @@ class TwoStreamEss:
         batch_shape: tuple[int, ...],
     ) -> tuple[Any, tuple[int, ...]]:
         """Reshapes flattened torch profile rows back to public batch/geometry shape."""
-        from .core.backend import _load_torch
+        from .rtsolver.backend import _load_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -948,7 +954,7 @@ class TwoStreamEss:
         fo_scatter_term: Any | None,
     ) -> FoSolarObsResult:
         """Runs the FO-only solar observation batch path."""
-        from .core.fo_solar_obs_batch_numpy import (
+        from .rtsolver.fo_solar_obs_batch_numpy import (
             fo_solar_obs_batch_precompute,
             solve_fo_solar_obs_eps_batch_numpy,
         )
@@ -1128,10 +1134,10 @@ class TwoStreamEss:
         fo_scatter_term: Any | None,
     ) -> FoSolarObsResult:
         """Runs the FO-only solar observation batch path on torch tensors."""
-        from .core.backend import _load_torch
-        from .core.fo_solar_obs_batch_numpy import fo_solar_obs_batch_precompute
-        from .core.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
-        from .core.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch
+        from .rtsolver.backend import _load_torch
+        from .rtsolver.fo_solar_obs_batch_numpy import fo_solar_obs_batch_precompute
+        from .rtsolver.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
+        from .rtsolver.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -1437,11 +1443,11 @@ class TwoStreamEss:
         fo_scatter_term: Any | None,
     ) -> TwoStreamEssBatchResult:
         """Runs the solar observation-geometry public batch path."""
-        from .core.fo_solar_obs_batch_numpy import (
+        from .rtsolver.fo_solar_obs_batch_numpy import (
             fo_solar_obs_batch_precompute,
             solve_fo_solar_obs_eps_batch_numpy,
         )
-        from .core.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
+        from .rtsolver.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
 
         if include_fo and (self.options.plane_parallel or mapped["fo_geometry_mode"] != "eps"):
             raise ValueError(
@@ -1634,11 +1640,11 @@ class TwoStreamEss:
         fo_scatter_term: Any | None,
     ) -> TwoStreamEssBatchResult:
         """Runs the solar observation-geometry public batch path on torch tensors."""
-        from .core.backend import _load_torch
-        from .core.fo_solar_obs_batch_numpy import fo_solar_obs_batch_precompute
-        from .core.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
-        from .core.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch
-        from .core.solar_obs_batch_torch import solve_solar_obs_batch_torch
+        from .rtsolver.backend import _load_torch
+        from .rtsolver.fo_solar_obs_batch_numpy import fo_solar_obs_batch_precompute
+        from .rtsolver.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
+        from .rtsolver.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch
+        from .rtsolver.solar_obs_batch_torch import solve_solar_obs_batch_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -1859,7 +1865,7 @@ class TwoStreamEss:
         fo_nfine: int,
     ) -> TwoStreamEssBatchResult:
         """Runs the thermal observation-geometry public batch path."""
-        from .core.thermal_batch_numpy import (
+        from .rtsolver.thermal_batch_numpy import (
             _fo_thermal_toa,
             _two_stream_thermal_toa,
             precompute_fo_thermal_geometry_numpy,
@@ -2041,9 +2047,12 @@ class TwoStreamEss:
         fo_nfine: int,
     ) -> TwoStreamEssBatchResult:
         """Runs the thermal observation-geometry public batch path on torch tensors."""
-        from .core.backend import _load_torch
-        from .core.thermal_batch_numpy import precompute_fo_thermal_geometry_numpy
-        from .core.thermal_batch_torch import _fo_thermal_toa_batch, _two_stream_thermal_toa_batch
+        from .rtsolver.backend import _load_torch
+        from .rtsolver.thermal_batch_numpy import precompute_fo_thermal_geometry_numpy
+        from .rtsolver.thermal_batch_torch import (
+            _fo_thermal_toa_batch,
+            _two_stream_thermal_toa_batch,
+        )
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -2316,7 +2325,7 @@ class TwoStreamEss:
             ``float64`` context used when the caller asks for the torch backend
             but passes NumPy inputs.
         """
-        from .core.backend import _load_torch
+        from .rtsolver.backend import _load_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -2326,7 +2335,7 @@ class TwoStreamEss:
 
     def _resolve_torch_device(self):
         """Resolves and validates the configured torch device."""
-        from .core.backend import _load_torch
+        from .rtsolver.backend import _load_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -2345,7 +2354,7 @@ class TwoStreamEss:
 
     def _resolve_torch_dtype(self, detected: TorchContext | None, device):
         """Resolves and validates the configured torch dtype."""
-        from .core.backend import _load_torch
+        from .rtsolver.backend import _load_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -2393,7 +2402,7 @@ class TwoStreamEss:
         """Returns the autograd context for the torch backend."""
         if self.options.backend != "torch":
             return nullcontext()
-        from .core.backend import _load_torch
+        from .rtsolver.backend import _load_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -2611,7 +2620,7 @@ class TwoStreamEss:
             and self._source_mode in {"solar_obs", "solar_lat"}
             and torch_context is not None
         ):
-            from .core.solver_torch import solve_optimized_solar_obs_torch
+            from .rtsolver.solver_torch import solve_optimized_solar_obs_torch
 
             return solve_optimized_solar_obs_torch(
                 prepared,
@@ -2628,7 +2637,7 @@ class TwoStreamEss:
             and self._source_mode == "thermal"
             and torch_context is not None
         ):
-            from .core.solver_torch import solve_optimized_thermal_torch
+            from .rtsolver.solver_torch import solve_optimized_thermal_torch
 
             return solve_optimized_thermal_torch(
                 prepared,
@@ -2685,12 +2694,12 @@ class TwoStreamEss:
                 fo_tau_np = prepared.tau_arr * (1.0 - prepared.omega_arr * prepared.d2s_scaling)
                 fo_prepared = replace(prepared, tau_arr=fo_tau_np)
         if self.options.backend == "torch":
-            from .core.fo_solar_obs_torch import (
+            from .rtsolver.fo_solar_obs_torch import (
                 solve_fo_solar_obs_eps_torch,
                 solve_fo_solar_obs_plane_parallel_torch,
                 solve_fo_solar_obs_rps_torch,
             )
-            from .core.fo_thermal_torch import solve_fo_thermal_torch
+            from .rtsolver.fo_thermal_torch import solve_fo_thermal_torch
 
             fo_scatter_term_t = value_to_torch(fo_scatter_term, torch_context)
             if self._source_mode in {"solar_obs", "solar_lat"}:
@@ -3183,7 +3192,7 @@ class TwoStreamEss:
             if height_grid is None:
                 height_grid = prepared.height_grid
             if self.options.backend == "torch":
-                from .core.fo_solar_obs_torch import (
+                from .rtsolver.fo_solar_obs_torch import (
                     solve_fo_solar_obs_eps_torch,
                     solve_fo_solar_obs_plane_parallel_torch,
                     solve_fo_solar_obs_rps_torch,
@@ -3271,12 +3280,12 @@ class TwoStreamEss:
                 result, lattice_counts=prepared.lattice_counts, lattice_axes=prepared.lattice_axes
             )
         if self.options.backend == "torch":
-            from .core.fo_solar_obs_torch import (
+            from .rtsolver.fo_solar_obs_torch import (
                 solve_fo_solar_obs_eps_torch,
                 solve_fo_solar_obs_plane_parallel_torch,
                 solve_fo_solar_obs_rps_torch,
             )
-            from .core.fo_thermal_torch import solve_fo_thermal_torch
+            from .rtsolver.fo_thermal_torch import solve_fo_thermal_torch
 
             torch_context = detect_torch_context(
                 tau_arr,

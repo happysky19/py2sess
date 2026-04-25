@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .backend import _load_torch
-from .thermal_source import (
+from ..rtsolver.backend import _load_torch
+from .planck import (
     _BOLTZMANN_CONSTANT,
     _CM_TO_METERS,
     _LIGHT_SPEED,

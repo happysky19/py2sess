@@ -10,7 +10,7 @@ from py2sess import (
     planck_radiance_wavenumber_band,
     thermal_source_from_temperature_profile,
 )
-from py2sess.core.backend import has_torch
+from py2sess.rtsolver.backend import has_torch
 
 
 class ThermalSourceTests(unittest.TestCase):

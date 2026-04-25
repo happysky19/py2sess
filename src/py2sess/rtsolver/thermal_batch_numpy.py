@@ -13,7 +13,7 @@ from .batch_accumulation import (
     accumulate_upwelling_sources_numpy,
 )
 from .bvp_batch import solve_thermal_bvp_batch
-from .optical import delta_m_scale_optical_properties
+from ..optical.delta_m import delta_m_scale_optical_properties
 from .taylor import vectorized_taylor_series_1
 
 
