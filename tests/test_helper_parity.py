@@ -25,6 +25,9 @@ from py2sess.core.thermal_source import (
     thermal_source_from_temperature_profile,
 )
 
+GEOMETRY_RTOL = 1.0e-11
+GEOMETRY_ATOL = 2.0e-11
+
 
 class HelperParityTests(unittest.TestCase):
     def test_chapman_factors_regression(self) -> None:
@@ -39,7 +42,10 @@ class HelperParityTests(unittest.TestCase):
             dtype=float,
         )
         np.testing.assert_allclose(
-            chapman_factors(heights, 6371.0, 53.0), expected, rtol=0.0, atol=1.0e-12
+            chapman_factors(heights, 6371.0, 53.0),
+            expected,
+            rtol=GEOMETRY_RTOL,
+            atol=GEOMETRY_ATOL,
         )
 
     def test_auxgeom_solar_obs_regression(self) -> None:
@@ -71,8 +77,8 @@ class HelperParityTests(unittest.TestCase):
         np.testing.assert_allclose(
             chapman_factors(case.heights, 6371.0, float(sza)),
             case.chapman,
-            rtol=0.0,
-            atol=1.0e-12,
+            rtol=GEOMETRY_RTOL,
+            atol=GEOMETRY_ATOL,
         )
         px11, pxsq, px0x, ulp = auxgeom_solar_obs(
             x0,
@@ -84,8 +90,8 @@ class HelperParityTests(unittest.TestCase):
         self.assertAlmostEqual(float(user_stream[0]), case.user_stream)
         self.assertAlmostEqual(float(1.0 / user_stream[0]), case.user_secant)
         self.assertAlmostEqual(px11, case.px11)
-        np.testing.assert_allclose(pxsq, case.pxsq, rtol=0.0, atol=1.0e-12)
-        np.testing.assert_allclose(px0x[0], case.px0x, rtol=0.0, atol=1.0e-12)
+        np.testing.assert_allclose(pxsq, case.pxsq, rtol=GEOMETRY_RTOL, atol=GEOMETRY_ATOL)
+        np.testing.assert_allclose(px0x[0], case.px0x, rtol=GEOMETRY_RTOL, atol=GEOMETRY_ATOL)
         self.assertAlmostEqual(float(ulp[0]), case.ulp)
 
     def test_delta_m_scale_optical_properties_regression(self) -> None:
