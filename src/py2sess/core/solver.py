@@ -8,7 +8,7 @@ from functools import lru_cache
 import numpy as np
 from scipy.linalg import solve, solve_banded
 
-from .optical import delta_m_scale_optical_properties
+from ..optical.delta_m import delta_m_scale_optical_properties
 from .preprocess import PreparedInputs
 from .solver_common import (
     accumulate_scalar_and_levels,

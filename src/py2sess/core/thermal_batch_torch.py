@@ -17,7 +17,7 @@ from .bvp_batch_torch import (
     solve_thermal_dense_bvp_batch_torch,
 )
 from .fo_solar_obs import _fo_eps_geometry
-from .optical_torch import delta_m_scale_optical_properties_torch
+from ..optical.delta_m_torch import delta_m_scale_optical_properties_torch
 from .taylor_torch import taylor_series_1_torch
 
 torch = _load_torch()

@@ -6,7 +6,7 @@ import math
 
 from .backend import _load_torch
 from .fo_solar_obs import FoSolarObsResult, _find_sunpaths_direct, _fo_eps_geometry
-from .optical_torch import (
+from ..optical.delta_m_torch import (
     default_delta_m_truncation_factor_torch,
     validate_delta_m_truncation_factor_torch,
 )

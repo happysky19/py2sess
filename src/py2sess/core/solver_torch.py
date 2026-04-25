@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from .backend import _load_torch
-from .optical_torch import delta_m_scale_optical_properties_torch
+from ..optical.delta_m_torch import delta_m_scale_optical_properties_torch
 from .solver_common import (
     accumulate_scalar_and_levels,
     accumulate_flux_pair,

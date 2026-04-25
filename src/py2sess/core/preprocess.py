@@ -8,10 +8,13 @@ from typing import Any
 
 import numpy as np
 
-from .brdf_solar_obs import solar_obs_brdf_from_kernels
-from .brdf_thermal import thermal_brdf_from_kernels
+from ..optical.brdf_solar_obs import solar_obs_brdf_from_kernels
+from ..optical.brdf_thermal import thermal_brdf_from_kernels
+from ..optical.delta_m import (
+    default_delta_m_truncation_factor,
+    validate_delta_m_truncation_factor,
+)
 from .geometry import auxgeom_solar_obs, chapman_factors
-from .optical import default_delta_m_truncation_factor, validate_delta_m_truncation_factor
 
 
 DEFAULT_EARTH_RADIUS_KM = 6371.0
