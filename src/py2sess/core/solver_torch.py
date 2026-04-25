@@ -25,6 +25,16 @@ from .taylor_torch import taylor_series_1_torch, taylor_series_2_torch
 torch = _load_torch()
 
 
+def _as_reference_tensor(value, reference):
+    """Converts scalar-like inputs to the dtype/device of a reference tensor."""
+    return torch.as_tensor(value, dtype=reference.dtype, device=reference.device)
+
+
+def _requires_grad(value) -> bool:
+    """Returns true when a tensor-valued control needs the zero branch kept."""
+    return isinstance(value, torch.Tensor) and value.requires_grad
+
+
 def _initialize_torch_solution_storage(
     size: int,
     nlay: int,
@@ -90,7 +100,15 @@ def _finalize_torch_solution_storage(solved, prepared):
 
 
 def solve_optimized_solar_obs_torch(
-    prepared, options, *, tau_arr, omega_arr, asymm_arr, d2s_scaling
+    prepared,
+    options,
+    *,
+    tau_arr,
+    omega_arr,
+    asymm_arr,
+    d2s_scaling,
+    flux_factor=None,
+    albedo=None,
 ):
     """Solves the optimized solar two-stream forward problem on torch tensors.
 
@@ -121,6 +139,10 @@ def solve_optimized_solar_obs_torch(
     omega_arr = omega_arr.to(dtype=dtype)
     asymm_arr = asymm_arr.to(dtype=dtype)
     d2s_scaling = d2s_scaling.to(dtype=dtype)
+    flux_factor = _as_reference_tensor(
+        prepared.flux_factor if flux_factor is None else flux_factor, tau_arr
+    )
+    albedo = _as_reference_tensor(prepared.albedo if albedo is None else albedo, tau_arr)
 
     delta_tau, omega_total, asymm_total = apply_delta_scaling_torch(
         tau_arr=tau_arr,
@@ -203,7 +225,7 @@ def solve_optimized_solar_obs_torch(
             fourier,
             albedo=prepared.albedo,
             do_brdf_surface=options.do_brdf_surface,
-        )
+        ) or _requires_grad(albedo)
         direct_beam_terms = prepare_solar_direct_beam_terms(
             ngeoms=ngeoms,
             do_include_surface=do_include_surface,
@@ -213,10 +235,10 @@ def solve_optimized_solar_obs_torch(
                 do_surface_leaving=options.do_surface_leaving,
                 do_sl_isotropic=options.do_sl_isotropic,
                 fourier=fourier,
-                flux_factor=prepared.flux_factor,
+                flux_factor=flux_factor,
                 x0=geom.x0[ib],
                 delta_factorm=geom.delta_factor[fourier],
-                albedo=prepared.albedo,
+                albedo=albedo,
                 brdf_f_0m=(
                     torch.tensor(0.0, dtype=dtype, device=tau_arr.device)
                     if prepared.brdf is None
@@ -269,7 +291,7 @@ def solve_optimized_solar_obs_torch(
                     delta_tau=delta_tau,
                     fourier=fourier,
                     pi4=geom.pi4,
-                    flux_factor=prepared.flux_factor,
+                    flux_factor=flux_factor,
                     layer_pis_cutoffb=int(misc["layer_pis_cutoff"][ib]),
                     px0xb=geom.px0x[ib, fourier],
                     omega=omega_total,
@@ -288,7 +310,7 @@ def solve_optimized_solar_obs_torch(
                     do_brdf_surface=options.do_brdf_surface,
                     do_include_surface_emission=False,
                     nlay=nlay,
-                    albedo=prepared.albedo,
+                    albedo=albedo,
                     brdf_fm=(
                         torch.tensor(0.0, dtype=dtype, device=tau_arr.device)
                         if prepared.brdf is None
@@ -326,7 +348,7 @@ def solve_optimized_solar_obs_torch(
                     taylor_order=3,
                     layer_pis_cutoffb=int(misc["layer_pis_cutoff"][ib]),
                     surface_factor=geom.surface_factor[fourier],
-                    albedo=prepared.albedo,
+                    albedo=albedo,
                     ubrdf_fmb=(
                         torch.tensor(0.0, dtype=dtype, device=tau_arr.device)
                         if prepared.brdf is None
@@ -414,7 +436,7 @@ def solve_optimized_solar_obs_torch(
                     do_directbeamb=bool(do_include_surface),
                     pi4=geom.pi4,
                     stream_value=prepared.stream_value,
-                    fluxfac=prepared.flux_factor,
+                    fluxfac=flux_factor,
                     fluxmult=geom.delta_factor[fourier],
                     x0b=geom.x0[ib],
                     trans_solar_beamb=misc["trans_solar_beam"][ib],
@@ -1740,7 +1762,19 @@ def fluxes_thermal_torch(
     )
 
 
-def solve_optimized_thermal_torch(prepared, options, *, tau_arr, omega_arr, asymm_arr, d2s_scaling):
+def solve_optimized_thermal_torch(
+    prepared,
+    options,
+    *,
+    tau_arr,
+    omega_arr,
+    asymm_arr,
+    d2s_scaling,
+    thermal_bb_input=None,
+    surfbb=None,
+    emissivity=None,
+    albedo=None,
+):
     """Solves the optimized thermal two-stream forward problem on torch tensors.
 
     Parameters
@@ -1772,6 +1806,16 @@ def solve_optimized_thermal_torch(prepared, options, *, tau_arr, omega_arr, asym
     omega_arr = omega_arr.to(dtype=dtype)
     asymm_arr = asymm_arr.to(dtype=dtype)
     d2s_scaling = d2s_scaling.to(dtype=dtype)
+    thermal_bb_input = (
+        torch.as_tensor(thermal.thermal_bb_input, dtype=dtype, device=tau_arr.device)
+        if thermal_bb_input is None
+        else thermal_bb_input.to(dtype=dtype, device=tau_arr.device)
+    )
+    surfbb = _as_reference_tensor(thermal.surfbb if surfbb is None else surfbb, tau_arr)
+    emissivity = _as_reference_tensor(
+        thermal.emissivity if emissivity is None else emissivity, tau_arr
+    )
+    albedo = _as_reference_tensor(prepared.albedo if albedo is None else albedo, tau_arr)
 
     delta_tau, omega_total, asymm_total = apply_delta_scaling_torch(
         tau_arr=tau_arr,
@@ -1779,10 +1823,7 @@ def solve_optimized_thermal_torch(prepared, options, *, tau_arr, omega_arr, asym
         asymm_arr=asymm_arr,
         d2s_scaling=d2s_scaling,
     )
-    thermal_coeffs = thermal_setup_torch(
-        delta_tau,
-        torch.as_tensor(thermal.thermal_bb_input, dtype=dtype, device=tau_arr.device),
-    )
+    thermal_coeffs = thermal_setup_torch(delta_tau, thermal_bb_input)
     n_users, nlay = thermal_problem_size(prepared)
     solved = _initialize_torch_solution_storage(
         n_users,
@@ -1855,6 +1896,9 @@ def solve_optimized_thermal_torch(prepared, options, *, tau_arr, omega_arr, asym
     do_include_surface = include_thermal_surface_term(
         albedo=prepared.albedo,
         do_brdf_surface=options.do_brdf_surface,
+    ) or _requires_grad(albedo)
+    do_include_surface_emission = (
+        (thermal.emissivity != 0.0) or _requires_grad(surfbb) or _requires_grad(emissivity)
     )
     brdf_fm = torch.tensor(0.0, dtype=dtype, device=tau_arr.device)
     ubrdf_fm = torch.zeros((n_users,), dtype=dtype, device=tau_arr.device)
@@ -1865,12 +1909,12 @@ def solve_optimized_thermal_torch(prepared, options, *, tau_arr, omega_arr, asym
     lcon, mcon, _mat, _rhs = solve_bvp_torch(
         do_include_surface=do_include_surface,
         do_brdf_surface=options.do_brdf_surface,
-        do_include_surface_emission=(thermal.emissivity != 0.0),
+        do_include_surface_emission=do_include_surface_emission,
         nlay=nlay,
-        albedo=prepared.albedo,
+        albedo=albedo,
         brdf_fm=brdf_fm,
-        emissivity=thermal.emissivity,
-        surfbb=thermal.surfbb,
+        emissivity=emissivity,
+        surfbb=surfbb,
         surface_factorm=geom.surface_factor[0],
         xpos=xpos,
         eigentrans=eigentrans,
@@ -1893,7 +1937,7 @@ def solve_optimized_thermal_torch(prepared, options, *, tau_arr, omega_arr, asym
             do_level_output=options.do_level_output,
             nlay=nlay,
             surface_factor=geom.surface_factor[0],
-            albedo=prepared.albedo,
+            albedo=albedo,
             ubrdf_fm=ubrdf_fm,
             fluxmult=geom.delta_factor[0],
             stream_value=prepared.stream_value,

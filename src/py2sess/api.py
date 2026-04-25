@@ -2512,6 +2512,10 @@ class TwoStreamEss:
             d2s_scaling,
             user_angles,
             thermal_bb_input,
+            flux_factor,
+            albedo,
+            surfbb,
+            emissivity,
         )
         return prepare_inputs(
             options=self._core_options(),
@@ -2589,6 +2593,11 @@ class TwoStreamEss:
         omega_arr,
         asymm_arr,
         d2s_scaling,
+        flux_factor=None,
+        albedo=None,
+        thermal_bb_input=None,
+        surfbb=None,
+        emissivity=None,
     ):
         """Dispatches the main forward solve to NumPy or torch.
 
@@ -2611,6 +2620,8 @@ class TwoStreamEss:
                 omega_arr=omega_arr,
                 asymm_arr=asymm_arr,
                 d2s_scaling=d2s_scaling,
+                flux_factor=flux_factor,
+                albedo=albedo,
             )
         if (
             self.options.backend == "torch"
@@ -2626,6 +2637,10 @@ class TwoStreamEss:
                 omega_arr=omega_arr,
                 asymm_arr=asymm_arr,
                 d2s_scaling=d2s_scaling,
+                thermal_bb_input=thermal_bb_input,
+                surfbb=surfbb,
+                emissivity=emissivity,
+                albedo=albedo,
             )
         return solve_optimized_solar_obs(prepared, self._core_options())
 
@@ -2642,10 +2657,11 @@ class TwoStreamEss:
         thermal_bb_input,
         d2s_scaling,
         user_obsgeoms,
-        albedo: float,
+        albedo: Any,
+        flux_factor: Any,
         earth_radius: float,
-        surfbb: float,
-        emissivity: float,
+        surfbb: Any,
+        emissivity: Any,
         fo_geometry_mode: str,
         fo_n_moments: int,
         fo_nfine: int,
@@ -2686,7 +2702,7 @@ class TwoStreamEss:
                         user_obsgeoms=user_obsgeoms,
                         d2s_scaling=d2s_scaling,
                         albedo=albedo,
-                        flux_factor=prepared.flux_factor,
+                        flux_factor=flux_factor,
                         n_moments=fo_n_moments,
                         exact_scatter=fo_scatter_term_t,
                     )
@@ -2700,7 +2716,7 @@ class TwoStreamEss:
                         height_grid=height_grid,
                         earth_radius=earth_radius,
                         albedo=albedo,
-                        flux_factor=prepared.flux_factor,
+                        flux_factor=flux_factor,
                         n_moments=fo_n_moments,
                         exact_scatter=fo_scatter_term_t,
                     )
@@ -2713,7 +2729,7 @@ class TwoStreamEss:
                     height_grid=height_grid,
                     earth_radius=earth_radius,
                     albedo=albedo,
-                    flux_factor=prepared.flux_factor,
+                    flux_factor=flux_factor,
                     n_moments=fo_n_moments,
                     nfine=fo_nfine,
                     exact_scatter=fo_scatter_term_t,
@@ -2951,6 +2967,10 @@ class TwoStreamEss:
             user_obsgeoms = value_to_torch(user_obsgeoms, torch_context)
             user_angles = value_to_torch(user_angles, torch_context)
             thermal_bb_input = value_to_torch(thermal_bb_input, torch_context)
+            flux_factor = value_to_torch(flux_factor, torch_context)
+            albedo = value_to_torch(albedo, torch_context)
+            surfbb = value_to_torch(surfbb, torch_context)
+            emissivity = value_to_torch(emissivity, torch_context)
             with self._torch_grad_context():
                 d2s_scaling = self._resolve_truncation_factor_torch(
                     d2s_scaling,
@@ -2976,6 +2996,11 @@ class TwoStreamEss:
                 omega_arr=omega_arr,
                 asymm_arr=asymm_arr,
                 d2s_scaling=d2s_scaling,
+                flux_factor=flux_factor,
+                albedo=albedo,
+                thermal_bb_input=thermal_bb_input,
+                surfbb=surfbb,
+                emissivity=emissivity,
             )
             fo_result = None
             if include_fo:
@@ -2991,6 +3016,7 @@ class TwoStreamEss:
                     d2s_scaling=d2s_scaling,
                     user_obsgeoms=fo_user_obsgeoms,
                     albedo=albedo,
+                    flux_factor=flux_factor,
                     earth_radius=earth_radius,
                     surfbb=surfbb,
                     emissivity=emissivity,
@@ -3176,6 +3202,8 @@ class TwoStreamEss:
                     )
                     height_grid = value_to_torch(height_grid, torch_context)
                     user_obsgeoms = value_to_torch(prepared.user_obsgeoms, torch_context)
+                    flux_factor = value_to_torch(flux_factor, torch_context)
+                    albedo = value_to_torch(albedo, torch_context)
                     fo_scatter_term_t = value_to_torch(fo_scatter_term, torch_context)
                     fo_tau_arr = tau_arr
                     if self.options.effective_fo_optical_deltam_scaling:
@@ -3188,7 +3216,7 @@ class TwoStreamEss:
                             user_obsgeoms=user_obsgeoms,
                             d2s_scaling=d2s_scaling,
                             albedo=albedo,
-                            flux_factor=prepared.flux_factor,
+                            flux_factor=flux_factor,
                             n_moments=n_moments,
                             exact_scatter=fo_scatter_term_t,
                         )
@@ -3202,7 +3230,7 @@ class TwoStreamEss:
                             height_grid=height_grid,
                             earth_radius=earth_radius,
                             albedo=albedo,
-                            flux_factor=prepared.flux_factor,
+                            flux_factor=flux_factor,
                             n_moments=n_moments,
                             exact_scatter=fo_scatter_term_t,
                         )
@@ -3216,7 +3244,7 @@ class TwoStreamEss:
                             height_grid=height_grid,
                             earth_radius=earth_radius,
                             albedo=albedo,
-                            flux_factor=prepared.flux_factor,
+                            flux_factor=flux_factor,
                             n_moments=n_moments,
                             nfine=nfine,
                             exact_scatter=fo_scatter_term_t,
@@ -3257,6 +3285,11 @@ class TwoStreamEss:
                 user_obsgeoms,
                 d2s_scaling,
                 height_grid,
+                thermal_bb_input,
+                flux_factor,
+                albedo,
+                surfbb,
+                emissivity,
             )
             torch_context = self._select_torch_context(torch_context)
             with self._torch_grad_context():
@@ -3273,6 +3306,10 @@ class TwoStreamEss:
                 height_grid = value_to_torch(height_grid, torch_context)
                 user_angles = value_to_torch(user_angles, torch_context)
                 thermal_bb_input = value_to_torch(thermal_bb_input, torch_context)
+                flux_factor = value_to_torch(flux_factor, torch_context)
+                albedo = value_to_torch(albedo, torch_context)
+                surfbb = value_to_torch(surfbb, torch_context)
+                emissivity = value_to_torch(emissivity, torch_context)
                 fo_scatter_term_t = value_to_torch(fo_scatter_term, torch_context)
                 fo_tau_arr = tau_arr
                 if self.options.effective_fo_optical_deltam_scaling:

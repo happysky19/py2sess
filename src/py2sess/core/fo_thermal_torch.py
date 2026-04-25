@@ -9,6 +9,11 @@ from .fo_solar_obs import _fo_eps_geometry
 torch = _load_torch()
 
 
+def _as_reference_tensor(value, reference):
+    """Converts scalar-like inputs to the dtype/device of a reference tensor."""
+    return torch.as_tensor(value, dtype=reference.dtype, device=reference.device)
+
+
 def solve_fo_thermal_torch(
     *,
     tau_arr,
@@ -35,13 +40,15 @@ def solve_fo_thermal_torch(
     d2s_scaling = d2s_scaling.to(dtype=dtype)
     user_angles = user_angles.to(dtype=dtype)
     thermal_bb_input = thermal_bb_input.to(dtype=dtype)
+    surfbb = _as_reference_tensor(surfbb, tau_arr)
+    emissivity = _as_reference_tensor(emissivity, tau_arr)
     if height_grid is not None:
         height_grid = height_grid.to(dtype=dtype)
 
     nlayers = int(tau_arr.shape[0])
     mu1 = torch.cos(user_angles * (torch.pi / 180.0))
     bb_input = thermal_bb_input
-    user_emissivity = torch.full_like(mu1, float(emissivity))
+    user_emissivity = torch.ones_like(mu1) * emissivity
     deltaus_all = (
         tau_arr * (1.0 - omega_arr * d2s_scaling) if do_optical_deltam_scaling else tau_arr
     )
@@ -165,10 +172,7 @@ def solve_fo_thermal_torch(
                     cot_1 = cot_2
 
         cumsource_up = torch.zeros((), dtype=tau_arr.dtype, device=tau_arr.device)
-        cumsource_surface = (
-            torch.as_tensor(float(surfbb), dtype=tau_arr.dtype, device=tau_arr.device)
-            * user_emissivity[v]
-        )
+        cumsource_surface = surfbb * user_emissivity[v]
         for n in range(nlayers - 1, -1, -1):
             cumsource_surface = lostrans_up[n] * cumsource_surface
             cumsource_up = lostrans_up[n] * cumsource_up + sources_up[n]
@@ -176,10 +180,7 @@ def solve_fo_thermal_torch(
         intensity_surface_toa.append(cumsource_surface)
         intensity_total_up_toa.append(cumsource_up + cumsource_surface)
         intensity_atmos_up_boa.append(torch.zeros((), dtype=tau_arr.dtype, device=tau_arr.device))
-        intensity_surface_boa.append(
-            torch.as_tensor(float(surfbb), dtype=tau_arr.dtype, device=tau_arr.device)
-            * user_emissivity[v]
-        )
+        intensity_surface_boa.append(surfbb * user_emissivity[v])
         intensity_total_up_boa.append(intensity_surface_boa[-1])
 
         if do_plane_parallel:

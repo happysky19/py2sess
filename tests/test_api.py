@@ -904,6 +904,66 @@ class ApiTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(tensor.grad).all().item())
             self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)
 
+    def test_scalar_solar_torch_keeps_surface_and_source_gradients(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=3, mode="solar", backend="torch", torch_dtype="float64")
+        )
+        fbeam = torch.tensor(1.1, dtype=torch.float64, requires_grad=True)
+        albedo = torch.tensor(0.2, dtype=torch.float64, requires_grad=True)
+        result = solver.forward(
+            tau=torch.tensor([0.01, 0.02, 0.03], dtype=torch.float64),
+            ssa=torch.full((3,), 0.2, dtype=torch.float64),
+            g=torch.full((3,), 0.1, dtype=torch.float64),
+            z=np.array([3.0, 2.0, 1.0, 0.0]),
+            angles=[30.0, 20.0, 0.0],
+            fbeam=fbeam,
+            albedo=albedo,
+            include_fo=True,
+            fo_n_moments=5,
+        )
+
+        result.radiance_total.sum().backward()
+        for tensor in (fbeam, albedo):
+            self.assertIsNotNone(tensor.grad)
+            self.assertTrue(torch.isfinite(tensor.grad).all().item())
+            self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)
+
+    def test_scalar_thermal_torch_keeps_surface_and_source_gradients(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=3, mode="thermal", backend="torch", torch_dtype="float64")
+        )
+        planck = torch.tensor([1.0, 1.1, 1.2, 1.3], dtype=torch.float64, requires_grad=True)
+        surface_planck = torch.tensor(1.4, dtype=torch.float64, requires_grad=True)
+        emissivity = torch.tensor(0.9, dtype=torch.float64, requires_grad=True)
+        albedo = torch.tensor(0.05, dtype=torch.float64, requires_grad=True)
+        result = solver.forward(
+            tau=torch.tensor([0.2, 0.3, 0.4], dtype=torch.float64),
+            ssa=torch.tensor([0.15, 0.10, 0.05], dtype=torch.float64),
+            g=torch.tensor([0.1, 0.2, 0.3], dtype=torch.float64),
+            z=np.array([3.0, 2.0, 1.0, 0.0]),
+            angles=30.0,
+            stream=0.5,
+            planck=planck,
+            surface_planck=surface_planck,
+            emissivity=emissivity,
+            albedo=albedo,
+            include_fo=True,
+        )
+
+        result.radiance_total.sum().backward()
+        for tensor in (planck, surface_planck, emissivity, albedo):
+            self.assertIsNotNone(tensor.grad)
+            self.assertTrue(torch.isfinite(tensor.grad).all().item())
+            self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)
+
     def test_batched_torch_level_profiles_keep_gradients(self) -> None:
         if not has_torch():
             self.skipTest("torch not installed")
