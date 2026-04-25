@@ -15,6 +15,10 @@ The diagnostics are the posterior covariance, averaging kernel, degrees of
 freedom for signal, singular values of `Se^-1/2 K Sa^1/2`, and Hessian
 condition number.
 
+`evaluate_jacobian()` currently builds a dense torch autograd Jacobian. It is
+intended for small synthetic retrievals and information-content checks; larger
+production retrievals will need a more specialized Jacobian path.
+
 Current intended cases:
 
 - UV/solar synthetic retrieval of optical-depth scale and albedo.

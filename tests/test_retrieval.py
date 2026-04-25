@@ -61,6 +61,35 @@ class RetrievalTests(unittest.TestCase):
         self.assertTrue(bool(torch.isfinite(diagnostics.singular_values).all()))
         self.assertTrue(bool(torch.isfinite(diagnostics.hessian_condition)))
 
+    def test_full_covariance_matrices_are_validated(self) -> None:
+        import torch
+
+        jacobian = torch.eye(2, dtype=torch.float64)
+        prior = torch.eye(2, dtype=torch.float64)
+
+        with self.assertRaisesRegex(ValueError, "measurement_covariance must be finite"):
+            retrieval_diagnostics(
+                jacobian,
+                torch.tensor([[1.0, float("nan")], [float("nan"), 1.0]], dtype=torch.float64),
+                prior,
+            )
+
+        with self.assertRaisesRegex(ValueError, "measurement_covariance matrix must be symmetric"):
+            retrieval_diagnostics(
+                jacobian,
+                torch.tensor([[1.0, 0.1], [0.0, 1.0]], dtype=torch.float64),
+                prior,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "measurement_covariance matrix must be positive definite"
+        ):
+            retrieval_diagnostics(
+                jacobian,
+                torch.tensor([[1.0, 2.0], [2.0, 1.0]], dtype=torch.float64),
+                prior,
+            )
+
     def test_low_rank_full_state_reports_low_dfs(self) -> None:
         import torch
 

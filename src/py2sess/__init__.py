@@ -1,6 +1,6 @@
 """Public package exports for the Python 2S-ESS forward-model port.
 
-The exports are loaded lazily so importing a NumPy-only core module does not
+The exports are loaded lazily so importing a NumPy-only solver module does not
 also import the high-level solver API or optional torch backend.
 """
 

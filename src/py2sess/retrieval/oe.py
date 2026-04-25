@@ -40,6 +40,8 @@ def _as_flat_vector(value, *, dtype, device):
 def _as_covariance(name: str, value, *, size: int, dtype, device):
     torch = _require_torch()
     tensor = _as_tensor(value, dtype=dtype, device=device)
+    if not bool(torch.isfinite(tensor).all()):
+        raise ValueError(f"{name} must be finite")
     if tensor.ndim == 0:
         if float(tensor.detach().cpu()) <= 0.0:
             raise ValueError(f"{name} scalar covariance must be positive")
@@ -52,6 +54,12 @@ def _as_covariance(name: str, value, *, size: int, dtype, device):
         return torch.diag(tensor)
     if tensor.shape != (size, size):
         raise ValueError(f"{name} must have shape ({size}, {size})")
+    if not bool(torch.allclose(tensor, tensor.T, rtol=1.0e-10, atol=1.0e-12)):
+        raise ValueError(f"{name} matrix must be symmetric")
+    try:
+        torch.linalg.cholesky(tensor)
+    except RuntimeError as exc:
+        raise ValueError(f"{name} matrix must be positive definite") from exc
     return tensor
 
 
