@@ -24,7 +24,7 @@ from py2sess import (
     TwoStreamEss,
     TwoStreamEssOptions,
 )
-from py2sess.optical.phase import build_two_stream_phase_inputs
+from py2sess.optical.phase import aerosol_interp_fraction, build_two_stream_phase_inputs
 from py2sess.rtsolver import precompute_fo_thermal_geometry_numpy
 from py2sess.rtsolver.backend import has_torch
 from py2sess.rtsolver.thermal_batch_numpy import _fo_thermal_toa, _two_stream_thermal_toa
@@ -39,13 +39,14 @@ def _public_bvp_solver(engine: str) -> str:
     return "scipy"
 
 
-_TIR_PHYSICAL_OPTICS_KEYS = (
+_TIR_REQUIRED_PHYSICAL_OPTICS_KEYS = (
     "depol",
     "rayleigh_fraction",
     "aerosol_fraction",
     "aerosol_moments",
-    "aerosol_interp_fraction",
 )
+
+_TIR_AEROSOL_INTERP_KEY = "aerosol_interp_fraction"
 
 _TIR_DUMPED_OPTICS_KEYS = ("asymm_arr", "d2s_scaling")
 
@@ -74,9 +75,37 @@ def _select_optical_keys(
     *,
     use_dumped_derived_optics: bool,
 ) -> tuple[str, ...]:
-    if not use_dumped_derived_optics and set(_TIR_PHYSICAL_OPTICS_KEYS).issubset(available):
-        return _TIR_PHYSICAL_OPTICS_KEYS
+    has_physical_optics = set(_TIR_REQUIRED_PHYSICAL_OPTICS_KEYS).issubset(available)
+    if not use_dumped_derived_optics and has_physical_optics:
+        keys = list(_TIR_REQUIRED_PHYSICAL_OPTICS_KEYS)
+        if _TIR_AEROSOL_INTERP_KEY in available:
+            keys.append(_TIR_AEROSOL_INTERP_KEY)
+        return tuple(keys)
     return _TIR_DUMPED_OPTICS_KEYS
+
+
+def _looks_like_row_index(values: np.ndarray) -> bool:
+    grid = np.asarray(values, dtype=float)
+    if grid.ndim != 1 or grid.size < 2:
+        return False
+    row_numbers = np.arange(1, grid.size + 1, dtype=float)
+    return np.allclose(grid, row_numbers, rtol=0.0, atol=1.0e-12)
+
+
+def _tir_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndarray, str]:
+    if _TIR_AEROSOL_INTERP_KEY in bundle:
+        return bundle[_TIR_AEROSOL_INTERP_KEY], "python-generated"
+
+    wavelengths = np.asarray(bundle["wavelengths"], dtype=float)
+    if _looks_like_row_index(wavelengths):
+        raise ValueError(
+            "TIR aerosol interpolation requires aerosol_interp_fraction when "
+            "wavelengths contains row indices instead of physical wavelengths"
+        )
+    return (
+        aerosol_interp_fraction(wavelengths, reverse=True),
+        "python-generated (aerosol interpolation from wavelengths)",
+    )
 
 
 def _select_source_keys(
@@ -96,26 +125,30 @@ def _prepare_optics(
     *,
     use_dumped_derived_optics: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
-    if use_dumped_derived_optics or not _has_keys(bundle, _TIR_PHYSICAL_OPTICS_KEYS):
+    if use_dumped_derived_optics or not _has_keys(bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS):
         require_keys(bundle, _TIR_DUMPED_OPTICS_KEYS, label="TIR dumped optical")
         mode = "dumped-derived"
-        if not use_dumped_derived_optics and not _has_keys(bundle, _TIR_PHYSICAL_OPTICS_KEYS):
+        if not use_dumped_derived_optics and not _has_keys(
+            bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS
+        ):
             mode = "dumped-derived (physical optical inputs unavailable)"
         return bundle, 0.0, mode
 
     start = time.perf_counter()
+    fac, mode = _tir_aerosol_interp_fraction(bundle)
     optics = build_two_stream_phase_inputs(
         ssa=bundle["omega_arr"],
         depol=bundle["depol"],
         rayleigh_fraction=bundle["rayleigh_fraction"],
         aerosol_fraction=bundle["aerosol_fraction"],
         aerosol_moments=bundle["aerosol_moments"],
-        aerosol_interp_fraction=bundle["aerosol_interp_fraction"],
+        aerosol_interp_fraction=fac,
     )
     prepared = dict(bundle)
+    prepared[_TIR_AEROSOL_INTERP_KEY] = fac
     prepared["asymm_arr"] = optics.g
     prepared["d2s_scaling"] = optics.delta_m_truncation_factor
-    return prepared, time.perf_counter() - start, "python-generated"
+    return prepared, time.perf_counter() - start, mode
 
 
 def _prepare_thermal_source(

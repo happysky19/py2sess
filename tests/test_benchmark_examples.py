@@ -106,7 +106,7 @@ class BenchmarkExampleTests(unittest.TestCase):
 
     def test_tir_benchmark_does_not_require_dumped_optics(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
-        omitted = {"asymm_arr", "d2s_scaling", "emissivity"}
+        omitted = {"asymm_arr", "d2s_scaling", "emissivity", "aerosol_interp_fraction"}
         with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
             trimmed = Path(tmpdir) / "tir_minimal.npz"
             arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}

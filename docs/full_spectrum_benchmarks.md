@@ -68,7 +68,8 @@ python3 scripts/enrich_full_benchmark_optics.py tir /path/to/TIR_Dump.dat /path/
 ```
 
 The enrichment step writes a new local bundle and leaves the original bundle
-unchanged.
+unchanged. It also replaces any spectral row-index placeholder in `wavelengths`
+with the physical wavelength grid from the dump.
 
 Generated benchmark reports should stay local, for example under `outputs/`,
 `local_outputs/`, or `paper_outputs/`, which are ignored by git.
@@ -107,7 +108,13 @@ Optical phase inputs, preferred:
 - `rayleigh_fraction`
 - `aerosol_fraction`
 - `aerosol_moments`
-- `aerosol_interp_fraction`
+
+Optional optical phase input:
+
+- `aerosol_interp_fraction`; when omitted, the TIR benchmark derives it from
+  `wavelengths` only if `wavelengths` is the physical Fortran wavelength grid.
+  Bundles that store row indices in `wavelengths` must provide
+  `aerosol_interp_fraction`.
 
 Legacy derived optical inputs:
 

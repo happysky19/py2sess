@@ -76,6 +76,7 @@ def _parse_uv_dump(dump_path: Path) -> dict[str, np.ndarray]:
 
     fac = (wavelengths[::-1] - wavelengths[0]) / (wavelengths[-1] - wavelengths[0])
     return {
+        "wavelengths": wavelengths,
         "depol": depol,
         "rayleigh_fraction": rayleigh_fraction,
         "aerosol_fraction": aerosol_fraction,
@@ -118,6 +119,7 @@ def _parse_tir_dump(dump_path: Path) -> dict[str, np.ndarray]:
 
     fac = (wavelengths[::-1] - wavelengths[0]) / (wavelengths[-1] - wavelengths[0])
     return {
+        "wavelengths": wavelengths,
         "depol": depol,
         "rayleigh_fraction": rayleigh_fraction,
         "aerosol_fraction": aerosol_fraction,
