@@ -16,7 +16,7 @@ them explicitly.
 | `delta_m_truncation_factor` | Defaults to the differentiable HG fallback `g**2`; `py2sess.optical.phase` can derive the mixed Rayleigh/aerosol Fortran value from phase-moment inputs. | Python-generated unless explicit |
 | `fo_scatter_term` | Solar FO builds a differentiable HG term from `ssa`, `g`, geometry, and `delta_m_truncation_factor` when omitted; `py2sess.optical.phase` can derive the mixed Rayleigh/aerosol Fortran term from phase-moment inputs. | Python-generated unless explicit |
 | BRDF and surface leaving | Disabled unless `brdf_surface` or `surface_leaving` options and matching coefficient dictionaries are provided. | Explicit surface supplements |
-| Thermal surface terms | `emissivity` and `albedo` are independent inputs; examples often use `emissivity = 1 - albedo` for opaque surfaces. | Caller-controlled convention |
+| Thermal surface terms | `emissivity` and `albedo` are independent inputs. Benchmark bundles use explicit `emissivity` when available and fall back to `1 - albedo` only for older bundles. | Caller-controlled convention |
 
 Known limitation: the helper now covers the RT-adjacent phase mixing step, but
 not the full raw CreateProps/GEOCAPE optical-property pipeline. Gas optical

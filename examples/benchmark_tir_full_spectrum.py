@@ -56,7 +56,7 @@ _TIR_BASE_KEYS = (
     "albedo",
 )
 
-_TIR_OPTIONAL_KEYS = ("stream_value", "ref_total")
+_TIR_OPTIONAL_KEYS = ("stream_value", "ref_total", "emissivity")
 
 
 def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
@@ -100,6 +100,14 @@ def _prepare_optics(
     return prepared, time.perf_counter() - start, "python-generated"
 
 
+def _prepare_surface(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], str]:
+    if "emissivity" in bundle:
+        return bundle, "bundle"
+    prepared = dict(bundle)
+    prepared["emissivity"] = 1.0 - np.asarray(bundle["albedo"], dtype=float)
+    return prepared, "1 - albedo"
+
+
 def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
     """Returns one spectral chunk from a TIR benchmark bundle."""
     chunk = {
@@ -110,6 +118,7 @@ def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[st
         "thermal_bb_input": bundle["thermal_bb_input"][start:stop],
         "surfbb": bundle["surfbb"][start:stop],
         "albedo": bundle["albedo"][start:stop],
+        "emissivity": bundle["emissivity"][start:stop],
     }
     if "ref_total" in bundle:
         chunk["ref_total"] = bundle["ref_total"][start:stop]
@@ -150,7 +159,7 @@ def benchmark_numpy(
             scaling=chunk["d2s_scaling"],
             thermal_bb_input=chunk["thermal_bb_input"],
             surfbb=chunk["surfbb"],
-            emissivity=1.0 - chunk["albedo"],
+            emissivity=chunk["emissivity"],
             albedo=chunk["albedo"],
             stream_value=0.5,
             user_stream=user_stream,
@@ -165,7 +174,7 @@ def benchmark_numpy(
             scaling=chunk["d2s_scaling"],
             thermal_bb_input=chunk["thermal_bb_input"],
             surfbb=chunk["surfbb"],
-            emissivity=1.0 - chunk["albedo"],
+            emissivity=chunk["emissivity"],
             heights=heights,
             user_angle_degrees=user_angle,
             earth_radius=6371.0,
@@ -232,7 +241,7 @@ def benchmark_numpy_forward(
         delta_m_truncation_factor=bundle["d2s_scaling"],
         planck=bundle["thermal_bb_input"],
         surface_planck=bundle["surfbb"],
-        emissivity=1.0 - bundle["albedo"],
+        emissivity=bundle["emissivity"],
         include_fo=True,
     )
     total = np.asarray(result.radiance_total, dtype=float)
@@ -317,7 +326,7 @@ def benchmark_torch(
             bb_t = _as_tensor(chunk["thermal_bb_input"], dtype=dtype, device=device)
             surfbb_t = _as_tensor(chunk["surfbb"], dtype=dtype, device=device)
             albedo_t = _as_tensor(chunk["albedo"], dtype=dtype, device=device)
-            emissivity_t = 1.0 - albedo_t
+            emissivity_t = _as_tensor(chunk["emissivity"], dtype=dtype, device=device)
             t0 = time.perf_counter()
             two_stream = _two_stream_thermal_toa_batch(
                 tau=tau_t,
@@ -431,7 +440,7 @@ def benchmark_torch_forward(
         delta_m_truncation_factor=bundle["d2s_scaling"],
         planck=bundle["thermal_bb_input"],
         surface_planck=bundle["surfbb"],
-        emissivity=1.0 - bundle["albedo"],
+        emissivity=bundle["emissivity"],
         include_fo=True,
     )
     total = result.radiance_total.detach().cpu().numpy()
@@ -520,6 +529,8 @@ def main() -> None:
     bundle["thermal_bb_input"] = bundle["thermal_bb_input"][:wavelengths]
     bundle["surfbb"] = bundle["surfbb"][:wavelengths]
     bundle["albedo"] = bundle["albedo"][:wavelengths]
+    if "emissivity" in bundle:
+        bundle["emissivity"] = bundle["emissivity"][:wavelengths]
     for key in _TIR_DUMPED_OPTICS_KEYS:
         if key in bundle:
             bundle[key] = bundle[key][:wavelengths]
@@ -532,6 +543,7 @@ def main() -> None:
         bundle,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
     )
+    bundle, emissivity_mode = _prepare_surface(bundle)
     load_seconds = time.perf_counter() - load_start
 
     print_problem_header(
@@ -547,6 +559,7 @@ def main() -> None:
         ),
     )
     print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
+    print(f"  emissivity: {emissivity_mode}")
 
     rows: list[BenchmarkRow] = []
     if args.backend in {"numpy", "both"}:

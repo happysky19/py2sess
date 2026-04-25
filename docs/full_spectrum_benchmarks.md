@@ -84,6 +84,10 @@ Required arrays:
 - `surfbb`
 - `albedo`
 
+Optional surface input:
+
+- `emissivity`; when omitted, the benchmark uses `emissivity = 1 - albedo`
+
 Optical phase inputs, preferred:
 
 - `depol`
@@ -107,7 +111,7 @@ Expected shapes:
 - `asymm_arr`, `d2s_scaling`: `(n_wavelengths, n_layers)` when using legacy
   derived optical inputs
 - `thermal_bb_input`: `(n_wavelengths, n_layers + 1)`
-- `surfbb`, `albedo`, `wavelengths`: `(n_wavelengths,)`
+- `surfbb`, `albedo`, `emissivity`, `wavelengths`: `(n_wavelengths,)`
 - `heights`: `(n_layers + 1,)`
 - `user_angle`: scalar or length-1 array
 

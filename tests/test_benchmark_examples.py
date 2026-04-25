@@ -74,6 +74,7 @@ class BenchmarkExampleTests(unittest.TestCase):
         self.assertIn("numpy", output)
         self.assertIn("numpy-forward", output)
         self.assertIn("optical preprocessing: python-generated", output)
+        self.assertIn("emissivity: bundle", output)
         if has_torch():
             self.assertIn("torch-cpu-float64-forward", output)
         self.assertIn("max abs diff", output)
@@ -104,13 +105,14 @@ class BenchmarkExampleTests(unittest.TestCase):
 
     def test_tir_benchmark_does_not_require_dumped_optics(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
-        omitted = {"asymm_arr", "d2s_scaling"}
+        omitted = {"asymm_arr", "d2s_scaling", "emissivity"}
         with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
             trimmed = Path(tmpdir) / "tir_minimal.npz"
             arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
             np.savez_compressed(trimmed, **arrays)
             output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
         self.assertIn("optical preprocessing: python-generated", output)
+        self.assertIn("emissivity: 1 - albedo", output)
 
 
 if __name__ == "__main__":
