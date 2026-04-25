@@ -110,6 +110,8 @@ class BenchmarkExampleTests(unittest.TestCase):
         with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
             trimmed = Path(tmpdir) / "tir_minimal.npz"
             arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
+            arrays["wavelength_microns"] = np.array(data["wavelengths"]) / 1000.0
+            arrays["wavelengths"] = np.arange(1, data["wavelengths"].size + 1, dtype=float)
             np.savez_compressed(trimmed, **arrays)
             output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
         self.assertIn("optical preprocessing: python-generated", output)

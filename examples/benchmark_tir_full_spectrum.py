@@ -80,6 +80,8 @@ def _select_optical_keys(
         keys = list(_TIR_REQUIRED_PHYSICAL_OPTICS_KEYS)
         if _TIR_AEROSOL_INTERP_KEY in available:
             keys.append(_TIR_AEROSOL_INTERP_KEY)
+        else:
+            keys.extend(key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available)
         return tuple(keys)
     return _TIR_DUMPED_OPTICS_KEYS
 
@@ -97,14 +99,25 @@ def _tir_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndar
         return bundle[_TIR_AEROSOL_INTERP_KEY], "python-generated"
 
     wavelengths = np.asarray(bundle["wavelengths"], dtype=float)
+    coordinate_name = "wavelengths"
+    if "wavelength_microns" in bundle and _looks_like_row_index(wavelengths):
+        wavelengths = np.asarray(bundle["wavelength_microns"], dtype=float)
+        coordinate_name = "wavelength_microns"
+    elif "wavenumber_cm_inv" in bundle and _looks_like_row_index(wavelengths):
+        wavenumber = np.asarray(bundle["wavenumber_cm_inv"], dtype=float)
+        if np.any(wavenumber <= 0.0):
+            raise ValueError("wavenumber_cm_inv must be positive")
+        wavelengths = 10000.0 / wavenumber
+        coordinate_name = "wavenumber_cm_inv"
+
     if _looks_like_row_index(wavelengths):
         raise ValueError(
-            "TIR aerosol interpolation requires aerosol_interp_fraction when "
-            "wavelengths contains row indices instead of physical wavelengths"
+            "TIR aerosol interpolation requires aerosol_interp_fraction or a "
+            "physical spectral coordinate when wavelengths contains row indices"
         )
     return (
         aerosol_interp_fraction(wavelengths, reverse=True),
-        "python-generated (aerosol interpolation from wavelengths)",
+        f"python-generated (aerosol interpolation from {coordinate_name})",
     )
 
 

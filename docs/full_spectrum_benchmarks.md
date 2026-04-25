@@ -112,9 +112,10 @@ Optical phase inputs, preferred:
 Optional optical phase input:
 
 - `aerosol_interp_fraction`; when omitted, the TIR benchmark derives it from
-  `wavelengths` only if `wavelengths` is the physical Fortran wavelength grid.
-  Bundles that store row indices in `wavelengths` must provide
-  `aerosol_interp_fraction`.
+  a physical spectral coordinate: `wavelengths`, `wavelength_microns`, or
+  `wavenumber_cm_inv`. Bundles that store row indices in `wavelengths` must
+  provide either `aerosol_interp_fraction` or one of the physical coordinate
+  arrays.
 
 Legacy derived optical inputs:
 
