@@ -11,6 +11,7 @@ import numpy as np
 from _full_spectrum_benchmark_common import (
     accuracy_summary,
     BenchmarkRow,
+    bundle_keys,
     load_bundle,
     print_problem_header,
     print_rows,
@@ -25,6 +26,7 @@ from py2sess.rtsolver.fo_solar_obs_batch_numpy import (
     fo_solar_obs_batch_precompute,
     solve_fo_solar_obs_eps_batch_numpy,
 )
+from py2sess.rtsolver.geometry import auxgeom_solar_obs, chapman_factors
 from py2sess.rtsolver.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
 
 
@@ -43,9 +45,73 @@ _UV_PHYSICAL_OPTICS_KEYS = (
 
 _UV_DUMPED_OPTICS_KEYS = ("asymm", "scaling", "fo_exact_scatter")
 
+_UV_BASE_KEYS = (
+    "wavelengths",
+    "user_obsgeom",
+    "heights",
+    "tau",
+    "omega",
+    "albedo",
+    "flux_factor",
+)
+
+_UV_OPTIONAL_KEYS = ("stream_value", "ref_total")
+
 
 def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
     return all(key in bundle for key in keys)
+
+
+def _select_optical_keys(
+    available: set[str],
+    *,
+    use_dumped_derived_optics: bool,
+) -> tuple[str, ...]:
+    if not use_dumped_derived_optics and set(_UV_PHYSICAL_OPTICS_KEYS).issubset(available):
+        return _UV_PHYSICAL_OPTICS_KEYS
+    return _UV_DUMPED_OPTICS_KEYS
+
+
+def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], float]:
+    start = time.perf_counter()
+    geoms = np.asarray(bundle["user_obsgeom"], dtype=float)
+    if geoms.ndim == 1 and geoms.size == 3:
+        geoms = geoms.reshape(1, 3)
+    if geoms.ndim != 2 or geoms.shape[1] != 3:
+        raise ValueError("user_obsgeom must have shape (3,) or (n_geometry, 3)")
+    if geoms.shape[0] != 1:
+        raise ValueError("the low-level UV benchmark path supports exactly one geometry")
+
+    sza, vza, raz = geoms[0]
+    deg_to_rad = np.pi / 180.0
+    x0 = np.array([np.cos(sza * deg_to_rad)], dtype=float)
+    user_stream = np.array([np.cos(vza * deg_to_rad)], dtype=float)
+    user_secant = 1.0 / user_stream
+    azmfac = np.array([np.cos(raz * deg_to_rad)], dtype=float)
+    stream_value = scalar_value(bundle["stream_value"])
+    px11, pxsq, px0x, ulp = auxgeom_solar_obs(
+        x0=x0,
+        user_streams=user_stream,
+        stream_value=stream_value,
+        do_postprocessing=True,
+    )
+
+    prepared = dict(bundle)
+    prepared["user_obsgeom"] = geoms
+    prepared["chapman"] = chapman_factors(
+        np.asarray(bundle["heights"], dtype=float),
+        6371.0,
+        float(sza),
+    )
+    prepared["x0"] = x0
+    prepared["user_stream"] = user_stream
+    prepared["user_secant"] = user_secant
+    prepared["azmfac"] = azmfac
+    prepared["px11"] = np.array([px11], dtype=float)
+    prepared["pxsq"] = pxsq
+    prepared["px0x"] = px0x[0]
+    prepared["ulp"] = ulp
+    return prepared, time.perf_counter() - start
 
 
 def _prepare_optics(
@@ -464,27 +530,18 @@ def main() -> None:
     args = parser.parse_args()
 
     load_start = time.perf_counter()
-    bundle = load_bundle(args.bundle)
+    available = bundle_keys(args.bundle)
+    optical_keys = _select_optical_keys(
+        available,
+        use_dumped_derived_optics=args.use_dumped_derived_optics,
+    )
+    bundle = load_bundle(
+        args.bundle,
+        keys=_UV_BASE_KEYS + _UV_OPTIONAL_KEYS + optical_keys,
+    )
     require_keys(
         bundle,
-        (
-            "wavelengths",
-            "user_obsgeom",
-            "heights",
-            "tau",
-            "omega",
-            "albedo",
-            "flux_factor",
-            "chapman",
-            "x0",
-            "user_stream",
-            "user_secant",
-            "azmfac",
-            "px11",
-            "pxsq",
-            "px0x",
-            "ulp",
-        ),
+        _UV_BASE_KEYS + optical_keys,
         label="UV",
     )
     total_rows = int(bundle["tau"].shape[0])
@@ -505,6 +562,7 @@ def main() -> None:
         bundle["ref_total"] = bundle["ref_total"][:wavelengths]
     if "stream_value" not in bundle:
         bundle["stream_value"] = np.array([1.0 / np.sqrt(3.0)], dtype=float)
+    bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
@@ -523,6 +581,7 @@ def main() -> None:
             "PyTorch warmup, tensor conversion, and checksum reduction."
         ),
     )
+    print(f"  geometry preprocessing: python-generated, {geometry_seconds:.3f} s")
     print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
 
     rows: list[BenchmarkRow] = []

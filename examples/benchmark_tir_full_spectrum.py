@@ -11,6 +11,7 @@ import numpy as np
 from _full_spectrum_benchmark_common import (
     accuracy_summary,
     BenchmarkRow,
+    bundle_keys,
     load_bundle,
     print_problem_header,
     print_rows,
@@ -44,9 +45,32 @@ _TIR_PHYSICAL_OPTICS_KEYS = (
 
 _TIR_DUMPED_OPTICS_KEYS = ("asymm_arr", "d2s_scaling")
 
+_TIR_BASE_KEYS = (
+    "wavelengths",
+    "heights",
+    "user_angle",
+    "tau_arr",
+    "omega_arr",
+    "thermal_bb_input",
+    "surfbb",
+    "albedo",
+)
+
+_TIR_OPTIONAL_KEYS = ("stream_value", "ref_total")
+
 
 def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
     return all(key in bundle for key in keys)
+
+
+def _select_optical_keys(
+    available: set[str],
+    *,
+    use_dumped_derived_optics: bool,
+) -> tuple[str, ...]:
+    if not use_dumped_derived_optics and set(_TIR_PHYSICAL_OPTICS_KEYS).issubset(available):
+        return _TIR_PHYSICAL_OPTICS_KEYS
+    return _TIR_DUMPED_OPTICS_KEYS
 
 
 def _prepare_optics(
@@ -473,19 +497,18 @@ def main() -> None:
     args = parser.parse_args()
 
     load_start = time.perf_counter()
-    bundle = load_bundle(args.bundle)
+    available = bundle_keys(args.bundle)
+    optical_keys = _select_optical_keys(
+        available,
+        use_dumped_derived_optics=args.use_dumped_derived_optics,
+    )
+    bundle = load_bundle(
+        args.bundle,
+        keys=_TIR_BASE_KEYS + _TIR_OPTIONAL_KEYS + optical_keys,
+    )
     require_keys(
         bundle,
-        (
-            "wavelengths",
-            "heights",
-            "user_angle",
-            "tau_arr",
-            "omega_arr",
-            "thermal_bb_input",
-            "surfbb",
-            "albedo",
-        ),
+        _TIR_BASE_KEYS + optical_keys,
         label="TIR",
     )
     total_rows = int(bundle["tau_arr"].shape[0])

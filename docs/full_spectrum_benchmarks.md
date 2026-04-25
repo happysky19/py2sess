@@ -21,6 +21,8 @@ scripts/run_full_benchmark_threads.sh /path/to/uv_full_bundle.npz /path/to/tir_f
 The benchmark table reports:
 
 - `load (s)`: one-time bundle read and slice time, printed in the header
+- `geometry preprocessing`: one-time UV generation of Chapman and auxiliary
+  angular factors from `heights`, `user_obsgeom`, and `stream_value`
 - `optical preprocessing`: one-time generation of `g`, delta-M truncation
   factor, and solar FO scatter terms when physical optical inputs are present
 - `wall (s)`: total backend wall time after bundle load
@@ -50,6 +52,10 @@ Rayleigh/aerosol fractions when the bundle contains them. Pass
 `--use-dumped-derived-optics` to use stored Fortran-derived `g`, delta-M
 factor, and solar FO scatter terms instead. Older bundles without physical
 optical fields automatically fall back to the stored derived arrays.
+
+The benchmark loaders read only the arrays needed for the selected mode. With
+physical optical inputs available, the scripts do not load stored
+`asymm`/`scaling`/`fo_exact_scatter` or `asymm_arr`/`d2s_scaling` arrays.
 
 To enrich a local bundle with physical optical fields from the original
 Fortran text dump:
@@ -93,11 +99,13 @@ Legacy derived optical inputs:
 
 Expected shapes:
 
-- `tau_arr`, `omega_arr`, `asymm_arr`, `d2s_scaling`: `(n_wavelengths, n_layers)`
+- `tau_arr`, `omega_arr`: `(n_wavelengths, n_layers)`
 - `depol`, `aerosol_interp_fraction`: `(n_wavelengths,)`
 - `rayleigh_fraction`: `(n_wavelengths, n_layers)`
 - `aerosol_fraction`: `(n_wavelengths, n_layers, n_aerosol)`
 - `aerosol_moments`: `(2, n_moments + 1, n_aerosol)`
+- `asymm_arr`, `d2s_scaling`: `(n_wavelengths, n_layers)` when using legacy
+  derived optical inputs
 - `thermal_bb_input`: `(n_wavelengths, n_layers + 1)`
 - `surfbb`, `albedo`, `wavelengths`: `(n_wavelengths,)`
 - `heights`: `(n_layers + 1,)`
@@ -120,15 +128,10 @@ Required arrays:
 - `omega`
 - `albedo`
 - `flux_factor`
-- `chapman`
-- `x0`
-- `user_stream`
-- `user_secant`
-- `azmfac`
-- `px11`
-- `pxsq`
-- `px0x`
-- `ulp`
+
+UV geometry-derived arrays are no longer required. The benchmark generates
+`chapman`, `x0`, `user_stream`, `user_secant`, `azmfac`, `px11`, `pxsq`,
+`px0x`, and `ulp` from the required geometry inputs.
 
 Optical phase inputs, preferred:
 
@@ -153,18 +156,16 @@ Optional arrays:
 
 Expected shapes:
 
-- `tau`, `omega`, `asymm`, `scaling`: `(n_wavelengths, n_layers)`
-- `fo_exact_scatter`: `(n_wavelengths, n_layers)`
+- `tau`, `omega`: `(n_wavelengths, n_layers)`
 - `depol`, `aerosol_interp_fraction`: `(n_wavelengths,)`
 - `rayleigh_fraction`: `(n_wavelengths, n_layers)`
 - `aerosol_fraction`: `(n_wavelengths, n_layers, n_aerosol)`
 - `aerosol_moments`: `(2, n_moments + 1, n_aerosol)`
+- `asymm`, `scaling`, `fo_exact_scatter`: `(n_wavelengths, n_layers)` when
+  using legacy derived optical inputs
 - `albedo`, `flux_factor`, `wavelengths`: `(n_wavelengths,)`
 - `user_obsgeom`: `(1, 3)` for the current bundled observation-geometry case
 - `heights`: `(n_layers + 1,)`
-- `chapman`: `(n_layers, n_layers)`
-- `pxsq`, `px0x`: `(n_wavelengths, n_layers)` or broadcast-compatible arrays
-  matching the batch-solver inputs
 - scalar controls may be stored as scalars or length-1 arrays
 - reference radiance arrays, when present, use shape `(n_wavelengths,)`
 

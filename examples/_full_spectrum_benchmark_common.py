@@ -32,10 +32,17 @@ class BenchmarkRow:
         return self.wavelengths / self.rt_seconds
 
 
-def load_bundle(path: Path) -> dict[str, np.ndarray]:
-    """Loads a benchmark bundle into memory."""
+def bundle_keys(path: Path) -> set[str]:
+    """Returns array names stored in a benchmark bundle."""
     with np.load(path) as data:
-        return {key: np.array(data[key]) for key in data.files}
+        return set(data.files)
+
+
+def load_bundle(path: Path, keys: tuple[str, ...] | None = None) -> dict[str, np.ndarray]:
+    """Loads selected benchmark bundle arrays into memory."""
+    with np.load(path) as data:
+        names = data.files if keys is None else [key for key in keys if key in data.files]
+        return {key: np.array(data[key]) for key in names}
 
 
 def require_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...], *, label: str) -> None:
