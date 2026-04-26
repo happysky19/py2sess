@@ -13,13 +13,15 @@ them explicitly.
 | `thermal_tcutoff` | Defaults to `1e-8`; must be positive and finite. | Advanced thermal source cutoff |
 | `nfine` / `fo_nfine` | Defaults to `3`; must be positive when FO is run. It controls fine sub-layer integration in EPS FO geometry. | FO geometry quadrature control |
 | `n_moments` / `fo_n_moments` | Defaults to `5000`; `0` means isotropic phase, negative values are rejected. The default HG fallback uses the closed-form phase function for any positive value; explicit phase moments remain a separate preprocessing path. | FO phase-function control |
-| `delta_m_truncation_factor` | Defaults to the differentiable HG fallback `g**2`; explicit fixture or phase-moment values should be passed for mixed phase functions. | Python-generated unless explicit |
-| `fo_scatter_term` | Solar FO builds a differentiable HG term from `ssa`, `g`, geometry, and `delta_m_truncation_factor` when omitted. | Python-generated HG fallback |
+| `delta_m_truncation_factor` | Defaults to the differentiable HG fallback `g**2`; `py2sess.optical.phase` can derive the mixed Rayleigh/aerosol Fortran value from phase-moment inputs. | Python-generated unless explicit |
+| `fo_scatter_term` | Solar FO builds a differentiable HG term from `ssa`, `g`, geometry, and `delta_m_truncation_factor` when omitted; `py2sess.optical.phase` can derive the mixed Rayleigh/aerosol Fortran term from phase-moment inputs. | Python-generated unless explicit |
+| Layer optical properties | `py2sess.optical.properties` can combine component optical depths into `tau`, `ssa`, Rayleigh scattering fraction, and aerosol scattering fractions. Prefer `absorption_tau` for total non-scattering absorption; `gas_absorption_tau` is accepted when that absorption is specifically gas-only. | Python-generated when component optical depths exist |
 | BRDF and surface leaving | Disabled unless `brdf_surface` or `surface_leaving` options and matching coefficient dictionaries are provided. | Explicit surface supplements |
-| Thermal surface terms | `emissivity` and `albedo` are independent inputs; examples often use `emissivity = 1 - albedo` for opaque surfaces. | Caller-controlled convention |
+| Thermal source terms | Thermal RT requires `planck` and `surface_planck`. Benchmark bundles may provide legacy `thermal_bb_input`/`surfbb` directly, or provide temperatures plus one spectral coordinate so Python can generate the public source inputs. | Python-generated when physical inputs exist |
+| Thermal surface terms | `emissivity` and `albedo` are independent inputs. Benchmark bundles use explicit `emissivity` when available and fall back to `1 - albedo` only for older bundles. | Caller-controlled convention |
 
-Known limitation: exact mixed Rayleigh/aerosol truncation factors and solar FO
-scatter terms require phase-moment or optical-property inputs. The packaged
-UV/TIR fixtures pass those explicit values to preserve Fortran parity; replacing
-that with a full Python optical-property generator is separate from the RT
-kernel.
+Known limitation: Python helpers now cover component optical-depth mixing and
+RT-adjacent phase mixing, but not the full raw CreateProps/GEOCAPE
+optical-property pipeline. Gas cross sections, Rayleigh extinction,
+aerosol microphysics, and endpoint aerosol moments still need to come from an
+upstream optical-property provider.

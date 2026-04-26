@@ -107,6 +107,16 @@ Optional controls include `stream`, `fbeam`, `delta_m_truncation_factor`, `geome
 fallback `g**2`. Pass an explicit factor for mixed phase functions or when
 reusing full-spectrum optical-property fixtures.
 
+For mixed Rayleigh/aerosol phase inputs, `py2sess.optical.phase` can generate
+`g`, `delta_m_truncation_factor`, and solar `fo_scatter_term` from
+Rayleigh/aerosol fractions and endpoint aerosol moments.
+
+If component optical depths are available, `py2sess.optical.properties` can
+derive `tau`, `ssa`, Rayleigh fraction, and aerosol fractions before the phase
+step. Use `absorption_tau` for total non-scattering absorption, or
+`gas_absorption_tau` when that absorption is specifically gas-only. This helper
+does not compute gas spectroscopy or aerosol microphysics.
+
 Result names:
 
 - `result.radiance`: preferred total radiance

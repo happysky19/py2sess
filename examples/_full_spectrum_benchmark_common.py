@@ -4,8 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 import numpy as np
+
+from py2sess.optical.properties import build_layer_optical_properties
+
+
+LAYER_OPTICAL_ABSORPTION_KEYS = ("absorption_tau", "gas_absorption_tau")
+LAYER_OPTICAL_RAYLEIGH_KEY = "rayleigh_scattering_tau"
+LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY = "aerosol_extinction_tau"
+LAYER_OPTICAL_AEROSOL_SCATTERING_KEY = "aerosol_scattering_tau"
+LAYER_OPTICAL_AEROSOL_SSA_KEY = "aerosol_single_scattering_albedo"
 
 
 @dataclass(frozen=True)
@@ -18,7 +28,6 @@ class BenchmarkRow:
     chunk_size: int
     wall_seconds: float
     rt_seconds: float
-    setup_seconds: float
     fo_seconds: float | None = None
     two_stream_seconds: float | None = None
     max_abs_diff: float | None = None
@@ -32,10 +41,83 @@ class BenchmarkRow:
         return self.wavelengths / self.rt_seconds
 
 
-def load_bundle(path: Path) -> dict[str, np.ndarray]:
-    """Loads a benchmark bundle into memory."""
+def bundle_keys(path: Path) -> set[str]:
+    """Returns array names stored in a benchmark bundle."""
     with np.load(path) as data:
-        return {key: np.array(data[key]) for key in data.files}
+        return set(data.files)
+
+
+def load_bundle(path: Path, keys: tuple[str, ...] | None = None) -> dict[str, np.ndarray]:
+    """Loads selected benchmark bundle arrays into memory."""
+    with np.load(path) as data:
+        names = data.files if keys is None else [key for key in keys if key in data.files]
+        return {key: np.array(data[key]) for key in names}
+
+
+def select_layer_optical_keys(
+    available: set[str],
+    *,
+    total_key: str,
+    ssa_key: str,
+) -> tuple[str, ...]:
+    """Selects direct or component optical-depth inputs for benchmark loading."""
+    absorption_key = next(
+        (key for key in LAYER_OPTICAL_ABSORPTION_KEYS if key in available),
+        None,
+    )
+    if absorption_key is None or LAYER_OPTICAL_RAYLEIGH_KEY not in available:
+        return (total_key, ssa_key)
+
+    keys = [absorption_key, LAYER_OPTICAL_RAYLEIGH_KEY]
+    if LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY in available:
+        if LAYER_OPTICAL_AEROSOL_SCATTERING_KEY in available:
+            keys.extend(
+                (
+                    LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY,
+                    LAYER_OPTICAL_AEROSOL_SCATTERING_KEY,
+                )
+            )
+        elif LAYER_OPTICAL_AEROSOL_SSA_KEY in available:
+            keys.extend((LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY, LAYER_OPTICAL_AEROSOL_SSA_KEY))
+        else:
+            return (total_key, ssa_key)
+    elif LAYER_OPTICAL_AEROSOL_SCATTERING_KEY in available:
+        keys.append(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY)
+    return tuple(keys)
+
+
+def layer_optical_keys_are_components(keys: tuple[str, ...]) -> bool:
+    """Returns true when selected optical keys are component optical depths."""
+    return any(key in keys for key in LAYER_OPTICAL_ABSORPTION_KEYS)
+
+
+def prepare_layer_optical_properties(
+    bundle: dict[str, np.ndarray],
+    *,
+    total_key: str,
+    ssa_key: str,
+) -> tuple[dict[str, np.ndarray], float, str]:
+    """Builds ``tau``/``ssa`` and scattering fractions when components exist."""
+    if LAYER_OPTICAL_RAYLEIGH_KEY not in bundle:
+        return bundle, 0.0, "bundle"
+    absorption_key = next((key for key in LAYER_OPTICAL_ABSORPTION_KEYS if key in bundle), None)
+    if absorption_key is None:
+        return bundle, 0.0, "bundle"
+
+    start = time.perf_counter()
+    props = build_layer_optical_properties(
+        absorption_tau=bundle[absorption_key],
+        rayleigh_scattering_tau=bundle[LAYER_OPTICAL_RAYLEIGH_KEY],
+        aerosol_extinction_tau=bundle.get(LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY),
+        aerosol_scattering_tau=bundle.get(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY),
+        aerosol_single_scattering_albedo=bundle.get(LAYER_OPTICAL_AEROSOL_SSA_KEY),
+    )
+    prepared = dict(bundle)
+    prepared[total_key] = props.tau
+    prepared[ssa_key] = props.ssa
+    prepared["rayleigh_fraction"] = props.rayleigh_fraction
+    prepared["aerosol_fraction"] = props.aerosol_fraction
+    return prepared, time.perf_counter() - start, "python-generated from component optical depths"
 
 
 def require_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...], *, label: str) -> None:
@@ -109,6 +191,15 @@ def scalar_value(value: np.ndarray | float | int) -> float:
     return float(array.reshape(-1)[0])
 
 
+def looks_like_row_index(values: np.ndarray) -> bool:
+    """Returns true when a coordinate array is just 1-based row numbers."""
+    grid = np.asarray(values, dtype=float)
+    if grid.ndim != 1 or grid.size < 2:
+        return False
+    row_numbers = np.arange(1, grid.size + 1, dtype=float)
+    return np.allclose(grid, row_numbers, rtol=0.0, atol=1.0e-12)
+
+
 def accuracy_summary(value: np.ndarray, reference: np.ndarray) -> tuple[float, float]:
     """Returns the max absolute diff and max relative diff in percent."""
     abs_diff = float(np.max(np.abs(value - reference)))
@@ -124,7 +215,7 @@ def print_rows(rows: list[BenchmarkRow]) -> None:
     )
     backend_width = max(18, *(len(row.backend) for row in rows))
     header = (
-        f"{'backend':<{backend_width}} {'wall (s)':>10} {'rt (s)':>10} {'setup (s)':>10} "
+        f"{'backend':<{backend_width}} {'wall (s)':>10} {'rt (s)':>10} "
         f"{'fo (s)':>10} {'2s (s)':>10} {'#wavelength/s':>14} {'chunk':>8}"
     )
     if has_accuracy:
@@ -136,7 +227,6 @@ def print_rows(rows: list[BenchmarkRow]) -> None:
             f"{row.backend:<{backend_width}} "
             f"{row.wall_seconds:10.3f} "
             f"{row.rt_seconds:10.3f} "
-            f"{row.setup_seconds:10.3f} "
             f"{_format_optional(row.fo_seconds)} "
             f"{_format_optional(row.two_stream_seconds)} "
             f"{row.rows_per_second_rt:14.0f} "

@@ -16,6 +16,10 @@ from py2sess import (
     solve_optimal_estimation,
     thermal_source_from_temperature_profile_torch,
 )
+from py2sess.optical.phase_torch import (
+    build_solar_fo_scatter_term_torch,
+    build_two_stream_phase_inputs_torch,
+)
 from py2sess.reference_cases import load_uv_benchmark_case
 
 
@@ -61,8 +65,29 @@ def _uv_case() -> SyntheticCase:
     )
     tau = torch.as_tensor(fixture.tau, dtype=dtype)
     ssa = torch.as_tensor(fixture.omega, dtype=dtype)
-    g = torch.as_tensor(fixture.asymm, dtype=dtype)
-    scaling = torch.as_tensor(fixture.scaling, dtype=dtype)
+    depol = torch.as_tensor(fixture.depol, dtype=dtype)
+    rayleigh_fraction = torch.as_tensor(fixture.rayleigh_fraction, dtype=dtype)
+    aerosol_fraction = torch.as_tensor(fixture.aerosol_fraction, dtype=dtype)
+    aerosol_moments = torch.as_tensor(fixture.aerosol_moments, dtype=dtype)
+    aerosol_interp = torch.as_tensor(fixture.aerosol_interp_fraction, dtype=dtype)
+    phase = build_two_stream_phase_inputs_torch(
+        ssa=ssa,
+        depol=depol,
+        rayleigh_fraction=rayleigh_fraction,
+        aerosol_fraction=aerosol_fraction,
+        aerosol_moments=aerosol_moments,
+        aerosol_interp_fraction=aerosol_interp,
+    )
+    fo_scatter = build_solar_fo_scatter_term_torch(
+        ssa=ssa,
+        depol=depol,
+        rayleigh_fraction=rayleigh_fraction,
+        aerosol_fraction=aerosol_fraction,
+        aerosol_moments=aerosol_moments,
+        aerosol_interp_fraction=aerosol_interp,
+        angles=torch.as_tensor(fixture.user_obsgeom, dtype=dtype),
+        delta_m_truncation_factor=phase.delta_m_truncation_factor,
+    )
     albedo_truth = torch.as_tensor(0.20, dtype=dtype)
 
     def forward_model(state):
@@ -70,15 +95,15 @@ def _uv_case() -> SyntheticCase:
         result = solver.forward(
             tau=tau_scale * tau,
             ssa=ssa,
-            g=g,
+            g=phase.g,
             z=fixture.heights,
             angles=fixture.user_obsgeom,
             stream=fixture.stream_value,
             fbeam=fixture.flux_factor,
             albedo=albedo,
-            delta_m_truncation_factor=scaling,
+            delta_m_truncation_factor=phase.delta_m_truncation_factor,
             include_fo=True,
-            fo_scatter_term=fixture.fo_exact_scatter,
+            fo_scatter_term=fo_scatter,
         )
         return result.radiance_total.reshape(-1)
 

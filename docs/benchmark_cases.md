@@ -42,8 +42,8 @@ standalone regression suite checks:
 - spectral coverage: 16 sampled wavelengths from the larger benchmark case
 - packaged fields:
   - optical properties
-  - precomputed 2S geometry factors
-  - precomputed FO exact-scatter terms
+  - geometry inputs plus saved 2S geometry factors for parity checks
+  - Rayleigh/aerosol phase-mixing inputs plus saved FO exact-scatter terms
   - saved Fortran reference outputs for 2S, FO, and total TOA intensity
 
 ## Why these fixtures exist
@@ -57,10 +57,11 @@ The packaged fixtures keep the new repository self-contained:
 - the same small cases are available to tests and examples
 
 For the packaged UV fixture, the standalone regression suite checks saved-file
-parity for 2S, FO, and total radiance. The packaged FO path uses the same
-Fortran-dumped `fo_exact_scatter` bundle field, passed through the public API
-as `fo_scatter_term`, and the same batched EPS solver as the full-spectrum UV
-benchmark.
+parity for 2S, FO, and total radiance. The reference example builds the mixed
+Rayleigh/aerosol `g`, delta-M truncation factor, and solar FO scatter term in
+Python from the fixture phase inputs, then compares against the saved Fortran
+outputs. The saved geometry and scatter arrays remain in the fixture as compact
+truth data for helper-parity tests.
 
 ## Runtime dimensions
 
