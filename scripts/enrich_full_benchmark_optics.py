@@ -164,7 +164,7 @@ def _parse_tir_dump(dump_path: Path) -> dict[str, np.ndarray]:
             depol[row] = float(spec[4])
             for layer in range(n_layers):
                 values = handle.readline().split()
-                if len(values) < 11:
+                if len(values) < 10:
                     raise ValueError(f"invalid TIR layer row {row + 1}, layer {layer + 1}")
                 rayleigh_fraction[row, layer] = float(values[4])
                 aerosol_fraction[row, layer] = [float(value) for value in values[5:10]]

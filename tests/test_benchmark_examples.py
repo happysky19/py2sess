@@ -19,15 +19,29 @@ ROOT = Path(__file__).resolve().parents[1]
 def _load_example_module(name: str):
     examples_dir = ROOT / "examples"
     examples_path = str(examples_dir)
+    inserted_examples_path = False
+    previous_module = sys.modules.get(name)
     if examples_path not in sys.path:
         sys.path.insert(0, examples_path)
-    spec = importlib.util.spec_from_file_location(name, examples_dir / f"{name}.py")
-    if spec is None or spec.loader is None:  # pragma: no cover
-        raise RuntimeError(f"could not load example module: {name}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+        inserted_examples_path = True
+    try:
+        spec = importlib.util.spec_from_file_location(name, examples_dir / f"{name}.py")
+        if spec is None or spec.loader is None:  # pragma: no cover
+            raise RuntimeError(f"could not load example module: {name}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if inserted_examples_path:
+            try:
+                sys.path.remove(examples_path)
+            except ValueError:  # pragma: no cover
+                pass
+        if previous_module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous_module
 
 
 class BenchmarkExampleTests(unittest.TestCase):

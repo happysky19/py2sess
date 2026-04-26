@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+_VectorLike = np.ndarray | list[float] | tuple[float, ...]
+_ScalarOrArrayLike = float | np.ndarray | list[float] | tuple[float, ...]
 
 _PLANCK_CONSTANT = 6.62607015e-34
 _LIGHT_SPEED = 2.99792458e8
@@ -32,7 +34,7 @@ class ThermalSourceInputs:
     surface_planck: float | np.ndarray
 
 
-def _as_float_array(name: str, values: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
+def _as_float_array(name: str, values: _VectorLike) -> np.ndarray:
     """Convert input values to a finite one-dimensional float array."""
 
     array = np.asarray(values, dtype=np.float64)
@@ -45,7 +47,7 @@ def _as_float_array(name: str, values: np.ndarray | list[float] | tuple[float, .
 
 def _validate_temperature(
     name: str,
-    temperature_k: np.ndarray | list[float] | tuple[float, ...] | float,
+    temperature_k: _ScalarOrArrayLike,
 ) -> np.ndarray:
     """Validate temperature inputs in Kelvin."""
 
@@ -57,7 +59,7 @@ def _validate_temperature(
     return array
 
 
-def _validate_positive_coordinate(name: str, value) -> np.ndarray:
+def _validate_positive_coordinate(name: str, value: _ScalarOrArrayLike) -> np.ndarray:
     array = np.asarray(value, dtype=np.float64)
     if not np.all(np.isfinite(array)):
         raise ValueError(f"{name} must be finite")
@@ -81,7 +83,10 @@ def _scalar_or_array(value) -> float | np.ndarray:
     return float(array) if array.ndim == 0 else array
 
 
-def planck_radiance_wavelength(temperature_k, wavelength_microns) -> np.ndarray:
+def planck_radiance_wavelength(
+    temperature_k: _ScalarOrArrayLike,
+    wavelength_microns: _ScalarOrArrayLike,
+) -> np.ndarray:
     """Evaluate the Planck function in wavelength form.
 
     Parameters
@@ -108,7 +113,10 @@ def planck_radiance_wavelength(temperature_k, wavelength_microns) -> np.ndarray:
     return numerator / denominator
 
 
-def planck_radiance_wavenumber(temperature_k, wavenumber_cm_inv) -> np.ndarray:
+def planck_radiance_wavenumber(
+    temperature_k: _ScalarOrArrayLike,
+    wavenumber_cm_inv: _ScalarOrArrayLike,
+) -> np.ndarray:
     """Evaluate the Planck function in wavenumber form.
 
     Parameters
@@ -226,7 +234,7 @@ def _fortran_planck_band_scalar(
 
 
 def planck_radiance_wavenumber_band(
-    temperature_k,
+    temperature_k: _ScalarOrArrayLike,
     wavenumber_low_cm_inv: float,
     wavenumber_high_cm_inv: float,
 ) -> np.ndarray:
@@ -269,11 +277,11 @@ def planck_radiance_wavenumber_band(
 
 
 def thermal_source_from_temperature_profile(
-    level_temperature_k,
-    surface_temperature_k,
+    level_temperature_k: _VectorLike,
+    surface_temperature_k: _ScalarOrArrayLike,
     *,
-    wavelength_microns: float | None = None,
-    wavenumber_cm_inv: float | None = None,
+    wavelength_microns: _ScalarOrArrayLike | None = None,
+    wavenumber_cm_inv: _ScalarOrArrayLike | None = None,
     wavenumber_band_cm_inv: tuple[float, float] | None = None,
 ) -> ThermalSourceInputs:
     """Build ``planck`` and ``surface_planck`` from temperatures.
