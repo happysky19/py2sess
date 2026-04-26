@@ -18,6 +18,10 @@ To sweep UV and TIR with 1, 2, and 4 threads:
 scripts/run_full_benchmark_threads.sh /path/to/uv_full_bundle.npz /path/to/tir_full_bundle.npz
 ```
 
+The sweep script also accepts environment overrides such as
+`BACKEND=numpy`, `THREADS="1 4"`, `LIMIT=1000`,
+`USE_DUMPED_DERIVED_OPTICS=1`, and `USE_DUMPED_THERMAL_SOURCE=1`.
+
 The benchmark table reports:
 
 - `load (s)`: one-time bundle read and slice time, printed in the header
