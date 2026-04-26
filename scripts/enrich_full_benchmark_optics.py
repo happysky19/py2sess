@@ -21,6 +21,16 @@ def _read_aerosol_moments(handle, n_moments: int) -> np.ndarray:
     return moments
 
 
+def _reverse_endpoint_interp_fraction(wavelengths: np.ndarray) -> np.ndarray:
+    grid = np.asarray(wavelengths, dtype=np.float64)
+    if not np.all(np.isfinite(grid)):
+        raise ValueError("wavelengths must be finite")
+    span = grid[-1] - grid[0]
+    if span == 0.0:
+        return np.zeros_like(grid)
+    return (grid[::-1] - grid[0]) / span
+
+
 def _copy_bundle_with_optics(
     *,
     bundle_path: Path,
@@ -74,14 +84,13 @@ def _parse_uv_dump(dump_path: Path) -> dict[str, np.ndarray]:
             if (row + 1) % 50_000 == 0:
                 print(f"  parsed UV rows: {row + 1}/{n_rows}", flush=True)
 
-    fac = (wavelengths[::-1] - wavelengths[0]) / (wavelengths[-1] - wavelengths[0])
     return {
         "wavelengths": wavelengths,
         "depol": depol,
         "rayleigh_fraction": rayleigh_fraction,
         "aerosol_fraction": aerosol_fraction,
         "aerosol_moments": aerosol_moments,
-        "aerosol_interp_fraction": fac,
+        "aerosol_interp_fraction": _reverse_endpoint_interp_fraction(wavelengths),
     }
 
 
@@ -117,14 +126,13 @@ def _parse_tir_dump(dump_path: Path) -> dict[str, np.ndarray]:
             if (row + 1) % 50_000 == 0:
                 print(f"  parsed TIR rows: {row + 1}/{n_rows}", flush=True)
 
-    fac = (wavelengths[::-1] - wavelengths[0]) / (wavelengths[-1] - wavelengths[0])
     return {
         "wavelengths": wavelengths,
         "depol": depol,
         "rayleigh_fraction": rayleigh_fraction,
         "aerosol_fraction": aerosol_fraction,
         "aerosol_moments": aerosol_moments,
-        "aerosol_interp_fraction": fac,
+        "aerosol_interp_fraction": _reverse_endpoint_interp_fraction(wavelengths),
     }
 
 

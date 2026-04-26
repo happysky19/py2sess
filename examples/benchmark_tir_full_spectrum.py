@@ -96,6 +96,8 @@ def _looks_like_row_index(values: np.ndarray) -> bool:
 
 def _positive_coordinate(name: str, values: np.ndarray) -> np.ndarray:
     coordinate = np.asarray(values, dtype=float)
+    if not np.all(np.isfinite(coordinate)):
+        raise ValueError(f"{name} must be finite")
     if np.any(coordinate <= 0.0):
         raise ValueError(f"{name} must be positive")
     return coordinate
