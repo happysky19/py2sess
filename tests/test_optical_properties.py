@@ -113,6 +113,26 @@ class OpticalPropertiesTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(tensor.grad).all().item())
             self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)
 
+    @unittest.skipUnless(has_torch(), "torch is not installed")
+    def test_torch_clear_layers_keep_finite_gradients(self) -> None:
+        import torch
+
+        from py2sess.optical.properties_torch import build_layer_optical_properties_torch
+
+        absorption = torch.tensor([0.0, 0.2], dtype=torch.float64, requires_grad=True)
+
+        props = build_layer_optical_properties_torch(absorption_tau=absorption)
+        objective = (
+            props.tau.sum()
+            + props.ssa.sum()
+            + props.rayleigh_fraction.sum()
+            + props.aerosol_fraction.sum()
+        )
+        objective.backward()
+
+        self.assertIsNotNone(absorption.grad)
+        self.assertTrue(torch.isfinite(absorption.grad).all().item())
+
     def test_scattering_only_aerosol_does_not_require_extinction(self) -> None:
         props = build_layer_optical_properties(
             absorption_tau=np.array([0.2]),

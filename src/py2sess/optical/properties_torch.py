@@ -230,9 +230,15 @@ def build_layer_optical_properties_torch(
         dtype=dtype,
         device=device,
     )
+    positive_scattering = scattering_tau > 0.0
+    safe_scattering_tau = torch.where(
+        positive_scattering,
+        scattering_tau,
+        torch.ones_like(scattering_tau),
+    )
     aerosol_fraction = torch.where(
-        scattering_tau[..., None] > 0.0,
-        aerosol_scat_b / scattering_tau[..., None],
+        positive_scattering[..., None],
+        aerosol_scat_b / safe_scattering_tau[..., None],
         torch.zeros_like(aerosol_scat_b),
     )
     return LayerOpticalPropertiesTorch(

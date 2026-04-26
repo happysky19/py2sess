@@ -58,7 +58,9 @@ def ssa_from_optical_depth_torch(total_tau, scattering_tau, *, dtype=None, devic
     total = _as_tensor(total_tau, dtype=dtype, device=device)
     scattering = _as_tensor(scattering_tau, dtype=dtype, device=device)
     total_b, scattering_b = torch.broadcast_tensors(total, scattering)
-    return torch.where(total_b > 0.0, scattering_b / total_b, torch.zeros_like(total_b))
+    positive = total_b > 0.0
+    safe_total = torch.where(positive, total_b, torch.ones_like(total_b))
+    return torch.where(positive, scattering_b / safe_total, torch.zeros_like(total_b))
 
 
 def aerosol_interp_fraction_torch(wavelengths, *, reverse: bool = False, dtype=None, device=None):
