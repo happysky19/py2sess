@@ -71,6 +71,20 @@ component optical-depth inputs available, the scripts do not load direct
 load stored `asymm`/`scaling`/`fo_exact_scatter` or
 `asymm_arr`/`d2s_scaling` arrays.
 
+Current dependency status:
+
+| Quantity | Preferred bundle input | Python-generated output | Legacy fallback |
+|---|---|---|---|
+| Layer optical properties | `absorption_tau`, `rayleigh_scattering_tau`, optional aerosol component depths | `tau`, `ssa`, Rayleigh/aerosol scattering fractions | direct `tau`/`omega` or `tau_arr`/`omega_arr` |
+| 2S phase inputs | `depol`, scattering fractions, `aerosol_moments`, optional `aerosol_interp_fraction` | `g`, `delta_m_truncation_factor` | `asymm`/`scaling` or `asymm_arr`/`d2s_scaling` |
+| Solar FO scatter | same phase inputs plus `user_obsgeom` | `fo_scatter_term` | `fo_exact_scatter` |
+| UV geometry helpers | `heights`, `user_obsgeom`, `stream_value` | `chapman`, `x0`, `user_stream`, `user_secant`, `azmfac`, `px11`, `pxsq`, `px0x`, `ulp` | none required by benchmark scripts |
+| Thermal source | `level_temperature_k`, `surface_temperature_k`, and `wavenumber_cm_inv` or `wavelength_microns` | `planck`, `surface_planck` | `thermal_bb_input`, `surfbb` |
+
+The benchmark examples normalize legacy bundle fields to these public-style
+names immediately after loading. Low-level kernel calls still receive their
+original internal argument names at the final call boundary.
+
 To enrich a local bundle with physical optical fields from the original
 Fortran text dump:
 
@@ -81,7 +95,9 @@ python3 scripts/enrich_full_benchmark_optics.py tir /path/to/TIR_Dump.dat /path/
 
 The enrichment step writes a new local bundle and leaves the original bundle
 unchanged. It also replaces any spectral row-index placeholder in `wavelengths`
-with the physical wavelength grid from the dump.
+with the physical wavelength grid from the dump. Re-run this step for older
+local `_with_optics` bundles if they do not contain component optical-depth
+fields such as `absorption_tau` and `rayleigh_scattering_tau`.
 
 Generated benchmark reports should stay local, for example under `outputs/`,
 `local_outputs/`, or `paper_outputs/`, which are ignored by git.

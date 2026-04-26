@@ -141,6 +141,13 @@ def _select_source_keys(
     return _TIR_DIRECT_SOURCE_KEYS
 
 
+def _normalize_layer_inputs(bundle: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    prepared = dict(bundle)
+    prepared["tau"] = bundle["tau_arr"]
+    prepared["ssa"] = bundle["omega_arr"]
+    return prepared
+
+
 def _prepare_optics(
     bundle: dict[str, np.ndarray],
     *,
@@ -148,17 +155,20 @@ def _prepare_optics(
 ) -> tuple[dict[str, np.ndarray], float, str]:
     if use_dumped_derived_optics or not _has_keys(bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS):
         require_keys(bundle, _TIR_DUMPED_OPTICS_KEYS, label="TIR dumped optical")
+        prepared = dict(bundle)
+        prepared["g"] = bundle["asymm_arr"]
+        prepared["delta_m_truncation_factor"] = bundle["d2s_scaling"]
         mode = "dumped-derived"
         if not use_dumped_derived_optics and not _has_keys(
             bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS
         ):
             mode = "dumped-derived (physical optical inputs unavailable)"
-        return bundle, 0.0, mode
+        return prepared, 0.0, mode
 
     start = time.perf_counter()
     fac, mode = _tir_aerosol_interp_fraction(bundle)
     optics = build_two_stream_phase_inputs(
-        ssa=bundle["omega_arr"],
+        ssa=bundle["ssa"],
         depol=bundle["depol"],
         rayleigh_fraction=bundle["rayleigh_fraction"],
         aerosol_fraction=bundle["aerosol_fraction"],
@@ -167,8 +177,8 @@ def _prepare_optics(
     )
     prepared = dict(bundle)
     prepared[_TIR_AEROSOL_INTERP_KEY] = fac
-    prepared["asymm_arr"] = optics.g
-    prepared["d2s_scaling"] = optics.delta_m_truncation_factor
+    prepared["g"] = optics.g
+    prepared["delta_m_truncation_factor"] = optics.delta_m_truncation_factor
     return prepared, time.perf_counter() - start, mode
 
 
@@ -194,26 +204,30 @@ def _prepare_thermal_source(
             **kwargs,
         )
         prepared = dict(bundle)
-        prepared["thermal_bb_input"] = np.asarray(source.planck, dtype=float)
-        prepared["surfbb"] = np.asarray(source.surface_planck, dtype=float)
+        prepared["planck"] = np.asarray(source.planck, dtype=float)
+        prepared["surface_planck"] = np.asarray(source.surface_planck, dtype=float)
         _validate_thermal_source_shapes(prepared)
         return prepared, time.perf_counter() - start, f"temperature ({coordinate_name})"
 
     require_keys(bundle, _TIR_DIRECT_SOURCE_KEYS, label="TIR thermal source")
-    return bundle, 0.0, "bundle"
+    prepared = dict(bundle)
+    prepared["planck"] = bundle["thermal_bb_input"]
+    prepared["surface_planck"] = bundle["surfbb"]
+    _validate_thermal_source_shapes(prepared)
+    return prepared, 0.0, "bundle"
 
 
 def _validate_thermal_source_shapes(bundle: dict[str, np.ndarray]) -> None:
-    n_rows, n_layers = bundle["tau_arr"].shape
-    planck = np.asarray(bundle["thermal_bb_input"], dtype=float)
-    surface = np.asarray(bundle["surfbb"], dtype=float)
+    n_rows, n_layers = bundle["tau"].shape
+    planck = np.asarray(bundle["planck"], dtype=float)
+    surface = np.asarray(bundle["surface_planck"], dtype=float)
     expected_planck = (n_rows, n_layers + 1)
     if planck.shape == (n_layers + 1,) and n_rows == 1:
-        bundle["thermal_bb_input"] = planck.reshape(1, n_layers + 1)
+        bundle["planck"] = planck.reshape(1, n_layers + 1)
     elif planck.shape != expected_planck:
         raise ValueError(f"thermal source planck must have shape {expected_planck}")
     if surface.shape == () and n_rows == 1:
-        bundle["surfbb"] = surface.reshape(1)
+        bundle["surface_planck"] = surface.reshape(1)
     elif surface.shape != (n_rows,):
         raise ValueError(f"surface_planck must have shape ({n_rows},)")
 
@@ -244,12 +258,12 @@ def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarr
 def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
     """Returns one spectral chunk from a TIR benchmark bundle."""
     chunk = {
-        "tau_arr": bundle["tau_arr"][start:stop],
-        "omega_arr": bundle["omega_arr"][start:stop],
-        "asymm_arr": bundle["asymm_arr"][start:stop],
-        "d2s_scaling": bundle["d2s_scaling"][start:stop],
-        "thermal_bb_input": bundle["thermal_bb_input"][start:stop],
-        "surfbb": bundle["surfbb"][start:stop],
+        "tau": bundle["tau"][start:stop],
+        "ssa": bundle["ssa"][start:stop],
+        "g": bundle["g"][start:stop],
+        "delta_m_truncation_factor": bundle["delta_m_truncation_factor"][start:stop],
+        "planck": bundle["planck"][start:stop],
+        "surface_planck": bundle["surface_planck"][start:stop],
         "albedo": bundle["albedo"][start:stop],
         "emissivity": bundle["emissivity"][start:stop],
     }
@@ -281,12 +295,12 @@ def benchmark_numpy(
         chunk = _slice_rows(bundle, start, stop)
         t0 = time.perf_counter()
         two_stream = _two_stream_thermal_toa(
-            tau=chunk["tau_arr"],
-            omega=chunk["omega_arr"],
-            asymm=chunk["asymm_arr"],
-            scaling=chunk["d2s_scaling"],
-            thermal_bb_input=chunk["thermal_bb_input"],
-            surfbb=chunk["surfbb"],
+            tau=chunk["tau"],
+            omega=chunk["ssa"],
+            asymm=chunk["g"],
+            scaling=chunk["delta_m_truncation_factor"],
+            thermal_bb_input=chunk["planck"],
+            surfbb=chunk["surface_planck"],
             emissivity=chunk["emissivity"],
             albedo=chunk["albedo"],
             stream_value=0.5,
@@ -297,11 +311,11 @@ def benchmark_numpy(
         two_stream_seconds += time.perf_counter() - t0
         t0 = time.perf_counter()
         fo = _fo_thermal_toa(
-            tau=chunk["tau_arr"],
-            omega=chunk["omega_arr"],
-            scaling=chunk["d2s_scaling"],
-            thermal_bb_input=chunk["thermal_bb_input"],
-            surfbb=chunk["surfbb"],
+            tau=chunk["tau"],
+            omega=chunk["ssa"],
+            scaling=chunk["delta_m_truncation_factor"],
+            thermal_bb_input=chunk["planck"],
+            surfbb=chunk["surface_planck"],
             emissivity=chunk["emissivity"],
             heights=heights,
             user_angle_degrees=user_angle,
@@ -329,7 +343,7 @@ def benchmark_numpy(
     return BenchmarkRow(
         backend="numpy",
         wavelengths=wavelengths,
-        layers=int(bundle["tau_arr"].shape[1]),
+        layers=int(bundle["tau"].shape[1]),
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=rt_seconds,
@@ -351,23 +365,23 @@ def benchmark_numpy_forward(
     wall_start = time.perf_counter()
     solver = TwoStreamEss(
         TwoStreamEssOptions(
-            nlyr=int(bundle["tau_arr"].shape[1]),
+            nlyr=int(bundle["tau"].shape[1]),
             mode="thermal",
             bvp_solver=_public_bvp_solver(numpy_bvp_engine),
             output_levels=output_levels,
         )
     )
     result = solver.forward(
-        tau=bundle["tau_arr"],
-        ssa=bundle["omega_arr"],
-        g=bundle["asymm_arr"],
+        tau=bundle["tau"],
+        ssa=bundle["ssa"],
+        g=bundle["g"],
         z=bundle["heights"],
         angles=scalar_value(bundle["user_angle"]),
         stream=0.5,
         albedo=bundle["albedo"],
-        delta_m_truncation_factor=bundle["d2s_scaling"],
-        planck=bundle["thermal_bb_input"],
-        surface_planck=bundle["surfbb"],
+        delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
+        planck=bundle["planck"],
+        surface_planck=bundle["surface_planck"],
         emissivity=bundle["emissivity"],
         include_fo=True,
     )
@@ -382,14 +396,14 @@ def benchmark_numpy_forward(
         raise RuntimeError("benchmark output checksum is not finite")
     chunk_size = recommended_chunk_size(
         total_rows=wavelengths,
-        nlayers=int(bundle["tau_arr"].shape[1]),
+        nlayers=int(bundle["tau"].shape[1]),
         backend="numpy",
         workload="thermal",
     )
     return BenchmarkRow(
         backend="numpy-forward-levels" if output_levels else "numpy-forward",
         wavelengths=wavelengths,
-        layers=int(bundle["tau_arr"].shape[1]),
+        layers=int(bundle["tau"].shape[1]),
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=wall_seconds,
@@ -440,12 +454,12 @@ def benchmark_torch(
         stop = min(start + chunk_size, wavelengths)
         chunk = _slice_rows(bundle, start, stop)
         with torch.no_grad():
-            tau_t = _as_tensor(chunk["tau_arr"], dtype=dtype, device=device)
-            omega_t = _as_tensor(chunk["omega_arr"], dtype=dtype, device=device)
-            asymm_t = _as_tensor(chunk["asymm_arr"], dtype=dtype, device=device)
-            scaling_t = _as_tensor(chunk["d2s_scaling"], dtype=dtype, device=device)
-            bb_t = _as_tensor(chunk["thermal_bb_input"], dtype=dtype, device=device)
-            surfbb_t = _as_tensor(chunk["surfbb"], dtype=dtype, device=device)
+            tau_t = _as_tensor(chunk["tau"], dtype=dtype, device=device)
+            omega_t = _as_tensor(chunk["ssa"], dtype=dtype, device=device)
+            asymm_t = _as_tensor(chunk["g"], dtype=dtype, device=device)
+            scaling_t = _as_tensor(chunk["delta_m_truncation_factor"], dtype=dtype, device=device)
+            bb_t = _as_tensor(chunk["planck"], dtype=dtype, device=device)
+            surfbb_t = _as_tensor(chunk["surface_planck"], dtype=dtype, device=device)
             albedo_t = _as_tensor(chunk["albedo"], dtype=dtype, device=device)
             emissivity_t = _as_tensor(chunk["emissivity"], dtype=dtype, device=device)
             t0 = time.perf_counter()
@@ -504,7 +518,7 @@ def benchmark_torch(
     return BenchmarkRow(
         backend=f"torch-{torch_device_name}-{torch_dtype_name}",
         wavelengths=wavelengths,
-        layers=int(bundle["tau_arr"].shape[1]),
+        layers=int(bundle["tau"].shape[1]),
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=rt_seconds,
@@ -539,7 +553,7 @@ def benchmark_torch_forward(
         _ = (probe + 1.0).sum().item()
     solver = TwoStreamEss(
         TwoStreamEssOptions(
-            nlyr=int(bundle["tau_arr"].shape[1]),
+            nlyr=int(bundle["tau"].shape[1]),
             mode="thermal",
             backend="torch",
             bvp_solver=_public_bvp_solver(torch_bvp_engine),
@@ -550,16 +564,16 @@ def benchmark_torch_forward(
         )
     )
     result = solver.forward(
-        tau=bundle["tau_arr"],
-        ssa=bundle["omega_arr"],
-        g=bundle["asymm_arr"],
+        tau=bundle["tau"],
+        ssa=bundle["ssa"],
+        g=bundle["g"],
         z=bundle["heights"],
         angles=scalar_value(bundle["user_angle"]),
         stream=0.5,
         albedo=bundle["albedo"],
-        delta_m_truncation_factor=bundle["d2s_scaling"],
-        planck=bundle["thermal_bb_input"],
-        surface_planck=bundle["surfbb"],
+        delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
+        planck=bundle["planck"],
+        surface_planck=bundle["surface_planck"],
         emissivity=bundle["emissivity"],
         include_fo=True,
     )
@@ -574,7 +588,7 @@ def benchmark_torch_forward(
         raise RuntimeError("benchmark output checksum is not finite")
     chunk_size = recommended_chunk_size(
         total_rows=wavelengths,
-        nlayers=int(bundle["tau_arr"].shape[1]),
+        nlayers=int(bundle["tau"].shape[1]),
         backend="torch",
         workload="thermal",
     )
@@ -585,7 +599,7 @@ def benchmark_torch_forward(
             else f"torch-{torch_device_name}-{torch_dtype_name}-forward"
         ),
         wavelengths=wavelengths,
-        layers=int(bundle["tau_arr"].shape[1]),
+        layers=int(bundle["tau"].shape[1]),
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=wall_seconds,
@@ -687,6 +701,7 @@ def main() -> None:
         total_key="tau_arr",
         ssa_key="omega_arr",
     )
+    bundle = _normalize_layer_inputs(bundle)
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
@@ -702,7 +717,7 @@ def main() -> None:
         title="TIR full-spectrum benchmark",
         bundle_path=args.bundle,
         wavelengths=wavelengths,
-        layers=int(bundle["tau_arr"].shape[1]),
+        layers=int(bundle["tau"].shape[1]),
         load_seconds=load_seconds,
         note=(
             "RT time is FO + 2S. wall time (s) excludes bundle load and printed "
@@ -725,7 +740,7 @@ def main() -> None:
     if args.backend in {"numpy", "both"}:
         chunk_size = args.chunk_size or recommended_chunk_size(
             total_rows=wavelengths,
-            nlayers=int(bundle["tau_arr"].shape[1]),
+            nlayers=int(bundle["tau"].shape[1]),
             backend="numpy",
             workload="thermal",
         )
@@ -748,7 +763,7 @@ def main() -> None:
     if args.backend in {"torch", "both"}:
         chunk_size = args.chunk_size or recommended_chunk_size(
             total_rows=wavelengths,
-            nlayers=int(bundle["tau_arr"].shape[1]),
+            nlayers=int(bundle["tau"].shape[1]),
             backend="torch",
             workload="thermal",
         )

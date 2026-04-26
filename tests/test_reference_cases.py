@@ -10,6 +10,7 @@ from py2sess import (
     load_tir_benchmark_case,
     load_uv_benchmark_case,
 )
+from py2sess.optical.phase import build_solar_fo_scatter_term, build_two_stream_phase_inputs
 from py2sess.rtsolver.backend import has_torch, to_numpy
 from py2sess.rtsolver.fo_solar_obs_batch_numpy import (
     fo_solar_obs_batch_precompute,
@@ -30,6 +31,39 @@ def _assert_max_rel(
 ) -> None:
     """Checks the largest relative difference against a scalar limit."""
     testcase.assertLessEqual(float(np.max(_relative_diff(value, reference))), limit)
+
+
+def _generated_tir_phase(case):
+    return build_two_stream_phase_inputs(
+        ssa=case.omega_arr,
+        depol=case.depol,
+        rayleigh_fraction=case.rayleigh_fraction,
+        aerosol_fraction=case.aerosol_fraction,
+        aerosol_moments=case.aerosol_moments,
+        aerosol_interp_fraction=case.aerosol_interp_fraction,
+    )
+
+
+def _generated_uv_phase(case):
+    phase = build_two_stream_phase_inputs(
+        ssa=case.omega,
+        depol=case.depol,
+        rayleigh_fraction=case.rayleigh_fraction,
+        aerosol_fraction=case.aerosol_fraction,
+        aerosol_moments=case.aerosol_moments,
+        aerosol_interp_fraction=case.aerosol_interp_fraction,
+    )
+    scatter = build_solar_fo_scatter_term(
+        ssa=case.omega,
+        depol=case.depol,
+        rayleigh_fraction=case.rayleigh_fraction,
+        aerosol_fraction=case.aerosol_fraction,
+        aerosol_moments=case.aerosol_moments,
+        aerosol_interp_fraction=case.aerosol_interp_fraction,
+        angles=case.user_obsgeom,
+        delta_m_truncation_factor=phase.delta_m_truncation_factor,
+    )
+    return phase, scatter
 
 
 class ReferenceCaseTests(unittest.TestCase):
@@ -55,6 +89,7 @@ class ReferenceCaseTests(unittest.TestCase):
 
     def test_public_forward_tir_fixture_matches_batch_kernel(self) -> None:
         case = load_tir_benchmark_case()
+        phase = _generated_tir_phase(case)
         kernel = solve_thermal_batch_numpy(
             tau_arr=case.tau_arr,
             omega_arr=case.omega_arr,
@@ -72,12 +107,12 @@ class ReferenceCaseTests(unittest.TestCase):
         public = solver.forward(
             tau=case.tau_arr,
             ssa=case.omega_arr,
-            g=case.asymm_arr,
+            g=phase.g,
             z=case.heights,
             angles=case.user_angle,
             stream=case.stream_value,
             albedo=case.albedo,
-            delta_m_truncation_factor=case.d2s_scaling,
+            delta_m_truncation_factor=phase.delta_m_truncation_factor,
             planck=case.thermal_bb_input,
             surface_planck=case.surfbb,
             emissivity=case.emissivity,
@@ -93,6 +128,7 @@ class ReferenceCaseTests(unittest.TestCase):
         from py2sess.rtsolver.thermal_batch_torch import solve_thermal_batch_torch
 
         case = load_tir_benchmark_case()
+        phase = _generated_tir_phase(case)
         kernel = solve_thermal_batch_torch(
             tau_arr=case.tau_arr,
             omega_arr=case.omega_arr,
@@ -118,12 +154,12 @@ class ReferenceCaseTests(unittest.TestCase):
         public = solver.forward(
             tau=case.tau_arr,
             ssa=case.omega_arr,
-            g=case.asymm_arr,
+            g=phase.g,
             z=case.heights,
             angles=case.user_angle,
             stream=case.stream_value,
             albedo=case.albedo,
-            delta_m_truncation_factor=case.d2s_scaling,
+            delta_m_truncation_factor=phase.delta_m_truncation_factor,
             planck=case.thermal_bb_input,
             surface_planck=case.surfbb,
             emissivity=case.emissivity,
@@ -223,6 +259,7 @@ class ReferenceCaseTests(unittest.TestCase):
 
     def test_public_forward_uv_fixture_matches_batch_kernel(self) -> None:
         case = load_uv_benchmark_case()
+        phase, scatter = _generated_uv_phase(case)
         fo_precomputed = fo_solar_obs_batch_precompute(
             user_obsgeom=case.user_obsgeom,
             heights=case.heights,
@@ -260,15 +297,15 @@ class ReferenceCaseTests(unittest.TestCase):
         public = solver.forward(
             tau=case.tau,
             ssa=case.omega,
-            g=case.asymm,
+            g=phase.g,
             z=case.heights,
             angles=case.user_obsgeom,
             stream=case.stream_value,
             fbeam=case.flux_factor,
             albedo=case.albedo,
-            delta_m_truncation_factor=case.scaling,
+            delta_m_truncation_factor=phase.delta_m_truncation_factor,
             include_fo=True,
-            fo_scatter_term=case.fo_exact_scatter,
+            fo_scatter_term=scatter,
         )
         np.testing.assert_allclose(public.radiance_2s, two_stream)
         np.testing.assert_allclose(public.radiance_fo, fo)
@@ -278,6 +315,7 @@ class ReferenceCaseTests(unittest.TestCase):
         if not has_torch():
             self.skipTest("torch not installed")
         case = load_uv_benchmark_case()
+        phase, scatter = _generated_uv_phase(case)
         fo_precomputed = fo_solar_obs_batch_precompute(
             user_obsgeom=case.user_obsgeom,
             heights=case.heights,
@@ -322,15 +360,15 @@ class ReferenceCaseTests(unittest.TestCase):
         public = solver.forward(
             tau=case.tau,
             ssa=case.omega,
-            g=case.asymm,
+            g=phase.g,
             z=case.heights,
             angles=case.user_obsgeom,
             stream=case.stream_value,
             fbeam=case.flux_factor,
             albedo=case.albedo,
-            delta_m_truncation_factor=case.scaling,
+            delta_m_truncation_factor=phase.delta_m_truncation_factor,
             include_fo=True,
-            fo_scatter_term=case.fo_exact_scatter,
+            fo_scatter_term=scatter,
         )
         np.testing.assert_allclose(
             to_numpy(public.radiance_2s), two_stream, rtol=1.0e-12, atol=1.0e-12
@@ -464,6 +502,7 @@ class ReferenceCaseTests(unittest.TestCase):
 
         case = load_uv_benchmark_case()
         rows = 4
+        phase, scatter = _generated_uv_phase(case)
         tau = torch.tensor(case.tau[:rows], dtype=torch.float64, requires_grad=True)
         albedo = torch.tensor(case.albedo[:rows], dtype=torch.float64, requires_grad=True)
         solver = TwoStreamEss(
@@ -472,15 +511,15 @@ class ReferenceCaseTests(unittest.TestCase):
         result = solver.forward(
             tau=tau,
             ssa=case.omega[:rows],
-            g=case.asymm[:rows],
+            g=phase.g[:rows],
             z=case.heights,
             angles=case.user_obsgeom,
             stream=case.stream_value,
             fbeam=case.flux_factor[:rows],
             albedo=albedo,
-            delta_m_truncation_factor=case.scaling[:rows],
+            delta_m_truncation_factor=phase.delta_m_truncation_factor[:rows],
             include_fo=True,
-            fo_scatter_term=case.fo_exact_scatter[:rows],
+            fo_scatter_term=scatter[:rows],
         )
         result.radiance_total.sum().backward()
         self.assertIsNotNone(tau.grad)

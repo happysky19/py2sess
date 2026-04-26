@@ -44,6 +44,22 @@ class EnrichFullBenchmarkOpticsTests(unittest.TestCase):
         )
         self.assertNotIn("aerosol_extinction_tau", arrays)
 
+    def test_keeps_tiny_positive_absorption(self) -> None:
+        module = _load_script_module()
+        arrays = {
+            "tau": np.array([[1.0e-15]]),
+            "omega": np.array([[1.0e-6]]),
+            "rayleigh_fraction": np.array([[1.0]]),
+            "aerosol_fraction": np.array([[[0.0]]]),
+        }
+
+        module._add_rt_equivalent_components(arrays, tau_key="tau", ssa_key="omega")
+
+        self.assertGreater(float(arrays["absorption_tau"][0, 0]), 0.0)
+        reconstructed = arrays["absorption_tau"] + arrays["rayleigh_scattering_tau"]
+        reconstructed += arrays["aerosol_scattering_tau"].sum(axis=-1)
+        np.testing.assert_allclose(reconstructed, arrays["tau"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add physical phase-mixing inputs to a local full-spectrum benchmark bundle."""
+"""Add physical optical-preprocessing inputs to a local full-spectrum bundle."""
 
 from __future__ import annotations
 
@@ -56,8 +56,14 @@ def _add_rt_equivalent_components(
 
     scattering_tau = tau * ssa
     absorption_tau = tau - scattering_tau
-    absorption_tau = np.where(np.abs(absorption_tau) < 1.0e-14, 0.0, absorption_tau)
-    if np.any(absorption_tau < 0.0):
+    negative_roundoff = absorption_tau < 0.0
+    if np.any(negative_roundoff):
+        tolerance = 1.0e-12 * np.maximum(np.abs(tau), np.abs(scattering_tau))
+        unrecoverable = negative_roundoff & (np.abs(absorption_tau) > tolerance)
+        if np.any(unrecoverable):
+            raise ValueError("derived absorption_tau is negative")
+        absorption_tau = np.where(negative_roundoff, 0.0, absorption_tau)
+    if np.any(absorption_tau < 0.0):  # pragma: no cover
         raise ValueError("derived absorption_tau is negative")
 
     arrays.setdefault("absorption_tau", absorption_tau)

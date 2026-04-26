@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -13,6 +14,20 @@ from py2sess.rtsolver.backend import has_torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_example_module(name: str):
+    examples_dir = ROOT / "examples"
+    examples_path = str(examples_dir)
+    if examples_path not in sys.path:
+        sys.path.insert(0, examples_path)
+    spec = importlib.util.spec_from_file_location(name, examples_dir / f"{name}.py")
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise RuntimeError(f"could not load example module: {name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class BenchmarkExampleTests(unittest.TestCase):
@@ -103,6 +118,103 @@ class BenchmarkExampleTests(unittest.TestCase):
         if has_torch():
             self.assertIn("torch-cpu-float64-forward", output)
         self.assertIn("max abs diff", output)
+
+    def test_key_selection_prefers_python_generated_inputs(self) -> None:
+        common = _load_example_module("_full_spectrum_benchmark_common")
+        uv = _load_example_module("benchmark_uv_full_spectrum")
+        tir = _load_example_module("benchmark_tir_full_spectrum")
+
+        cases = [
+            {
+                "label": "uv",
+                "module": uv,
+                "available": {
+                    "tau",
+                    "omega",
+                    "absorption_tau",
+                    "rayleigh_scattering_tau",
+                    "aerosol_scattering_tau",
+                    "depol",
+                    "rayleigh_fraction",
+                    "aerosol_fraction",
+                    "aerosol_moments",
+                    "aerosol_interp_fraction",
+                    "asymm",
+                    "scaling",
+                    "fo_exact_scatter",
+                },
+                "total_key": "tau",
+                "ssa_key": "omega",
+                "expected_layer": (
+                    "absorption_tau",
+                    "rayleigh_scattering_tau",
+                    "aerosol_scattering_tau",
+                ),
+                "expected_optical": ("depol", "aerosol_moments", "aerosol_interp_fraction"),
+                "forbidden": {"tau", "omega", "asymm", "fo_exact_scatter"},
+            },
+            {
+                "label": "tir",
+                "module": tir,
+                "available": {
+                    "tau_arr",
+                    "omega_arr",
+                    "absorption_tau",
+                    "rayleigh_scattering_tau",
+                    "aerosol_extinction_tau",
+                    "aerosol_single_scattering_albedo",
+                    "depol",
+                    "rayleigh_fraction",
+                    "aerosol_fraction",
+                    "aerosol_moments",
+                    "wavenumber_cm_inv",
+                    "level_temperature_k",
+                    "surface_temperature_k",
+                    "thermal_bb_input",
+                    "surfbb",
+                    "asymm_arr",
+                    "d2s_scaling",
+                },
+                "total_key": "tau_arr",
+                "ssa_key": "omega_arr",
+                "expected_layer": (
+                    "absorption_tau",
+                    "rayleigh_scattering_tau",
+                    "aerosol_extinction_tau",
+                    "aerosol_single_scattering_albedo",
+                ),
+                "expected_optical": ("depol", "aerosol_moments", "wavenumber_cm_inv"),
+                "forbidden": {"tau_arr", "omega_arr", "asymm_arr", "d2s_scaling"},
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case=case["label"]):
+                layer_keys = common.select_layer_optical_keys(
+                    case["available"],
+                    total_key=case["total_key"],
+                    ssa_key=case["ssa_key"],
+                )
+                optical_keys = case["module"]._select_optical_keys(
+                    case["available"],
+                    use_dumped_derived_optics=False,
+                    layer_optical_from_components=common.layer_optical_keys_are_components(
+                        layer_keys
+                    ),
+                )
+
+                self.assertEqual(layer_keys, case["expected_layer"])
+                self.assertEqual(optical_keys, case["expected_optical"])
+                self.assertTrue(case["forbidden"].isdisjoint(layer_keys + optical_keys))
+
+        source_keys = tir._select_source_keys(
+            cases[1]["available"], use_dumped_thermal_source=False
+        )
+        self.assertEqual(
+            source_keys,
+            ("level_temperature_k", "surface_temperature_k", "wavenumber_cm_inv"),
+        )
+        self.assertNotIn("thermal_bb_input", source_keys)
 
     def test_uv_benchmark_does_not_require_dumped_geometry_or_optics(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "uv_benchmark_fixture.npz"

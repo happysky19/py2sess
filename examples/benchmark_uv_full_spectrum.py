@@ -102,6 +102,12 @@ def _uv_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndarr
     )
 
 
+def _normalize_layer_inputs(bundle: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    prepared = dict(bundle)
+    prepared["ssa"] = bundle["omega"]
+    return prepared
+
+
 def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], float]:
     start = time.perf_counter()
     geoms = np.asarray(bundle["user_obsgeom"], dtype=float)
@@ -151,12 +157,16 @@ def _prepare_optics(
 ) -> tuple[dict[str, np.ndarray], float, str]:
     if use_dumped_derived_optics or not _has_keys(bundle, _UV_REQUIRED_PHYSICAL_OPTICS_KEYS):
         require_keys(bundle, _UV_DUMPED_OPTICS_KEYS, label="UV dumped optical")
+        prepared = dict(bundle)
+        prepared["g"] = bundle["asymm"]
+        prepared["delta_m_truncation_factor"] = bundle["scaling"]
+        prepared["fo_scatter_term"] = bundle["fo_exact_scatter"]
         mode = "dumped-derived"
         if not use_dumped_derived_optics and not _has_keys(
             bundle, _UV_REQUIRED_PHYSICAL_OPTICS_KEYS
         ):
             mode = "dumped-derived (physical optical inputs unavailable)"
-        return bundle, 0.0, mode
+        return prepared, 0.0, mode
 
     start = time.perf_counter()
     if "aerosol_interp_fraction" in bundle:
@@ -166,7 +176,7 @@ def _prepare_optics(
         fac, mode = _uv_aerosol_interp_fraction(bundle)
 
     optics = build_two_stream_phase_inputs(
-        ssa=bundle["omega"],
+        ssa=bundle["ssa"],
         depol=bundle["depol"],
         rayleigh_fraction=bundle["rayleigh_fraction"],
         aerosol_fraction=bundle["aerosol_fraction"],
@@ -174,7 +184,7 @@ def _prepare_optics(
         aerosol_interp_fraction=fac,
     )
     fo_scatter = build_solar_fo_scatter_term(
-        ssa=bundle["omega"],
+        ssa=bundle["ssa"],
         depol=bundle["depol"],
         rayleigh_fraction=bundle["rayleigh_fraction"],
         aerosol_fraction=bundle["aerosol_fraction"],
@@ -185,9 +195,9 @@ def _prepare_optics(
     )
     prepared = dict(bundle)
     prepared["aerosol_interp_fraction"] = fac
-    prepared["asymm"] = optics.g
-    prepared["scaling"] = optics.delta_m_truncation_factor
-    prepared["fo_exact_scatter"] = fo_scatter
+    prepared["g"] = optics.g
+    prepared["delta_m_truncation_factor"] = optics.delta_m_truncation_factor
+    prepared["fo_scatter_term"] = fo_scatter
     return prepared, time.perf_counter() - start, mode
 
 
@@ -195,12 +205,12 @@ def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[st
     """Returns one spectral chunk from a UV benchmark bundle."""
     chunk = {
         "tau": bundle["tau"][start:stop],
-        "omega": bundle["omega"][start:stop],
-        "asymm": bundle["asymm"][start:stop],
-        "scaling": bundle["scaling"][start:stop],
+        "ssa": bundle["ssa"][start:stop],
+        "g": bundle["g"][start:stop],
+        "delta_m_truncation_factor": bundle["delta_m_truncation_factor"][start:stop],
         "albedo": bundle["albedo"][start:stop],
         "flux_factor": bundle["flux_factor"][start:stop],
-        "fo_exact_scatter": bundle["fo_exact_scatter"][start:stop],
+        "fo_scatter_term": bundle["fo_scatter_term"][start:stop],
     }
     if "ref_total" in bundle:
         chunk["ref_total"] = bundle["ref_total"][start:stop]
@@ -234,11 +244,11 @@ def benchmark_numpy(
         t0 = time.perf_counter()
         fo_total = solve_fo_solar_obs_eps_batch_numpy(
             tau=chunk["tau"],
-            omega=chunk["omega"],
-            scaling=chunk["scaling"],
+            omega=chunk["ssa"],
+            scaling=chunk["delta_m_truncation_factor"],
             albedo=chunk["albedo"],
             flux_factor=chunk["flux_factor"],
-            exact_scatter=chunk["fo_exact_scatter"],
+            exact_scatter=chunk["fo_scatter_term"],
             precomputed=fo_precomputed,
         )
         fo_seconds += time.perf_counter() - t0
@@ -246,9 +256,9 @@ def benchmark_numpy(
         t0 = time.perf_counter()
         two_stream = solve_solar_obs_batch_numpy(
             tau=chunk["tau"],
-            omega=chunk["omega"],
-            asymm=chunk["asymm"],
-            scaling=chunk["scaling"],
+            omega=chunk["ssa"],
+            asymm=chunk["g"],
+            scaling=chunk["delta_m_truncation_factor"],
             albedo=chunk["albedo"],
             flux_factor=chunk["flux_factor"],
             stream_value=scalar_value(bundle["stream_value"]),
@@ -314,16 +324,16 @@ def benchmark_numpy_forward(
     )
     result = solver.forward(
         tau=bundle["tau"],
-        ssa=bundle["omega"],
-        g=bundle["asymm"],
+        ssa=bundle["ssa"],
+        g=bundle["g"],
         z=bundle["heights"],
         angles=bundle["user_obsgeom"],
         stream=scalar_value(bundle["stream_value"]),
         fbeam=bundle["flux_factor"],
         albedo=bundle["albedo"],
-        delta_m_truncation_factor=bundle["scaling"],
+        delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
         include_fo=True,
-        fo_scatter_term=bundle["fo_exact_scatter"],
+        fo_scatter_term=bundle["fo_scatter_term"],
     )
     total = np.asarray(result.radiance_total, dtype=float)
     checksum = float(np.sum(total))
@@ -392,11 +402,11 @@ def benchmark_torch(
         with torch.no_grad():
             fo_total = solve_fo_solar_obs_eps_batch_torch(
                 tau=chunk["tau"],
-                omega=chunk["omega"],
-                scaling=chunk["scaling"],
+                omega=chunk["ssa"],
+                scaling=chunk["delta_m_truncation_factor"],
                 albedo=chunk["albedo"],
                 flux_factor=chunk["flux_factor"],
-                exact_scatter=chunk["fo_exact_scatter"],
+                exact_scatter=chunk["fo_scatter_term"],
                 precomputed=fo_precomputed,
                 dtype=dtype,
                 device=device,
@@ -407,9 +417,9 @@ def benchmark_torch(
         with torch.no_grad():
             two_stream = solve_solar_obs_batch_torch(
                 tau=chunk["tau"],
-                omega=chunk["omega"],
-                asymm=chunk["asymm"],
-                scaling=chunk["scaling"],
+                omega=chunk["ssa"],
+                asymm=chunk["g"],
+                scaling=chunk["delta_m_truncation_factor"],
                 albedo=chunk["albedo"],
                 flux_factor=chunk["flux_factor"],
                 stream_value=scalar_value(bundle["stream_value"]),
@@ -499,16 +509,16 @@ def benchmark_torch_forward(
     )
     result = solver.forward(
         tau=bundle["tau"],
-        ssa=bundle["omega"],
-        g=bundle["asymm"],
+        ssa=bundle["ssa"],
+        g=bundle["g"],
         z=bundle["heights"],
         angles=bundle["user_obsgeom"],
         stream=scalar_value(bundle["stream_value"]),
         fbeam=bundle["flux_factor"],
         albedo=bundle["albedo"],
-        delta_m_truncation_factor=bundle["scaling"],
+        delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
         include_fo=True,
-        fo_scatter_term=bundle["fo_exact_scatter"],
+        fo_scatter_term=bundle["fo_scatter_term"],
     )
     total = result.radiance_total.detach().cpu().numpy()
     checksum = float(np.sum(total))
@@ -614,6 +624,7 @@ def main() -> None:
         total_key="tau",
         ssa_key="omega",
     )
+    bundle = _normalize_layer_inputs(bundle)
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
