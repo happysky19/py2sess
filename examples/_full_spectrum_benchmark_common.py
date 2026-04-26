@@ -91,6 +91,21 @@ def layer_optical_keys_are_components(keys: tuple[str, ...]) -> bool:
     return any(key in keys for key in LAYER_OPTICAL_ABSORPTION_KEYS)
 
 
+def require_python_generated_layer_optical_inputs(
+    keys: tuple[str, ...],
+    *,
+    total_key: str,
+    ssa_key: str,
+    label: str,
+) -> None:
+    """Reject direct layer optical inputs in strict generated-input mode."""
+    if keys == (total_key, ssa_key):
+        raise ValueError(
+            f"{label} strict generated-input mode requires component optical-depth "
+            "fields such as absorption_tau and rayleigh_scattering_tau"
+        )
+
+
 def prepare_layer_optical_properties(
     bundle: dict[str, np.ndarray],
     *,

@@ -44,6 +44,16 @@ def _load_example_module(name: str):
             sys.modules[name] = previous_module
 
 
+def _load_script_module(name: str):
+    script = ROOT / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, script)
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise RuntimeError(f"could not load script module: {name}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class BenchmarkExampleTests(unittest.TestCase):
     def _component_optical_depths(
         self,
@@ -61,7 +71,10 @@ class BenchmarkExampleTests(unittest.TestCase):
         }
 
     def _run_benchmark_process(
-        self, script: str, fixture: str | Path
+        self,
+        script: str,
+        fixture: str | Path,
+        extra_args: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src")
@@ -85,6 +98,7 @@ class BenchmarkExampleTests(unittest.TestCase):
             "float64",
             "--torch-threads",
             "1",
+            *extra_args,
         ]
         return subprocess.run(
             command,
@@ -96,8 +110,13 @@ class BenchmarkExampleTests(unittest.TestCase):
             check=False,
         )
 
-    def _run_benchmark(self, script: str, fixture: str | Path) -> str:
-        result = self._run_benchmark_process(script, fixture)
+    def _run_benchmark(
+        self,
+        script: str,
+        fixture: str | Path,
+        extra_args: tuple[str, ...] = (),
+    ) -> str:
+        result = self._run_benchmark_process(script, fixture, extra_args)
         if result.returncode != 0:
             self.fail(f"{script} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
         return result.stdout
@@ -215,6 +234,7 @@ class BenchmarkExampleTests(unittest.TestCase):
                     layer_optical_from_components=common.layer_optical_keys_are_components(
                         layer_keys
                     ),
+                    require_python_generated_inputs=True,
                 )
 
                 self.assertEqual(layer_keys, case["expected_layer"])
@@ -222,13 +242,36 @@ class BenchmarkExampleTests(unittest.TestCase):
                 self.assertTrue(case["forbidden"].isdisjoint(layer_keys + optical_keys))
 
         source_keys = tir._select_source_keys(
-            cases[1]["available"], use_dumped_thermal_source=False
+            cases[1]["available"],
+            use_dumped_thermal_source=False,
+            require_python_generated_inputs=True,
         )
         self.assertEqual(
             source_keys,
             ("level_temperature_k", "surface_temperature_k", "wavenumber_cm_inv"),
         )
         self.assertNotIn("thermal_bb_input", source_keys)
+        self.assertEqual(
+            tir._select_source_keys(
+                {"thermal_bb_input", "surfbb"},
+                use_dumped_thermal_source=False,
+                require_python_generated_inputs=True,
+            ),
+            ("thermal_bb_input", "surfbb"),
+        )
+        with self.assertRaisesRegex(ValueError, "temperature-based thermal source"):
+            tir._select_source_keys(
+                {"level_temperature_k", "thermal_bb_input", "surfbb"},
+                use_dumped_thermal_source=False,
+                require_python_generated_inputs=True,
+            )
+        with self.assertRaisesRegex(ValueError, "surface_temperature_k") as caught:
+            tir._select_source_keys(
+                {"level_temperature_k", "wavenumber_cm_inv", "thermal_bb_input", "surfbb"},
+                use_dumped_thermal_source=False,
+                require_python_generated_inputs=True,
+            )
+        self.assertNotIn("wavenumber_cm_inv or wavelength_microns", str(caught.exception))
 
     def test_uv_benchmark_does_not_require_dumped_geometry_or_optics(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "uv_benchmark_fixture.npz"
@@ -278,7 +321,11 @@ class BenchmarkExampleTests(unittest.TestCase):
                 )
             )
             np.savez_compressed(trimmed, **arrays)
-            output = self._run_benchmark("benchmark_uv_full_spectrum.py", trimmed)
+            output = self._run_benchmark(
+                "benchmark_uv_full_spectrum.py",
+                trimmed,
+                extra_args=("--require-python-generated-inputs",),
+            )
         self.assertIn(
             "layer optical properties: python-generated from component optical depths",
             output,
@@ -296,6 +343,20 @@ class BenchmarkExampleTests(unittest.TestCase):
             result = self._run_benchmark_process("benchmark_uv_full_spectrum.py", trimmed)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("physical wavelengths", result.stderr)
+
+    def test_strict_generated_input_mode_rejects_direct_layer_inputs(self) -> None:
+        for script, fixture in (
+            ("benchmark_uv_full_spectrum.py", "uv_benchmark_fixture.npz"),
+            ("benchmark_tir_full_spectrum.py", "tir_benchmark_fixture.npz"),
+        ):
+            with self.subTest(script=script):
+                result = self._run_benchmark_process(
+                    script,
+                    fixture,
+                    extra_args=("--require-python-generated-inputs",),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("strict generated-input mode requires component", result.stderr)
 
     def test_tir_benchmark_does_not_require_dumped_optics(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
@@ -368,6 +429,90 @@ class BenchmarkExampleTests(unittest.TestCase):
             np.savez_compressed(trimmed, **arrays)
             output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
         self.assertIn("thermal source: temperature (wavenumber_cm_inv)", output)
+
+    def test_runtime_minimal_uv_bundle_drops_regenerable_arrays(self) -> None:
+        module = _load_script_module("create_runtime_minimal_benchmark_bundle")
+        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "uv_benchmark_fixture.npz"
+        with np.load(fixture) as data:
+            arrays = {key: np.array(data[key]) for key in data.files}
+            arrays.update(
+                self._component_optical_depths(
+                    tau=np.array(data["tau"]),
+                    ssa=np.array(data["omega"]),
+                    rayleigh_fraction=np.array(data["rayleigh_fraction"]),
+                    aerosol_fraction=np.array(data["aerosol_fraction"]),
+                )
+            )
+        minimal = module.minimal_bundle_arrays("uv", arrays)
+
+        for key in ("tau", "omega", "asymm", "scaling", "fo_exact_scatter", "chapman"):
+            self.assertNotIn(key, minimal)
+        for key in (
+            "wavelengths",
+            "user_obsgeom",
+            "heights",
+            "albedo",
+            "flux_factor",
+            "absorption_tau",
+            "rayleigh_scattering_tau",
+            "aerosol_scattering_tau",
+            "depol",
+            "aerosol_moments",
+            "ref_total",
+        ):
+            self.assertIn(key, minimal)
+
+    def test_runtime_minimal_tir_bundle_drops_regenerable_arrays(self) -> None:
+        module = _load_script_module("create_runtime_minimal_benchmark_bundle")
+        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
+        with np.load(fixture) as data:
+            arrays = {key: np.array(data[key]) for key in data.files}
+            arrays.update(
+                self._component_optical_depths(
+                    tau=np.array(data["tau_arr"]),
+                    ssa=np.array(data["omega_arr"]),
+                    rayleigh_fraction=np.array(data["rayleigh_fraction"]),
+                    aerosol_fraction=np.array(data["aerosol_fraction"]),
+                )
+            )
+            arrays["level_temperature_k"] = np.linspace(
+                220.0,
+                270.0,
+                int(data["tau_arr"].shape[1]) + 1,
+            )
+            arrays["surface_temperature_k"] = np.array([285.0], dtype=float)
+            arrays["wavenumber_cm_inv"] = np.linspace(
+                700.0,
+                900.0,
+                int(data["tau_arr"].shape[0]),
+            )
+        minimal = module.minimal_bundle_arrays("tir", arrays)
+
+        for key in (
+            "tau_arr",
+            "omega_arr",
+            "asymm_arr",
+            "d2s_scaling",
+            "thermal_bb_input",
+            "surfbb",
+        ):
+            self.assertNotIn(key, minimal)
+        for key in (
+            "wavelengths",
+            "heights",
+            "user_angle",
+            "albedo",
+            "absorption_tau",
+            "rayleigh_scattering_tau",
+            "aerosol_scattering_tau",
+            "depol",
+            "aerosol_moments",
+            "level_temperature_k",
+            "surface_temperature_k",
+            "wavenumber_cm_inv",
+            "ref_total",
+        ):
+            self.assertIn(key, minimal)
 
 
 if __name__ == "__main__":

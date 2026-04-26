@@ -21,6 +21,8 @@ scripts/run_full_benchmark_threads.sh /path/to/uv_full_bundle.npz /path/to/tir_f
 The sweep script also accepts environment overrides such as
 `BACKEND=numpy`, `THREADS="1 4"`, `LIMIT=1000`,
 `USE_DUMPED_DERIVED_OPTICS=1`, and `USE_DUMPED_THERMAL_SOURCE=1`.
+Set `REQUIRE_PYTHON_GENERATED_INPUTS=1` to fail if a benchmark would fall
+back to direct or dumped derived RT inputs.
 
 The benchmark table reports:
 
@@ -64,6 +66,13 @@ from Rayleigh/aerosol fractions. Pass `--use-dumped-derived-optics` to use
 stored Fortran-derived `g`, delta-M factor, and solar FO scatter terms instead.
 Older bundles without physical optical fields automatically fall back to the
 stored derived arrays.
+Pass `--require-python-generated-inputs` to make that fallback an error. This
+is the preferred check when validating a runtime bundle intended to be
+independent of Fortran-dumped intermediate variables.
+For TIR source terms, this strict mode rejects direct `thermal_bb_input`/`surfbb`
+fallback only when temperature-source fields are present but incomplete or
+explicitly bypassed; older bundles with no temperature fields still use the
+direct source arrays.
 
 The benchmark loaders read only the arrays needed for the selected mode. With
 component optical-depth inputs available, the scripts do not load direct
@@ -98,6 +107,17 @@ unchanged. It also replaces any spectral row-index placeholder in `wavelengths`
 with the physical wavelength grid from the dump. Re-run this step for older
 local `_with_optics` bundles if they do not contain component optical-depth
 fields such as `absorption_tau` and `rayleigh_scattering_tau`.
+
+To write a smaller local runtime bundle after enrichment:
+
+```bash
+python3 scripts/create_runtime_minimal_benchmark_bundle.py uv /path/to/uv_full_bundle_with_optics.npz /path/to/uv_runtime_minimal.npz
+python3 scripts/create_runtime_minimal_benchmark_bundle.py tir /path/to/tir_full_bundle_with_optics.npz /path/to/tir_runtime_minimal.npz
+```
+
+The runtime-minimal bundle keeps physical inputs and saved reference outputs,
+but drops direct or dumped derived fields when the benchmark can regenerate
+them in Python. Generated bundles should stay local.
 
 Generated benchmark reports should stay local, for example under `outputs/`,
 `local_outputs/`, or `paper_outputs/`, which are ignored by git.

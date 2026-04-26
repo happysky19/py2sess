@@ -19,6 +19,7 @@ from _full_spectrum_benchmark_common import (
     prepare_layer_optical_properties,
     print_rows,
     recommended_chunk_size,
+    require_python_generated_layer_optical_inputs,
     require_keys,
     scalar_value,
     select_layer_optical_keys,
@@ -77,7 +78,12 @@ def _select_optical_keys(
     *,
     use_dumped_derived_optics: bool,
     layer_optical_from_components: bool,
+    require_python_generated_inputs: bool = False,
 ) -> tuple[str, ...]:
+    if require_python_generated_inputs and use_dumped_derived_optics:
+        raise ValueError(
+            "TIR strict generated-input mode cannot be combined with --use-dumped-derived-optics"
+        )
     required_physical = (
         ("depol", "aerosol_moments")
         if layer_optical_from_components
@@ -91,6 +97,12 @@ def _select_optical_keys(
         else:
             keys.extend(key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available)
         return tuple(keys)
+    if require_python_generated_inputs:
+        missing = ", ".join(key for key in required_physical if key not in available)
+        raise ValueError(
+            "TIR strict generated-input mode requires physical phase inputs"
+            + (f": {missing}" if missing else "")
+        )
     return _TIR_DUMPED_OPTICS_KEYS
 
 
@@ -133,11 +145,32 @@ def _select_source_keys(
     available: set[str],
     *,
     use_dumped_thermal_source: bool,
+    require_python_generated_inputs: bool = False,
 ) -> tuple[str, ...]:
     has_temperature = set(_TIR_TEMPERATURE_SOURCE_KEYS).issubset(available)
     coordinates = tuple(key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available)
+    has_any_source_physical_input = bool(
+        set(_TIR_TEMPERATURE_SOURCE_KEYS).intersection(available) or coordinates
+    )
+    if (
+        require_python_generated_inputs
+        and use_dumped_thermal_source
+        and has_any_source_physical_input
+    ):
+        raise ValueError(
+            "TIR strict generated-input mode cannot be combined with --use-dumped-thermal-source"
+        )
     if not use_dumped_thermal_source and has_temperature and len(coordinates) >= 1:
         return _TIR_TEMPERATURE_SOURCE_KEYS + coordinates
+    if require_python_generated_inputs and has_any_source_physical_input:
+        missing = [key for key in _TIR_TEMPERATURE_SOURCE_KEYS if key not in available]
+        if not coordinates:
+            missing.append("wavenumber_cm_inv or wavelength_microns")
+        missing_text = ", ".join(missing)
+        raise ValueError(
+            "TIR strict generated-input mode requires temperature-based thermal source inputs"
+            + (f": {missing_text}" if missing_text else "")
+        )
     return _TIR_DIRECT_SOURCE_KEYS
 
 
@@ -641,6 +674,11 @@ def main() -> None:
         action="store_true",
         help="Use stored thermal_bb_input/surfbb instead of temperature-based source generation.",
     )
+    parser.add_argument(
+        "--require-python-generated-inputs",
+        action="store_true",
+        help="Fail instead of falling back to direct or dumped derived RT inputs.",
+    )
     args = parser.parse_args()
 
     load_start = time.perf_counter()
@@ -650,14 +688,23 @@ def main() -> None:
         total_key="tau_arr",
         ssa_key="omega_arr",
     )
+    if args.require_python_generated_inputs:
+        require_python_generated_layer_optical_inputs(
+            layer_optical_keys,
+            total_key="tau_arr",
+            ssa_key="omega_arr",
+            label="TIR",
+        )
     optical_keys = _select_optical_keys(
         available,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
         layer_optical_from_components=layer_optical_keys_are_components(layer_optical_keys),
+        require_python_generated_inputs=args.require_python_generated_inputs,
     )
     source_keys = _select_source_keys(
         available,
         use_dumped_thermal_source=args.use_dumped_thermal_source,
+        require_python_generated_inputs=args.require_python_generated_inputs,
     )
     bundle = load_bundle(
         args.bundle,

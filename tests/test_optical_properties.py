@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from py2sess import load_tir_benchmark_case, load_uv_benchmark_case
 from py2sess.optical.properties import build_layer_optical_properties
 from py2sess.rtsolver.backend import has_torch
 
@@ -151,6 +152,25 @@ class OpticalPropertiesTests(unittest.TestCase):
                 gas_absorption_tau=np.array([0.1]),
                 rayleigh_scattering_tau=np.array([0.2]),
             )
+
+    def test_fixture_equivalent_components_regenerate_layer_inputs(self) -> None:
+        uv = load_uv_benchmark_case()
+        tir = load_tir_benchmark_case()
+        for label, tau, ssa, rayleigh_fraction, aerosol_fraction in (
+            ("uv", uv.tau, uv.omega, uv.rayleigh_fraction, uv.aerosol_fraction),
+            ("tir", tir.tau_arr, tir.omega_arr, tir.rayleigh_fraction, tir.aerosol_fraction),
+        ):
+            with self.subTest(case=label):
+                scattering_tau = tau * ssa
+                props = build_layer_optical_properties(
+                    absorption_tau=tau - scattering_tau,
+                    rayleigh_scattering_tau=scattering_tau * rayleigh_fraction,
+                    aerosol_scattering_tau=scattering_tau[..., None] * aerosol_fraction,
+                )
+                np.testing.assert_allclose(props.tau, tau)
+                np.testing.assert_allclose(props.ssa, ssa)
+                np.testing.assert_allclose(props.rayleigh_fraction, rayleigh_fraction)
+                np.testing.assert_allclose(props.aerosol_fraction, aerosol_fraction)
 
 
 if __name__ == "__main__":
