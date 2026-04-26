@@ -14,11 +14,14 @@ from _full_spectrum_benchmark_common import (
     bundle_keys,
     load_bundle,
     looks_like_row_index,
+    layer_optical_keys_are_components,
     print_problem_header,
+    prepare_layer_optical_properties,
     print_rows,
     recommended_chunk_size,
     require_keys,
     scalar_value,
+    select_layer_optical_keys,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
 from py2sess.optical.phase import (
@@ -55,8 +58,6 @@ _UV_BASE_KEYS = (
     "wavelengths",
     "user_obsgeom",
     "heights",
-    "tau",
-    "omega",
     "albedo",
     "flux_factor",
 )
@@ -72,10 +73,16 @@ def _select_optical_keys(
     available: set[str],
     *,
     use_dumped_derived_optics: bool,
+    layer_optical_from_components: bool,
 ) -> tuple[str, ...]:
-    has_physical_optics = set(_UV_REQUIRED_PHYSICAL_OPTICS_KEYS).issubset(available)
+    required_physical = (
+        ("depol", "aerosol_moments")
+        if layer_optical_from_components
+        else _UV_REQUIRED_PHYSICAL_OPTICS_KEYS
+    )
+    has_physical_optics = set(required_physical).issubset(available)
     if not use_dumped_derived_optics and has_physical_optics:
-        keys = list(_UV_REQUIRED_PHYSICAL_OPTICS_KEYS)
+        keys = list(required_physical)
         if _UV_AEROSOL_INTERP_KEY in available:
             keys.append(_UV_AEROSOL_INTERP_KEY)
         return tuple(keys)
@@ -559,27 +566,37 @@ def main() -> None:
 
     load_start = time.perf_counter()
     available = bundle_keys(args.bundle)
+    layer_optical_keys = select_layer_optical_keys(
+        available,
+        total_key="tau",
+        ssa_key="omega",
+    )
     optical_keys = _select_optical_keys(
         available,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
+        layer_optical_from_components=layer_optical_keys_are_components(layer_optical_keys),
     )
     bundle = load_bundle(
         args.bundle,
-        keys=_UV_BASE_KEYS + _UV_OPTIONAL_KEYS + optical_keys,
+        keys=_UV_BASE_KEYS + _UV_OPTIONAL_KEYS + layer_optical_keys + optical_keys,
     )
     require_keys(
         bundle,
-        _UV_BASE_KEYS + optical_keys,
+        _UV_BASE_KEYS + layer_optical_keys + optical_keys,
         label="UV",
     )
-    total_rows = int(bundle["tau"].shape[0])
+    row_count_key = (
+        "gas_absorption_tau" if layer_optical_keys_are_components(layer_optical_keys) else "tau"
+    )
+    total_rows = int(bundle[row_count_key].shape[0])
     wavelengths = total_rows if args.limit is None else min(int(args.limit), total_rows)
     bundle = dict(bundle)
     bundle["wavelengths"] = bundle["wavelengths"][:wavelengths]
-    bundle["tau"] = bundle["tau"][:wavelengths]
-    bundle["omega"] = bundle["omega"][:wavelengths]
     bundle["albedo"] = bundle["albedo"][:wavelengths]
     bundle["flux_factor"] = bundle["flux_factor"][:wavelengths]
+    for key in layer_optical_keys:
+        if key in bundle and np.asarray(bundle[key]).shape[:1] == (total_rows,):
+            bundle[key] = bundle[key][:wavelengths]
     for key in _UV_DUMPED_OPTICS_KEYS:
         if key in bundle:
             bundle[key] = bundle[key][:wavelengths]
@@ -592,6 +609,11 @@ def main() -> None:
         bundle["stream_value"] = np.array([1.0 / np.sqrt(3.0)], dtype=float)
     load_seconds = time.perf_counter() - load_start
 
+    bundle, layer_optical_seconds, layer_optical_mode = prepare_layer_optical_properties(
+        bundle,
+        total_key="tau",
+        ssa_key="omega",
+    )
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
@@ -611,9 +633,14 @@ def main() -> None:
             "checksum reduction."
         ),
     )
+    print(f"  layer optical properties: {layer_optical_mode}, {layer_optical_seconds:.3f} s")
     print(f"  geometry preprocessing: python-generated, {geometry_seconds:.3f} s")
     print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
-    print(f"  preprocessing total: {geometry_seconds + optical_seconds:.3f} s (geometry + optical)")
+    print(
+        "  preprocessing total: "
+        f"{layer_optical_seconds + geometry_seconds + optical_seconds:.3f} s "
+        "(layer optical + geometry + phase)"
+    )
 
     rows: list[BenchmarkRow] = []
     if args.backend in {"numpy", "both"}:

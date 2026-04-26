@@ -4,8 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 import numpy as np
+
+from py2sess.optical.properties import build_layer_optical_properties
+
+
+LAYER_OPTICAL_COMPONENT_KEYS = (
+    "gas_absorption_tau",
+    "rayleigh_scattering_tau",
+)
+LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY = "aerosol_extinction_tau"
+LAYER_OPTICAL_AEROSOL_SCATTERING_KEY = "aerosol_scattering_tau"
+LAYER_OPTICAL_AEROSOL_SSA_KEY = "aerosol_single_scattering_albedo"
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,64 @@ def load_bundle(path: Path, keys: tuple[str, ...] | None = None) -> dict[str, np
     with np.load(path) as data:
         names = data.files if keys is None else [key for key in keys if key in data.files]
         return {key: np.array(data[key]) for key in names}
+
+
+def select_layer_optical_keys(
+    available: set[str],
+    *,
+    total_key: str,
+    ssa_key: str,
+) -> tuple[str, ...]:
+    """Selects direct or component optical-depth inputs for benchmark loading."""
+    has_components = set(LAYER_OPTICAL_COMPONENT_KEYS).issubset(available)
+    if not has_components:
+        return (total_key, ssa_key)
+
+    keys = list(LAYER_OPTICAL_COMPONENT_KEYS)
+    if LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY in available:
+        if LAYER_OPTICAL_AEROSOL_SCATTERING_KEY in available:
+            keys.extend(
+                (
+                    LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY,
+                    LAYER_OPTICAL_AEROSOL_SCATTERING_KEY,
+                )
+            )
+        elif LAYER_OPTICAL_AEROSOL_SSA_KEY in available:
+            keys.extend((LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY, LAYER_OPTICAL_AEROSOL_SSA_KEY))
+        else:
+            return (total_key, ssa_key)
+    return tuple(keys)
+
+
+def layer_optical_keys_are_components(keys: tuple[str, ...]) -> bool:
+    """Returns true when selected optical keys are component optical depths."""
+    return LAYER_OPTICAL_COMPONENT_KEYS[0] in keys
+
+
+def prepare_layer_optical_properties(
+    bundle: dict[str, np.ndarray],
+    *,
+    total_key: str,
+    ssa_key: str,
+) -> tuple[dict[str, np.ndarray], float, str]:
+    """Builds ``tau``/``ssa`` and scattering fractions when components exist."""
+    if not set(LAYER_OPTICAL_COMPONENT_KEYS).issubset(bundle):
+        return bundle, 0.0, "bundle"
+
+    start = time.perf_counter()
+    props = build_layer_optical_properties(
+        gas_absorption_tau=bundle["gas_absorption_tau"],
+        rayleigh_scattering_tau=bundle["rayleigh_scattering_tau"],
+        aerosol_extinction_tau=bundle.get(LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY),
+        aerosol_scattering_tau=bundle.get(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY),
+        aerosol_single_scattering_albedo=bundle.get(LAYER_OPTICAL_AEROSOL_SSA_KEY),
+    )
+    prepared = dict(bundle)
+    prepared[total_key] = props.tau
+    prepared[ssa_key] = props.ssa
+    prepared["rayleigh_fraction"] = props.rayleigh_fraction
+    prepared["aerosol_fraction"] = props.aerosol_fraction
+    return prepared, time.perf_counter() - start, "python-generated from component optical depths"
 
 
 def require_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...], *, label: str) -> None:

@@ -14,11 +14,14 @@ from _full_spectrum_benchmark_common import (
     bundle_keys,
     load_bundle,
     looks_like_row_index,
+    layer_optical_keys_are_components,
     print_problem_header,
+    prepare_layer_optical_properties,
     print_rows,
     recommended_chunk_size,
     require_keys,
     scalar_value,
+    select_layer_optical_keys,
 )
 from py2sess import (
     thermal_source_from_temperature_profile,
@@ -55,8 +58,6 @@ _TIR_BASE_KEYS = (
     "wavelengths",
     "heights",
     "user_angle",
-    "tau_arr",
-    "omega_arr",
     "albedo",
 )
 
@@ -75,10 +76,16 @@ def _select_optical_keys(
     available: set[str],
     *,
     use_dumped_derived_optics: bool,
+    layer_optical_from_components: bool,
 ) -> tuple[str, ...]:
-    has_physical_optics = set(_TIR_REQUIRED_PHYSICAL_OPTICS_KEYS).issubset(available)
+    required_physical = (
+        ("depol", "aerosol_moments")
+        if layer_optical_from_components
+        else _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS
+    )
+    has_physical_optics = set(required_physical).issubset(available)
     if not use_dumped_derived_optics and has_physical_optics:
-        keys = list(_TIR_REQUIRED_PHYSICAL_OPTICS_KEYS)
+        keys = list(required_physical)
         if _TIR_AEROSOL_INTERP_KEY in available:
             keys.append(_TIR_AEROSOL_INTERP_KEY)
         else:
@@ -624,9 +631,15 @@ def main() -> None:
 
     load_start = time.perf_counter()
     available = bundle_keys(args.bundle)
+    layer_optical_keys = select_layer_optical_keys(
+        available,
+        total_key="tau_arr",
+        ssa_key="omega_arr",
+    )
     optical_keys = _select_optical_keys(
         available,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
+        layer_optical_from_components=layer_optical_keys_are_components(layer_optical_keys),
     )
     source_keys = _select_source_keys(
         available,
@@ -634,22 +647,26 @@ def main() -> None:
     )
     bundle = load_bundle(
         args.bundle,
-        keys=_TIR_BASE_KEYS + _TIR_OPTIONAL_KEYS + optical_keys + source_keys,
+        keys=_TIR_BASE_KEYS + _TIR_OPTIONAL_KEYS + layer_optical_keys + optical_keys + source_keys,
     )
     require_keys(
         bundle,
-        _TIR_BASE_KEYS + optical_keys + source_keys,
+        _TIR_BASE_KEYS + layer_optical_keys + optical_keys + source_keys,
         label="TIR",
     )
-    total_rows = int(bundle["tau_arr"].shape[0])
+    row_count_key = (
+        "gas_absorption_tau" if layer_optical_keys_are_components(layer_optical_keys) else "tau_arr"
+    )
+    total_rows = int(bundle[row_count_key].shape[0])
     wavelengths = total_rows if args.limit is None else min(int(args.limit), total_rows)
     bundle = dict(bundle)
     bundle["wavelengths"] = bundle["wavelengths"][:wavelengths]
-    bundle["tau_arr"] = bundle["tau_arr"][:wavelengths]
-    bundle["omega_arr"] = bundle["omega_arr"][:wavelengths]
     bundle["albedo"] = bundle["albedo"][:wavelengths]
     if "emissivity" in bundle:
         bundle["emissivity"] = bundle["emissivity"][:wavelengths]
+    for key in layer_optical_keys:
+        if key in bundle and np.asarray(bundle[key]).shape[:1] == (total_rows,):
+            bundle[key] = bundle[key][:wavelengths]
     for key in _TIR_DIRECT_SOURCE_KEYS + ("surface_temperature_k",) + _TIR_SOURCE_COORDINATE_KEYS:
         if key in bundle and np.asarray(bundle[key]).shape[:1] == (total_rows,):
             bundle[key] = bundle[key][:wavelengths]
@@ -663,6 +680,11 @@ def main() -> None:
         bundle["ref_total"] = bundle["ref_total"][:wavelengths]
     load_seconds = time.perf_counter() - load_start
 
+    bundle, layer_optical_seconds, layer_optical_mode = prepare_layer_optical_properties(
+        bundle,
+        total_key="tau_arr",
+        ssa_key="omega_arr",
+    )
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
@@ -686,13 +708,14 @@ def main() -> None:
             "conversion, PyTorch warmup, and checksum reduction."
         ),
     )
+    print(f"  layer optical properties: {layer_optical_mode}, {layer_optical_seconds:.3f} s")
     print(f"  geometry preprocessing: python-generated, {geometry_seconds:.3f} s")
     print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
     print(f"  thermal source: {source_mode}, {source_seconds:.3f} s")
     print(
         "  preprocessing total: "
-        f"{geometry_seconds + optical_seconds + source_seconds:.3f} s "
-        "(geometry + optical + thermal source)"
+        f"{layer_optical_seconds + geometry_seconds + optical_seconds + source_seconds:.3f} s "
+        "(layer optical + geometry + phase + thermal source)"
     )
     print(f"  emissivity: {emissivity_mode}")
 

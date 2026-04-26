@@ -16,6 +16,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BenchmarkExampleTests(unittest.TestCase):
+    def _component_optical_depths(
+        self,
+        *,
+        tau: np.ndarray,
+        ssa: np.ndarray,
+        rayleigh_fraction: np.ndarray,
+        aerosol_fraction: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        scattering_tau = tau * ssa
+        return {
+            "gas_absorption_tau": np.maximum(tau - scattering_tau, 0.0),
+            "rayleigh_scattering_tau": scattering_tau * rayleigh_fraction,
+            "aerosol_extinction_tau": scattering_tau[..., None] * aerosol_fraction,
+            "aerosol_scattering_tau": scattering_tau[..., None] * aerosol_fraction,
+        }
+
     def _run_benchmark_process(
         self, script: str, fixture: str | Path
     ) -> subprocess.CompletedProcess:
@@ -65,6 +81,7 @@ class BenchmarkExampleTests(unittest.TestCase):
         )
         self.assertIn("numpy", output)
         self.assertIn("numpy-forward", output)
+        self.assertIn("layer optical properties: bundle", output)
         self.assertIn("geometry preprocessing: python-generated", output)
         self.assertIn("optical preprocessing: python-generated", output)
         self.assertIn("preprocessing total:", output)
@@ -79,6 +96,7 @@ class BenchmarkExampleTests(unittest.TestCase):
         )
         self.assertIn("numpy", output)
         self.assertIn("numpy-forward", output)
+        self.assertIn("layer optical properties: bundle", output)
         self.assertIn("geometry preprocessing: python-generated", output)
         self.assertIn("optical preprocessing: python-generated", output)
         self.assertIn("preprocessing total:", output)
@@ -112,6 +130,36 @@ class BenchmarkExampleTests(unittest.TestCase):
         self.assertIn("geometry preprocessing: python-generated", output)
         self.assertIn("optical preprocessing: python-generated", output)
 
+    def test_uv_benchmark_can_generate_layer_optical_properties(self) -> None:
+        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "uv_benchmark_fixture.npz"
+        omitted = {
+            "tau",
+            "omega",
+            "rayleigh_fraction",
+            "aerosol_fraction",
+            "asymm",
+            "scaling",
+            "fo_exact_scatter",
+        }
+        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
+            trimmed = Path(tmpdir) / "uv_component_optics.npz"
+            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
+            arrays.update(
+                self._component_optical_depths(
+                    tau=np.array(data["tau"]),
+                    ssa=np.array(data["omega"]),
+                    rayleigh_fraction=np.array(data["rayleigh_fraction"]),
+                    aerosol_fraction=np.array(data["aerosol_fraction"]),
+                )
+            )
+            np.savez_compressed(trimmed, **arrays)
+            output = self._run_benchmark("benchmark_uv_full_spectrum.py", trimmed)
+        self.assertIn(
+            "layer optical properties: python-generated from component optical depths",
+            output,
+        )
+        self.assertIn("optical preprocessing: python-generated", output)
+
     def test_uv_benchmark_rejects_row_index_wavelengths_for_generated_optics(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "uv_benchmark_fixture.npz"
         omitted = {"asymm", "scaling", "fo_exact_scatter", "aerosol_interp_fraction"}
@@ -136,6 +184,35 @@ class BenchmarkExampleTests(unittest.TestCase):
             output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
         self.assertIn("optical preprocessing: python-generated", output)
         self.assertIn("emissivity: 1 - albedo", output)
+
+    def test_tir_benchmark_can_generate_layer_optical_properties(self) -> None:
+        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
+        omitted = {
+            "tau_arr",
+            "omega_arr",
+            "rayleigh_fraction",
+            "aerosol_fraction",
+            "asymm_arr",
+            "d2s_scaling",
+        }
+        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
+            trimmed = Path(tmpdir) / "tir_component_optics.npz"
+            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
+            arrays.update(
+                self._component_optical_depths(
+                    tau=np.array(data["tau_arr"]),
+                    ssa=np.array(data["omega_arr"]),
+                    rayleigh_fraction=np.array(data["rayleigh_fraction"]),
+                    aerosol_fraction=np.array(data["aerosol_fraction"]),
+                )
+            )
+            np.savez_compressed(trimmed, **arrays)
+            output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
+        self.assertIn(
+            "layer optical properties: python-generated from component optical depths",
+            output,
+        )
+        self.assertIn("optical preprocessing: python-generated", output)
 
     def test_tir_benchmark_can_use_wavenumber_for_optical_interpolation(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"

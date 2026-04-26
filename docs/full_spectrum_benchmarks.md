@@ -25,15 +25,17 @@ The sweep script also accepts environment overrides such as
 The benchmark table reports:
 
 - `load (s)`: one-time bundle read and slice time, printed in the header
+- `layer optical properties`: one-time generation of `tau`, `ssa`,
+  Rayleigh fraction, and aerosol fractions when component optical depths are
+  present
 - `geometry preprocessing`: one-time generation of geometry-derived inputs
   from the height grid and viewing geometry
 - `optical preprocessing`: one-time generation of `g`, delta-M truncation
   factor, and solar FO scatter terms when physical optical inputs are present
 - `thermal source`: one-time generation of thermal Planck/source inputs from
   temperatures when temperature fields are present
-- `preprocessing total`: one-time derived-input setup before the backend
-  timing table (`geometry + optical` for UV; `geometry + optical + thermal
-  source` for TIR)
+- `preprocessing total`: one-time derived-input setup before the backend timing
+  table
 - `wall (s)`: total backend wall time after bundle load
 - `rt (s)`: solver runtime only
 - `fo (s)`, `2s (s)`: component timings when available
@@ -56,15 +58,18 @@ Use `--output-levels` only when timing profile output. Profile timing is not
 the endpoint performance target because it allocates and returns
 `radiance_profile_*` arrays.
 
-By default, the scripts generate derived optical inputs from physical
-Rayleigh/aerosol fractions when the bundle contains them. Pass
-`--use-dumped-derived-optics` to use stored Fortran-derived `g`, delta-M
-factor, and solar FO scatter terms instead. Older bundles without physical
-optical fields automatically fall back to the stored derived arrays.
+By default, the scripts generate layer optical properties from component
+optical depths when the bundle contains them, then generate derived phase inputs
+from Rayleigh/aerosol fractions. Pass `--use-dumped-derived-optics` to use
+stored Fortran-derived `g`, delta-M factor, and solar FO scatter terms instead.
+Older bundles without physical optical fields automatically fall back to the
+stored derived arrays.
 
 The benchmark loaders read only the arrays needed for the selected mode. With
-physical optical inputs available, the scripts do not load stored
-`asymm`/`scaling`/`fo_exact_scatter` or `asymm_arr`/`d2s_scaling` arrays.
+component optical-depth inputs available, the scripts do not load direct
+`tau`/`omega` arrays. With physical phase inputs available, the scripts do not
+load stored `asymm`/`scaling`/`fo_exact_scatter` or
+`asymm_arr`/`d2s_scaling` arrays.
 
 To enrich a local bundle with physical optical fields from the original
 Fortran text dump:
@@ -88,9 +93,21 @@ Required arrays:
 - `wavelengths`
 - `heights`
 - `user_angle`
+- `albedo`
+
+Provide either direct layer optical inputs or component optical-depth inputs.
+
+Layer optical inputs, direct:
+
 - `tau_arr`
 - `omega_arr`
-- `albedo`
+
+Layer optical inputs, generated:
+
+- `gas_absorption_tau`
+- `rayleigh_scattering_tau`
+- optional `aerosol_extinction_tau` plus exactly one of
+  `aerosol_scattering_tau` or `aerosol_single_scattering_albedo`
 
 Provide either direct thermal source inputs or generated thermal source inputs.
 
@@ -112,8 +129,8 @@ Optional surface input:
 Optical phase inputs, preferred:
 
 - `depol`
-- `rayleigh_fraction`
-- `aerosol_fraction`
+- `rayleigh_fraction` and `aerosol_fraction`, unless generated from component
+  optical depths
 - `aerosol_moments`
 
 Optional optical phase input:
@@ -132,6 +149,11 @@ Legacy derived optical inputs:
 Expected shapes:
 
 - `tau_arr`, `omega_arr`: `(n_wavelengths, n_layers)`
+- `gas_absorption_tau`, `rayleigh_scattering_tau`: `(n_wavelengths, n_layers)`
+- `aerosol_extinction_tau`, `aerosol_scattering_tau`:
+  `(n_wavelengths, n_layers, n_aerosol)`
+- `aerosol_single_scattering_albedo`:
+  `(n_aerosol,)` or `(n_wavelengths, n_layers, n_aerosol)`
 - `depol`, `aerosol_interp_fraction`: `(n_wavelengths,)`
 - `rayleigh_fraction`: `(n_wavelengths, n_layers)`
 - `aerosol_fraction`: `(n_wavelengths, n_layers, n_aerosol)`
@@ -159,10 +181,22 @@ Required arrays:
 - `wavelengths`
 - `user_obsgeom`
 - `heights`
-- `tau`
-- `omega`
 - `albedo`
 - `flux_factor`
+
+Provide either direct layer optical inputs or component optical-depth inputs.
+
+Layer optical inputs, direct:
+
+- `tau`
+- `omega`
+
+Layer optical inputs, generated:
+
+- `gas_absorption_tau`
+- `rayleigh_scattering_tau`
+- optional `aerosol_extinction_tau` plus exactly one of
+  `aerosol_scattering_tau` or `aerosol_single_scattering_albedo`
 
 UV geometry-derived arrays are no longer required. The benchmark generates
 `chapman`, `x0`, `user_stream`, `user_secant`, `azmfac`, `px11`, `pxsq`,
@@ -171,8 +205,8 @@ UV geometry-derived arrays are no longer required. The benchmark generates
 Optical phase inputs, preferred:
 
 - `depol`
-- `rayleigh_fraction`
-- `aerosol_fraction`
+- `rayleigh_fraction` and `aerosol_fraction`, unless generated from component
+  optical depths
 - `aerosol_moments`
 
 Optional optical phase input:
@@ -198,6 +232,11 @@ Optional arrays:
 Expected shapes:
 
 - `tau`, `omega`: `(n_wavelengths, n_layers)`
+- `gas_absorption_tau`, `rayleigh_scattering_tau`: `(n_wavelengths, n_layers)`
+- `aerosol_extinction_tau`, `aerosol_scattering_tau`:
+  `(n_wavelengths, n_layers, n_aerosol)`
+- `aerosol_single_scattering_albedo`:
+  `(n_aerosol,)` or `(n_wavelengths, n_layers, n_aerosol)`
 - `depol`, `aerosol_interp_fraction`: `(n_wavelengths,)`
 - `rayleigh_fraction`: `(n_wavelengths, n_layers)`
 - `aerosol_fraction`: `(n_wavelengths, n_layers, n_aerosol)`
