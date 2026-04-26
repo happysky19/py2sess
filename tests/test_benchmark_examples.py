@@ -16,7 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BenchmarkExampleTests(unittest.TestCase):
-    def _run_benchmark(self, script: str, fixture: str | Path) -> str:
+    def _run_benchmark_process(
+        self, script: str, fixture: str | Path
+    ) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src")
         backend = "both" if has_torch() else "numpy"
@@ -40,7 +42,7 @@ class BenchmarkExampleTests(unittest.TestCase):
             "--torch-threads",
             "1",
         ]
-        result = subprocess.run(
+        return subprocess.run(
             command,
             cwd=ROOT,
             env=env,
@@ -49,6 +51,9 @@ class BenchmarkExampleTests(unittest.TestCase):
             timeout=90,
             check=False,
         )
+
+    def _run_benchmark(self, script: str, fixture: str | Path) -> str:
+        result = self._run_benchmark_process(script, fixture)
         if result.returncode != 0:
             self.fail(f"{script} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
         return result.stdout
@@ -103,6 +108,18 @@ class BenchmarkExampleTests(unittest.TestCase):
             output = self._run_benchmark("benchmark_uv_full_spectrum.py", trimmed)
         self.assertIn("geometry preprocessing: python-generated", output)
         self.assertIn("optical preprocessing: python-generated", output)
+
+    def test_uv_benchmark_rejects_row_index_wavelengths_for_generated_optics(self) -> None:
+        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "uv_benchmark_fixture.npz"
+        omitted = {"asymm", "scaling", "fo_exact_scatter", "aerosol_interp_fraction"}
+        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
+            trimmed = Path(tmpdir) / "uv_row_index_wavelengths.npz"
+            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
+            arrays["wavelengths"] = np.arange(1, data["wavelengths"].size + 1, dtype=float)
+            np.savez_compressed(trimmed, **arrays)
+            result = self._run_benchmark_process("benchmark_uv_full_spectrum.py", trimmed)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("physical wavelengths", result.stderr)
 
     def test_tir_benchmark_does_not_require_dumped_optics(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"

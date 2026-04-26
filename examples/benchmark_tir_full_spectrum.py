@@ -13,6 +13,7 @@ from _full_spectrum_benchmark_common import (
     BenchmarkRow,
     bundle_keys,
     load_bundle,
+    looks_like_row_index,
     print_problem_header,
     print_rows,
     recommended_chunk_size,
@@ -86,14 +87,6 @@ def _select_optical_keys(
     return _TIR_DUMPED_OPTICS_KEYS
 
 
-def _looks_like_row_index(values: np.ndarray) -> bool:
-    grid = np.asarray(values, dtype=float)
-    if grid.ndim != 1 or grid.size < 2:
-        return False
-    row_numbers = np.arange(1, grid.size + 1, dtype=float)
-    return np.allclose(grid, row_numbers, rtol=0.0, atol=1.0e-12)
-
-
 def _positive_coordinate(name: str, values: np.ndarray) -> np.ndarray:
     coordinate = np.asarray(values, dtype=float)
     if not np.all(np.isfinite(coordinate)):
@@ -109,15 +102,15 @@ def _tir_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndar
 
     wavelengths = np.asarray(bundle["wavelengths"], dtype=float)
     coordinate_name = "wavelengths"
-    if "wavelength_microns" in bundle and _looks_like_row_index(wavelengths):
+    if "wavelength_microns" in bundle and looks_like_row_index(wavelengths):
         wavelengths = _positive_coordinate("wavelength_microns", bundle["wavelength_microns"])
         coordinate_name = "wavelength_microns"
-    elif "wavenumber_cm_inv" in bundle and _looks_like_row_index(wavelengths):
+    elif "wavenumber_cm_inv" in bundle and looks_like_row_index(wavelengths):
         wavenumber = _positive_coordinate("wavenumber_cm_inv", bundle["wavenumber_cm_inv"])
         wavelengths = 10000.0 / wavenumber
         coordinate_name = "wavenumber_cm_inv"
 
-    if _looks_like_row_index(wavelengths):
+    if looks_like_row_index(wavelengths):
         raise ValueError(
             "TIR aerosol interpolation requires aerosol_interp_fraction or a "
             "physical spectral coordinate when wavelengths contains row indices"

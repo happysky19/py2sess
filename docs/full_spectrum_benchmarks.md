@@ -171,7 +171,9 @@ Optical phase inputs, preferred:
 Optional optical phase input:
 
 - `aerosol_interp_fraction`; when omitted, the UV benchmark derives it from
-  `wavelengths` using the Fortran reverse endpoint interpolation convention
+  physical `wavelengths` using the Fortran reverse endpoint interpolation
+  convention. Bundles that store row indices in `wavelengths` must provide
+  `aerosol_interp_fraction`.
 
 Legacy derived optical inputs:
 

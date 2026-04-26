@@ -116,6 +116,15 @@ def scalar_value(value: np.ndarray | float | int) -> float:
     return float(array.reshape(-1)[0])
 
 
+def looks_like_row_index(values: np.ndarray) -> bool:
+    """Returns true when a coordinate array is just 1-based row numbers."""
+    grid = np.asarray(values, dtype=float)
+    if grid.ndim != 1 or grid.size < 2:
+        return False
+    row_numbers = np.arange(1, grid.size + 1, dtype=float)
+    return np.allclose(grid, row_numbers, rtol=0.0, atol=1.0e-12)
+
+
 def accuracy_summary(value: np.ndarray, reference: np.ndarray) -> tuple[float, float]:
     """Returns the max absolute diff and max relative diff in percent."""
     abs_diff = float(np.max(np.abs(value - reference)))

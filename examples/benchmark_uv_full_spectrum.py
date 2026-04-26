@@ -13,6 +13,7 @@ from _full_spectrum_benchmark_common import (
     BenchmarkRow,
     bundle_keys,
     load_bundle,
+    looks_like_row_index,
     print_problem_header,
     print_rows,
     recommended_chunk_size,
@@ -81,6 +82,19 @@ def _select_optical_keys(
     return _UV_DUMPED_OPTICS_KEYS
 
 
+def _uv_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndarray, str]:
+    wavelengths = np.asarray(bundle["wavelengths"], dtype=float)
+    if looks_like_row_index(wavelengths):
+        raise ValueError(
+            "UV aerosol interpolation requires aerosol_interp_fraction or physical "
+            "wavelengths when wavelengths contains row indices"
+        )
+    return (
+        aerosol_interp_fraction(wavelengths, reverse=True),
+        "python-generated (aerosol interpolation from wavelengths)",
+    )
+
+
 def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], float]:
     start = time.perf_counter()
     geoms = np.asarray(bundle["user_obsgeom"], dtype=float)
@@ -142,8 +156,7 @@ def _prepare_optics(
         fac = bundle["aerosol_interp_fraction"]
         mode = "python-generated"
     else:
-        fac = aerosol_interp_fraction(bundle["wavelengths"], reverse=True)
-        mode = "python-generated (aerosol interpolation from wavelengths)"
+        fac, mode = _uv_aerosol_interp_fraction(bundle)
 
     optics = build_two_stream_phase_inputs(
         ssa=bundle["omega"],
