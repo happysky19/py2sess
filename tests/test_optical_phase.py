@@ -138,12 +138,12 @@ class OpticalPhaseFormulaTests(unittest.TestCase):
         aerosol_moments[:, 0, :] = 1.0
         fac = np.array([0.25])
 
-        with self.assertRaisesRegex(ValueError, "not sum above 1"):
+        with self.assertRaisesRegex(ValueError, "sum to 1"):
             build_two_stream_phase_inputs(
                 ssa=ssa,
                 depol=depol,
-                rayleigh_fraction=np.array([[0.8, 0.8]]),
-                aerosol_fraction=np.array([[[0.5], [0.5]]]),
+                rayleigh_fraction=np.array([[0.5, 0.5]]),
+                aerosol_fraction=np.array([[[0.25], [0.25]]]),
                 aerosol_moments=aerosol_moments,
                 aerosol_interp_fraction=fac,
             )
@@ -171,12 +171,12 @@ class OpticalPhaseFormulaTests(unittest.TestCase):
         aerosol_moments = torch.zeros((2, 3, 1), dtype=torch.float64)
         aerosol_moments[:, 0, :] = 1.0
 
-        with self.assertRaisesRegex(ValueError, "not sum above 1"):
+        with self.assertRaisesRegex(ValueError, "sum to 1"):
             build_two_stream_phase_inputs_torch(
                 ssa=ssa,
                 depol=depol,
-                rayleigh_fraction=torch.tensor([[0.8, 0.8]], dtype=torch.float64),
-                aerosol_fraction=torch.tensor([[[0.5], [0.5]]], dtype=torch.float64),
+                rayleigh_fraction=torch.tensor([[0.5, 0.5]], dtype=torch.float64),
+                aerosol_fraction=torch.tensor([[[0.25], [0.25]]], dtype=torch.float64),
                 aerosol_moments=aerosol_moments,
                 aerosol_interp_fraction=torch.tensor([0.25], dtype=torch.float64),
             )
@@ -319,11 +319,11 @@ class OpticalPhaseFixtureTests(unittest.TestCase):
             build_two_stream_phase_inputs_torch,
         )
 
-        rayleigh_fraction = torch.tensor([[0.25, 0.5]], dtype=torch.float64)
         fac = torch.tensor([0.25], dtype=torch.float64)
         angles = torch.tensor([40.0, 10.0, 30.0], dtype=torch.float64)
 
         def objective(ssa, depol, aerosol_fraction, aerosol_moments):
+            rayleigh_fraction = 1.0 - aerosol_fraction.sum(dim=-1)
             phase = build_two_stream_phase_inputs_torch(
                 ssa=ssa,
                 depol=depol,

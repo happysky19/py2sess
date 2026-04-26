@@ -115,8 +115,12 @@ def _validate_phase_fractions(*, ssa, rayleigh_fraction, aerosol_fraction) -> No
     if bool((rayleigh_fraction < -tol).any()) or bool((aerosol_fraction < -tol).any()):
         raise ValueError("rayleigh_fraction and aerosol_fraction must be nonnegative")
     fraction_sum = rayleigh_fraction + aerosol_fraction.sum(dim=-1)
-    if bool((fraction_sum > 1.0 + _FRACTION_SUM_TOL).any()):
-        raise ValueError("rayleigh_fraction and aerosol_fraction must not sum above 1")
+    expected = torch.where(ssa > tol, torch.ones_like(ssa), torch.zeros_like(ssa))
+    if bool((torch.abs(fraction_sum - expected) > _FRACTION_SUM_TOL).any()):
+        raise ValueError(
+            "rayleigh_fraction and aerosol_fraction must sum to 1 where ssa > 0 "
+            "and 0 where ssa == 0"
+        )
 
 
 def _aerosol_phase_endpoints(moments, cos_scatter):

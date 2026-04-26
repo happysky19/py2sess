@@ -79,8 +79,12 @@ def _validate_phase_fractions(
     if np.any(rayleigh_fraction < -_FRACTION_TOL) or np.any(aerosol_fraction < -_FRACTION_TOL):
         raise ValueError("rayleigh_fraction and aerosol_fraction must be nonnegative")
     fraction_sum = rayleigh_fraction + np.sum(aerosol_fraction, axis=-1)
-    if np.any(fraction_sum > 1.0 + _FRACTION_SUM_TOL):
-        raise ValueError("rayleigh_fraction and aerosol_fraction must not sum above 1")
+    expected = np.where(ssa > _FRACTION_TOL, 1.0, 0.0)
+    if np.any(np.abs(fraction_sum - expected) > _FRACTION_SUM_TOL):
+        raise ValueError(
+            "rayleigh_fraction and aerosol_fraction must sum to 1 where ssa > 0 "
+            "and 0 where ssa == 0"
+        )
 
 
 def _aerosol_phase_endpoints(moments: np.ndarray, cos_scatter: np.ndarray) -> np.ndarray:
