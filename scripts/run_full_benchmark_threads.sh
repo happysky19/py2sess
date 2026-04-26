@@ -19,6 +19,8 @@ Environment:
                         Set to 1 to bypass Python optical preprocessing
   USE_DUMPED_THERMAL_SOURCE=0
                         Set to 1 to bypass TIR temperature-source generation
+  REQUIRE_PYTHON_GENERATED_INPUTS=0
+                        Set to 1 to fail on dumped/direct RT input fallback
 USAGE
 }
 
@@ -71,6 +73,10 @@ fi
 
 if [[ "${USE_DUMPED_DERIVED_OPTICS:-0}" == "1" ]]; then
   common_args+=(--use-dumped-derived-optics)
+fi
+
+if [[ "${REQUIRE_PYTHON_GENERATED_INPUTS:-0}" == "1" ]]; then
+  common_args+=(--require-python-generated-inputs)
 fi
 
 run_case() {
