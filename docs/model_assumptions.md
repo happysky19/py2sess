@@ -15,11 +15,13 @@ them explicitly.
 | `n_moments` / `fo_n_moments` | Defaults to `5000`; `0` means isotropic phase, negative values are rejected. The default HG fallback uses the closed-form phase function for any positive value; explicit phase moments remain a separate preprocessing path. | FO phase-function control |
 | `delta_m_truncation_factor` | Defaults to the differentiable HG fallback `g**2`; `py2sess.optical.phase` can derive the mixed Rayleigh/aerosol Fortran value from phase-moment inputs. | Python-generated unless explicit |
 | `fo_scatter_term` | Solar FO builds a differentiable HG term from `ssa`, `g`, geometry, and `delta_m_truncation_factor` when omitted; `py2sess.optical.phase` can derive the mixed Rayleigh/aerosol Fortran term from phase-moment inputs. | Python-generated unless explicit |
+| Layer optical properties | `py2sess.optical.properties` can combine component optical depths into `tau`, `ssa`, Rayleigh scattering fraction, and aerosol scattering fractions. | Python-generated when component optical depths exist |
 | BRDF and surface leaving | Disabled unless `brdf_surface` or `surface_leaving` options and matching coefficient dictionaries are provided. | Explicit surface supplements |
 | Thermal source terms | Thermal RT requires Planck values. Benchmark bundles may provide `thermal_bb_input`/`surfbb` directly, or provide temperatures plus one spectral coordinate so Python can generate them. | Python-generated when physical inputs exist |
 | Thermal surface terms | `emissivity` and `albedo` are independent inputs. Benchmark bundles use explicit `emissivity` when available and fall back to `1 - albedo` only for older bundles. | Caller-controlled convention |
 
-Known limitation: the helper now covers the RT-adjacent phase mixing step, but
-not the full raw CreateProps/GEOCAPE optical-property pipeline. Gas optical
-depths, aerosol fractions, Rayleigh fractions, and endpoint aerosol moments
-still need to come from an upstream optical-property provider.
+Known limitation: Python helpers now cover component optical-depth mixing and
+RT-adjacent phase mixing, but not the full raw CreateProps/GEOCAPE
+optical-property pipeline. Gas cross sections, Rayleigh extinction,
+aerosol microphysics, and endpoint aerosol moments still need to come from an
+upstream optical-property provider.

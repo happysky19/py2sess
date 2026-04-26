@@ -21,6 +21,8 @@ from .phase_torch import (
     build_two_stream_phase_inputs_torch,
     ssa_from_optical_depth_torch,
 )
+from .properties import LayerOpticalProperties, build_layer_optical_properties
+from .properties_torch import LayerOpticalPropertiesTorch, build_layer_optical_properties_torch
 from .planck import (
     ThermalSourceInputs,
     planck_radiance_wavelength,
@@ -55,6 +57,10 @@ __all__ = [
     "build_two_stream_phase_inputs_torch",
     "ssa_from_optical_depth",
     "ssa_from_optical_depth_torch",
+    "LayerOpticalProperties",
+    "LayerOpticalPropertiesTorch",
+    "build_layer_optical_properties",
+    "build_layer_optical_properties_torch",
     "ThermalSourceInputs",
     "ThermalSourceTorchInputs",
     "planck_radiance_wavelength",

@@ -27,9 +27,10 @@ Current intended cases:
 
 Known gaps:
 
-- Mixed Rayleigh/aerosol phase preprocessing is not fully Python-generated yet;
-  fixture-derived truncation factors and FO scatter terms remain valid for
-  Fortran parity cases.
+- Raw optical-property generation is not complete. Python helpers can combine
+  component optical depths and phase-mixing inputs, but gas spectroscopy,
+  aerosol microphysics, and endpoint aerosol moments still need an upstream
+  optical-property provider.
 - Thermal scattering gradients are correct but can be slow because the torch
   path uses a dense BVP fallback when `ssa` or `g` require gradients.
 - No instrument model is included yet: no spectral response convolution,

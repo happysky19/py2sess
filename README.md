@@ -111,6 +111,10 @@ For mixed Rayleigh/aerosol phase inputs, `py2sess.optical.phase` can generate
 `g`, `delta_m_truncation_factor`, and solar `fo_scatter_term` from
 Rayleigh/aerosol fractions and endpoint aerosol moments.
 
+If component optical depths are available, `py2sess.optical.properties` can
+derive `tau`, `ssa`, Rayleigh fraction, and aerosol fractions before the phase
+step. It does not compute gas spectroscopy or aerosol microphysics.
+
 Result names:
 
 - `result.radiance`: preferred total radiance
