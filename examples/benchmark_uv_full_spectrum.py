@@ -281,7 +281,6 @@ def benchmark_numpy(
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=rt_seconds,
-        setup_seconds=wall_seconds - rt_seconds,
         fo_seconds=fo_seconds,
         two_stream_seconds=two_stream_seconds,
         max_abs_diff=max_abs_diff,
@@ -336,7 +335,6 @@ def benchmark_numpy_forward(
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=wall_seconds,
-        setup_seconds=0.0,
         max_abs_diff=max_abs_diff,
         max_rel_diff_pct=max_rel_diff_pct,
     )
@@ -450,7 +448,6 @@ def benchmark_torch(
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=rt_seconds,
-        setup_seconds=wall_seconds - rt_seconds,
         fo_seconds=fo_seconds,
         two_stream_seconds=two_stream_seconds,
         max_abs_diff=max_abs_diff,
@@ -527,7 +524,6 @@ def benchmark_torch_forward(
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=wall_seconds,
-        setup_seconds=0.0,
         max_abs_diff=max_abs_diff,
         max_rel_diff_pct=max_rel_diff_pct,
     )
@@ -594,12 +590,13 @@ def main() -> None:
         bundle["ref_total"] = bundle["ref_total"][:wavelengths]
     if "stream_value" not in bundle:
         bundle["stream_value"] = np.array([1.0 / np.sqrt(3.0)], dtype=float)
+    load_seconds = time.perf_counter() - load_start
+
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
     )
-    load_seconds = time.perf_counter() - load_start
 
     print_problem_header(
         title="UV full-spectrum benchmark",
@@ -609,12 +606,14 @@ def main() -> None:
         load_seconds=load_seconds,
         note=(
             "This example benchmarks the UV FO + 2S full-spectrum path. "
-            "wall time (s) excludes bundle load but includes backend-local setup such as "
-            "PyTorch warmup, tensor conversion, and checksum reduction."
+            "wall time (s) excludes bundle load and printed preprocessing, but includes "
+            "backend-local overhead such as PyTorch warmup, tensor conversion, and "
+            "checksum reduction."
         ),
     )
     print(f"  geometry preprocessing: python-generated, {geometry_seconds:.3f} s")
     print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
+    print(f"  preprocessing total: {geometry_seconds + optical_seconds:.3f} s (geometry + optical)")
 
     rows: list[BenchmarkRow] = []
     if args.backend in {"numpy", "both"}:

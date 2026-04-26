@@ -219,6 +219,21 @@ def _prepare_surface(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarra
     return prepared, "1 - albedo"
 
 
+def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], float]:
+    start = time.perf_counter()
+    heights = np.asarray(bundle["heights"], dtype=float)
+    user_angle = scalar_value(bundle["user_angle"])
+    prepared = dict(bundle)
+    prepared["fo_geometry"] = precompute_fo_thermal_geometry_numpy(
+        heights=heights,
+        user_angle_degrees=user_angle,
+        earth_radius=6371.0,
+        nfine=3,
+    )
+    prepared["user_stream"] = np.array([np.cos(np.deg2rad(user_angle))], dtype=float)
+    return prepared, time.perf_counter() - start
+
+
 def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
     """Returns one spectral chunk from a TIR benchmark bundle."""
     chunk = {
@@ -247,13 +262,8 @@ def benchmark_numpy(
     wall_start = time.perf_counter()
     heights = np.asarray(bundle["heights"], dtype=float)
     user_angle = scalar_value(bundle["user_angle"])
-    geometry = precompute_fo_thermal_geometry_numpy(
-        heights=heights,
-        user_angle_degrees=user_angle,
-        earth_radius=6371.0,
-        nfine=3,
-    )
-    user_stream = float(np.cos(np.deg2rad(user_angle)))
+    geometry = bundle["fo_geometry"]
+    user_stream = scalar_value(bundle["user_stream"])
     fo_seconds = 0.0
     two_stream_seconds = 0.0
     checksum = 0.0
@@ -316,7 +326,6 @@ def benchmark_numpy(
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=rt_seconds,
-        setup_seconds=wall_seconds - rt_seconds,
         fo_seconds=fo_seconds,
         two_stream_seconds=two_stream_seconds,
         max_abs_diff=max_abs_diff,
@@ -377,7 +386,6 @@ def benchmark_numpy_forward(
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=wall_seconds,
-        setup_seconds=0.0,
         max_abs_diff=max_abs_diff,
         max_rel_diff_pct=max_rel_diff_pct,
     )
@@ -414,13 +422,8 @@ def benchmark_torch(
 
     heights = np.asarray(bundle["heights"], dtype=float)
     user_angle = scalar_value(bundle["user_angle"])
-    geometry = precompute_fo_thermal_geometry_numpy(
-        heights=heights,
-        user_angle_degrees=user_angle,
-        earth_radius=6371.0,
-        nfine=3,
-    )
-    user_stream = float(np.cos(np.deg2rad(user_angle)))
+    geometry = bundle["fo_geometry"]
+    user_stream = scalar_value(bundle["user_stream"])
     fo_seconds = 0.0
     two_stream_seconds = 0.0
     checksum = 0.0
@@ -498,7 +501,6 @@ def benchmark_torch(
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=rt_seconds,
-        setup_seconds=wall_seconds - rt_seconds,
         fo_seconds=fo_seconds,
         two_stream_seconds=two_stream_seconds,
         max_abs_diff=max_abs_diff,
@@ -580,7 +582,6 @@ def benchmark_torch_forward(
         chunk_size=chunk_size,
         wall_seconds=wall_seconds,
         rt_seconds=wall_seconds,
-        setup_seconds=0.0,
         max_abs_diff=max_abs_diff,
         max_rel_diff_pct=max_rel_diff_pct,
     )
@@ -660,6 +661,9 @@ def main() -> None:
             bundle[key] = bundle[key][:wavelengths]
     if "ref_total" in bundle:
         bundle["ref_total"] = bundle["ref_total"][:wavelengths]
+    load_seconds = time.perf_counter() - load_start
+
+    bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
@@ -669,7 +673,6 @@ def main() -> None:
         use_dumped_thermal_source=args.use_dumped_thermal_source,
     )
     bundle, emissivity_mode = _prepare_surface(bundle)
-    load_seconds = time.perf_counter() - load_start
 
     print_problem_header(
         title="TIR full-spectrum benchmark",
@@ -678,13 +681,19 @@ def main() -> None:
         layers=int(bundle["tau_arr"].shape[1]),
         load_seconds=load_seconds,
         note=(
-            "RT time is FO + 2S. wall time (s) excludes bundle load but includes "
-            "backend-local setup such as FO geometry precompute, tensor conversion, "
-            "PyTorch warmup, and checksum reduction."
+            "RT time is FO + 2S. wall time (s) excludes bundle load and printed "
+            "preprocessing, but includes backend-local overhead such as tensor "
+            "conversion, PyTorch warmup, and checksum reduction."
         ),
     )
+    print(f"  geometry preprocessing: python-generated, {geometry_seconds:.3f} s")
     print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
     print(f"  thermal source: {source_mode}, {source_seconds:.3f} s")
+    print(
+        "  preprocessing total: "
+        f"{geometry_seconds + optical_seconds + source_seconds:.3f} s "
+        "(geometry + optical + thermal source)"
+    )
     print(f"  emissivity: {emissivity_mode}")
 
     rows: list[BenchmarkRow] = []

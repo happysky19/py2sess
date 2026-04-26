@@ -25,15 +25,17 @@ The sweep script also accepts environment overrides such as
 The benchmark table reports:
 
 - `load (s)`: one-time bundle read and slice time, printed in the header
-- `geometry preprocessing`: one-time UV generation of Chapman and auxiliary
-  angular factors from `heights`, `user_obsgeom`, and `stream_value`
+- `geometry preprocessing`: one-time generation of geometry-derived inputs
+  from the height grid and viewing geometry
 - `optical preprocessing`: one-time generation of `g`, delta-M truncation
   factor, and solar FO scatter terms when physical optical inputs are present
 - `thermal source`: one-time generation of thermal Planck/source inputs from
   temperatures when temperature fields are present
+- `preprocessing total`: one-time derived-input setup before the backend
+  timing table (`geometry + optical` for UV; `geometry + optical + thermal
+  source` for TIR)
 - `wall (s)`: total backend wall time after bundle load
 - `rt (s)`: solver runtime only
-- `setup (s)`: `wall (s) - rt (s)`
 - `fo (s)`, `2s (s)`: component timings when available
 - `#wavelength/s`: spectral throughput based on `rt (s)`
 - `chunk`: low-level chunk size or public `.forward()` internal endpoint chunk size
@@ -45,9 +47,10 @@ rows (`numpy-forward`, `torch-*-forward`). The low-level rows keep separate
 `fo (s)` and `2s (s)` timings. The public rows show the end-to-end
 `TwoStreamEss.forward()` endpoint path.
 
-By design, `wall (s)` excludes opening the `.npz` bundle itself. It does
-include backend-local setup within the benchmark path, such as geometry
-precompute, PyTorch warmup, tensor conversion, and checksum reduction.
+By design, `wall (s)` excludes opening the `.npz` bundle and the printed
+preprocessing steps. It still includes backend-local overhead within the
+benchmark row, such as PyTorch warmup, tensor conversion, and checksum
+reduction.
 
 Use `--output-levels` only when timing profile output. Profile timing is not
 the endpoint performance target because it allocates and returns

@@ -67,6 +67,7 @@ class BenchmarkExampleTests(unittest.TestCase):
         self.assertIn("numpy-forward", output)
         self.assertIn("geometry preprocessing: python-generated", output)
         self.assertIn("optical preprocessing: python-generated", output)
+        self.assertIn("preprocessing total:", output)
         if has_torch():
             self.assertIn("torch-cpu-float64-forward", output)
         self.assertIn("max abs diff", output)
@@ -78,7 +79,9 @@ class BenchmarkExampleTests(unittest.TestCase):
         )
         self.assertIn("numpy", output)
         self.assertIn("numpy-forward", output)
+        self.assertIn("geometry preprocessing: python-generated", output)
         self.assertIn("optical preprocessing: python-generated", output)
+        self.assertIn("preprocessing total:", output)
         self.assertIn("emissivity: bundle", output)
         if has_torch():
             self.assertIn("torch-cpu-float64-forward", output)

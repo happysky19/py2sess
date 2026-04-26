@@ -18,7 +18,6 @@ class BenchmarkRow:
     chunk_size: int
     wall_seconds: float
     rt_seconds: float
-    setup_seconds: float
     fo_seconds: float | None = None
     two_stream_seconds: float | None = None
     max_abs_diff: float | None = None
@@ -140,7 +139,7 @@ def print_rows(rows: list[BenchmarkRow]) -> None:
     )
     backend_width = max(18, *(len(row.backend) for row in rows))
     header = (
-        f"{'backend':<{backend_width}} {'wall (s)':>10} {'rt (s)':>10} {'setup (s)':>10} "
+        f"{'backend':<{backend_width}} {'wall (s)':>10} {'rt (s)':>10} "
         f"{'fo (s)':>10} {'2s (s)':>10} {'#wavelength/s':>14} {'chunk':>8}"
     )
     if has_accuracy:
@@ -152,7 +151,6 @@ def print_rows(rows: list[BenchmarkRow]) -> None:
             f"{row.backend:<{backend_width}} "
             f"{row.wall_seconds:10.3f} "
             f"{row.rt_seconds:10.3f} "
-            f"{row.setup_seconds:10.3f} "
             f"{_format_optional(row.fo_seconds)} "
             f"{_format_optional(row.two_stream_seconds)} "
             f"{row.rows_per_second_rt:14.0f} "
