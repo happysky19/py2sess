@@ -8,6 +8,9 @@ import numpy as np
 
 from .delta_m import validate_delta_m_truncation_factor
 
+_FRACTION_TOL = 1.0e-10
+_FRACTION_SUM_TOL = 1.0e-5
+
 
 @dataclass(frozen=True)
 class TwoStreamPhaseInputs:
@@ -65,6 +68,21 @@ def _aerosol_moments_array(aerosol_moments) -> np.ndarray:
     return moments
 
 
+def _validate_phase_fractions(
+    *,
+    ssa: np.ndarray,
+    rayleigh_fraction: np.ndarray,
+    aerosol_fraction: np.ndarray,
+) -> None:
+    if np.any((ssa < -_FRACTION_TOL) | (ssa > 1.0 + _FRACTION_TOL)):
+        raise ValueError("ssa must satisfy 0 <= ssa <= 1")
+    if np.any(rayleigh_fraction < -_FRACTION_TOL) or np.any(aerosol_fraction < -_FRACTION_TOL):
+        raise ValueError("rayleigh_fraction and aerosol_fraction must be nonnegative")
+    fraction_sum = rayleigh_fraction + np.sum(aerosol_fraction, axis=-1)
+    if np.any(fraction_sum > 1.0 + _FRACTION_SUM_TOL):
+        raise ValueError("rayleigh_fraction and aerosol_fraction must not sum above 1")
+
+
 def _aerosol_phase_endpoints(moments: np.ndarray, cos_scatter: np.ndarray) -> np.ndarray:
     endpoint_phase = np.zeros((2, moments.shape[2], cos_scatter.size), dtype=float)
     p_lm2 = np.ones_like(cos_scatter, dtype=float)
@@ -120,6 +138,11 @@ def build_two_stream_phase_inputs(
     if moments.shape[2] != aer_frac.shape[-1]:
         raise ValueError("aerosol_fraction and aerosol_moments disagree on naerosol")
     aer_frac_b = np.broadcast_to(aer_frac, ssa_b.shape + (moments.shape[2],))
+    _validate_phase_fractions(
+        ssa=ssa_b,
+        rayleigh_fraction=ray_b,
+        aerosol_fraction=aer_frac_b,
+    )
 
     ray2mom = (1.0 - depol_b) / (2.0 + depol_b)
     moment1 = _aerosol_moment(
@@ -203,6 +226,11 @@ def build_solar_fo_scatter_term(
     if moments.shape[2] != aer_frac.shape[-1]:
         raise ValueError("aerosol_fraction and aerosol_moments disagree on naerosol")
     aer_frac_b = np.broadcast_to(aer_frac, ssa_b.shape + (moments.shape[2],))
+    _validate_phase_fractions(
+        ssa=ssa_b,
+        rayleigh_fraction=ray_b,
+        aerosol_fraction=aer_frac_b,
+    )
     aerosol_phase_endpoints = _aerosol_phase_endpoints(moments, cos_scatter)
     aerosol_phase = aerosol_phase_endpoints[0] + fac_b[..., None, None] * (
         aerosol_phase_endpoints[1] - aerosol_phase_endpoints[0]

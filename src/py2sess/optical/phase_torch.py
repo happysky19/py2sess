@@ -10,6 +10,10 @@ from .delta_m_torch import validate_delta_m_truncation_factor_torch
 
 torch = None
 
+_FRACTION_TOL_FLOAT64 = 1.0e-10
+_FRACTION_TOL_FLOAT32 = 1.0e-5
+_FRACTION_SUM_TOL = 1.0e-5
+
 
 @dataclass(frozen=True)
 class TwoStreamPhaseTorchInputs:
@@ -99,6 +103,22 @@ def _aerosol_moments(aerosol_moments, *, dtype, device):
     return moments
 
 
+def _fraction_tolerance(dtype) -> float:
+    torch_module = _require_torch()
+    return _FRACTION_TOL_FLOAT32 if dtype == torch_module.float32 else _FRACTION_TOL_FLOAT64
+
+
+def _validate_phase_fractions(*, ssa, rayleigh_fraction, aerosol_fraction) -> None:
+    tol = _fraction_tolerance(ssa.dtype)
+    if bool(((ssa < -tol) | (ssa > 1.0 + tol)).any()):
+        raise ValueError("ssa must satisfy 0 <= ssa <= 1")
+    if bool((rayleigh_fraction < -tol).any()) or bool((aerosol_fraction < -tol).any()):
+        raise ValueError("rayleigh_fraction and aerosol_fraction must be nonnegative")
+    fraction_sum = rayleigh_fraction + aerosol_fraction.sum(dim=-1)
+    if bool((fraction_sum > 1.0 + _FRACTION_SUM_TOL).any()):
+        raise ValueError("rayleigh_fraction and aerosol_fraction must not sum above 1")
+
+
 def _aerosol_phase_endpoints(moments, cos_scatter):
     p_lm2 = torch.ones_like(cos_scatter)
     endpoint_phase = moments[:, 0, :, None] * p_lm2
@@ -167,6 +187,11 @@ def build_two_stream_phase_inputs_torch(
     if int(moments.shape[2]) != int(aer_frac.shape[-1]):
         raise ValueError("aerosol_fraction and aerosol_moments disagree on naerosol")
     aer_frac_b = torch.broadcast_to(aer_frac, tuple(ssa_b.shape) + (int(moments.shape[2]),))
+    _validate_phase_fractions(
+        ssa=ssa_b,
+        rayleigh_fraction=ray_b,
+        aerosol_fraction=aer_frac_b,
+    )
 
     ray2mom = (1.0 - depol_b) / (2.0 + depol_b)
     moment1 = _aerosol_moment(
@@ -267,6 +292,11 @@ def build_solar_fo_scatter_term_torch(
     if int(moments.shape[2]) != int(aer_frac.shape[-1]):
         raise ValueError("aerosol_fraction and aerosol_moments disagree on naerosol")
     aer_frac_b = torch.broadcast_to(aer_frac, tuple(ssa_b.shape) + (int(moments.shape[2]),))
+    _validate_phase_fractions(
+        ssa=ssa_b,
+        rayleigh_fraction=ray_b,
+        aerosol_fraction=aer_frac_b,
+    )
     aerosol_phase_endpoints = _aerosol_phase_endpoints(moments, cos_scatter)
     aerosol_phase = aerosol_phase_endpoints[0] + fac_b[..., None, None] * (
         aerosol_phase_endpoints[1] - aerosol_phase_endpoints[0]

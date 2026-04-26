@@ -131,6 +131,56 @@ class OpticalPhaseFormulaTests(unittest.TestCase):
         expected = phase_total * ssa[0] / (1.0 - phase.delta_m_truncation_factor[0] * ssa[0])
         np.testing.assert_allclose(scatter, expected[None, :])
 
+    def test_phase_inputs_reject_nonphysical_fractions(self) -> None:
+        ssa = np.array([[0.5, 0.7]])
+        depol = np.array([0.2])
+        aerosol_moments = np.zeros((2, 3, 1))
+        aerosol_moments[:, 0, :] = 1.0
+        fac = np.array([0.25])
+
+        with self.assertRaisesRegex(ValueError, "not sum above 1"):
+            build_two_stream_phase_inputs(
+                ssa=ssa,
+                depol=depol,
+                rayleigh_fraction=np.array([[0.8, 0.8]]),
+                aerosol_fraction=np.array([[[0.5], [0.5]]]),
+                aerosol_moments=aerosol_moments,
+                aerosol_interp_fraction=fac,
+            )
+
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            build_solar_fo_scatter_term(
+                ssa=ssa,
+                depol=depol,
+                rayleigh_fraction=np.array([[1.0, 1.0]]),
+                aerosol_fraction=np.array([[[-0.1], [0.0]]]),
+                aerosol_moments=aerosol_moments,
+                aerosol_interp_fraction=fac,
+                angles=np.array([40.0, 10.0, 30.0]),
+                delta_m_truncation_factor=np.zeros_like(ssa),
+            )
+
+    @unittest.skipUnless(has_torch(), "torch is not installed")
+    def test_torch_phase_inputs_reject_nonphysical_fractions(self) -> None:
+        import torch
+
+        from py2sess.optical.phase_torch import build_two_stream_phase_inputs_torch
+
+        ssa = torch.tensor([[0.5, 0.7]], dtype=torch.float64)
+        depol = torch.tensor([0.2], dtype=torch.float64)
+        aerosol_moments = torch.zeros((2, 3, 1), dtype=torch.float64)
+        aerosol_moments[:, 0, :] = 1.0
+
+        with self.assertRaisesRegex(ValueError, "not sum above 1"):
+            build_two_stream_phase_inputs_torch(
+                ssa=ssa,
+                depol=depol,
+                rayleigh_fraction=torch.tensor([[0.8, 0.8]], dtype=torch.float64),
+                aerosol_fraction=torch.tensor([[[0.5], [0.5]]], dtype=torch.float64),
+                aerosol_moments=aerosol_moments,
+                aerosol_interp_fraction=torch.tensor([0.25], dtype=torch.float64),
+            )
+
 
 class OpticalPhaseFixtureTests(unittest.TestCase):
     def test_uv_fixture_optical_preprocessing_matches_fortran_dump(self) -> None:
