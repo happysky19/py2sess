@@ -26,9 +26,8 @@ class BenchmarkExampleTests(unittest.TestCase):
     ) -> dict[str, np.ndarray]:
         scattering_tau = tau * ssa
         return {
-            "gas_absorption_tau": np.maximum(tau - scattering_tau, 0.0),
+            "absorption_tau": np.maximum(tau - scattering_tau, 0.0),
             "rayleigh_scattering_tau": scattering_tau * rayleigh_fraction,
-            "aerosol_extinction_tau": scattering_tau[..., None] * aerosol_fraction,
             "aerosol_scattering_tau": scattering_tau[..., None] * aerosol_fraction,
         }
 

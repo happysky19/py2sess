@@ -586,7 +586,7 @@ def main() -> None:
         label="UV",
     )
     row_count_key = (
-        "gas_absorption_tau" if layer_optical_keys_are_components(layer_optical_keys) else "tau"
+        layer_optical_keys[0] if layer_optical_keys_are_components(layer_optical_keys) else "tau"
     )
     total_rows = int(bundle[row_count_key].shape[0])
     wavelengths = total_rows if args.limit is None else min(int(args.limit), total_rows)

@@ -104,10 +104,13 @@ Layer optical inputs, direct:
 
 Layer optical inputs, generated:
 
-- `gas_absorption_tau`
+- `absorption_tau`; `gas_absorption_tau` is also accepted when the absorption
+  term is specifically gas-only
 - `rayleigh_scattering_tau`
+- optional `aerosol_scattering_tau` for scattering-only aerosol components
 - optional `aerosol_extinction_tau` plus exactly one of
-  `aerosol_scattering_tau` or `aerosol_single_scattering_albedo`
+  `aerosol_scattering_tau` or `aerosol_single_scattering_albedo` for absorbing
+  aerosol components
 
 Provide either direct thermal source inputs or generated thermal source inputs.
 
@@ -149,7 +152,8 @@ Legacy derived optical inputs:
 Expected shapes:
 
 - `tau_arr`, `omega_arr`: `(n_wavelengths, n_layers)`
-- `gas_absorption_tau`, `rayleigh_scattering_tau`: `(n_wavelengths, n_layers)`
+- `absorption_tau` or `gas_absorption_tau`, and `rayleigh_scattering_tau`:
+  `(n_wavelengths, n_layers)`
 - `aerosol_extinction_tau`, `aerosol_scattering_tau`:
   `(n_wavelengths, n_layers, n_aerosol)`
 - `aerosol_single_scattering_albedo`:
@@ -193,10 +197,13 @@ Layer optical inputs, direct:
 
 Layer optical inputs, generated:
 
-- `gas_absorption_tau`
+- `absorption_tau`; `gas_absorption_tau` is also accepted when the absorption
+  term is specifically gas-only
 - `rayleigh_scattering_tau`
+- optional `aerosol_scattering_tau` for scattering-only aerosol components
 - optional `aerosol_extinction_tau` plus exactly one of
-  `aerosol_scattering_tau` or `aerosol_single_scattering_albedo`
+  `aerosol_scattering_tau` or `aerosol_single_scattering_albedo` for absorbing
+  aerosol components
 
 UV geometry-derived arrays are no longer required. The benchmark generates
 `chapman`, `x0`, `user_stream`, `user_secant`, `azmfac`, `px11`, `pxsq`,
@@ -232,7 +239,8 @@ Optional arrays:
 Expected shapes:
 
 - `tau`, `omega`: `(n_wavelengths, n_layers)`
-- `gas_absorption_tau`, `rayleigh_scattering_tau`: `(n_wavelengths, n_layers)`
+- `absorption_tau` or `gas_absorption_tau`, and `rayleigh_scattering_tau`:
+  `(n_wavelengths, n_layers)`
 - `aerosol_extinction_tau`, `aerosol_scattering_tau`:
   `(n_wavelengths, n_layers, n_aerosol)`
 - `aerosol_single_scattering_albedo`:

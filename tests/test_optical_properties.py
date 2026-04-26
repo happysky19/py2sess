@@ -10,7 +10,7 @@ from py2sess.rtsolver.backend import has_torch
 
 class OpticalPropertiesTests(unittest.TestCase):
     def test_builds_tau_ssa_and_scattering_fractions(self) -> None:
-        gas_absorption_tau = np.array([0.1, 0.2])
+        absorption_tau = np.array([0.1, 0.2])
         rayleigh_scattering_tau = np.array([0.3, 0.1])
         aerosol_extinction_tau = np.array(
             [
@@ -21,7 +21,7 @@ class OpticalPropertiesTests(unittest.TestCase):
         aerosol_single_scattering_albedo = np.array([0.75, 0.5])
 
         props = build_layer_optical_properties(
-            gas_absorption_tau=gas_absorption_tau,
+            absorption_tau=absorption_tau,
             rayleigh_scattering_tau=rayleigh_scattering_tau,
             aerosol_extinction_tau=aerosol_extinction_tau,
             aerosol_single_scattering_albedo=aerosol_single_scattering_albedo,
@@ -29,9 +29,7 @@ class OpticalPropertiesTests(unittest.TestCase):
 
         aerosol_scattering_tau = aerosol_extinction_tau * aerosol_single_scattering_albedo
         scattering_tau = rayleigh_scattering_tau + aerosol_scattering_tau.sum(axis=-1)
-        total_tau = (
-            gas_absorption_tau + rayleigh_scattering_tau + aerosol_extinction_tau.sum(axis=-1)
-        )
+        total_tau = absorption_tau + rayleigh_scattering_tau + aerosol_extinction_tau.sum(axis=-1)
         np.testing.assert_allclose(props.tau, total_tau)
         np.testing.assert_allclose(props.ssa, scattering_tau / total_tau)
         np.testing.assert_allclose(
@@ -43,7 +41,7 @@ class OpticalPropertiesTests(unittest.TestCase):
         )
 
     def test_handles_clear_absorbing_layers_safely(self) -> None:
-        props = build_layer_optical_properties(gas_absorption_tau=np.array([0.0, 0.2]))
+        props = build_layer_optical_properties(absorption_tau=np.array([0.0, 0.2]))
         np.testing.assert_allclose(props.tau, np.array([0.0, 0.2]))
         np.testing.assert_allclose(props.ssa, np.array([0.0, 0.0]))
         np.testing.assert_allclose(props.rayleigh_fraction, np.array([0.0, 0.0]))
@@ -71,7 +69,7 @@ class OpticalPropertiesTests(unittest.TestCase):
 
         from py2sess.optical.properties_torch import build_layer_optical_properties_torch
 
-        gas = torch.tensor([0.1, 0.2], dtype=torch.float64, requires_grad=True)
+        absorption = torch.tensor([0.1, 0.2], dtype=torch.float64, requires_grad=True)
         rayleigh = torch.tensor([0.3, 0.1], dtype=torch.float64, requires_grad=True)
         aerosol_extinction = torch.tensor(
             [[0.4, 0.2], [0.5, 0.1]],
@@ -81,13 +79,13 @@ class OpticalPropertiesTests(unittest.TestCase):
         aerosol_ssa = torch.tensor([0.75, 0.5], dtype=torch.float64, requires_grad=True)
 
         torch_props = build_layer_optical_properties_torch(
-            gas_absorption_tau=gas,
+            absorption_tau=absorption,
             rayleigh_scattering_tau=rayleigh,
             aerosol_extinction_tau=aerosol_extinction,
             aerosol_single_scattering_albedo=aerosol_ssa,
         )
         numpy_props = build_layer_optical_properties(
-            gas_absorption_tau=gas.detach().numpy(),
+            absorption_tau=absorption.detach().numpy(),
             rayleigh_scattering_tau=rayleigh.detach().numpy(),
             aerosol_extinction_tau=aerosol_extinction.detach().numpy(),
             aerosol_single_scattering_albedo=aerosol_ssa.detach().numpy(),
@@ -110,10 +108,29 @@ class OpticalPropertiesTests(unittest.TestCase):
             + torch_props.aerosol_fraction.sum()
         )
         objective.backward()
-        for tensor in (gas, rayleigh, aerosol_extinction, aerosol_ssa):
+        for tensor in (absorption, rayleigh, aerosol_extinction, aerosol_ssa):
             self.assertIsNotNone(tensor.grad)
             self.assertTrue(torch.isfinite(tensor.grad).all().item())
             self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)
+
+    def test_scattering_only_aerosol_does_not_require_extinction(self) -> None:
+        props = build_layer_optical_properties(
+            absorption_tau=np.array([0.2]),
+            rayleigh_scattering_tau=np.array([0.3]),
+            aerosol_scattering_tau=np.array([[0.4, 0.1]]),
+        )
+        np.testing.assert_allclose(props.tau, np.array([1.0]))
+        np.testing.assert_allclose(props.ssa, np.array([0.8]))
+        np.testing.assert_allclose(props.rayleigh_fraction, np.array([0.375]))
+        np.testing.assert_allclose(props.aerosol_fraction, np.array([[0.5, 0.125]]))
+
+    def test_rejects_ambiguous_absorption_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only one"):
+            build_layer_optical_properties(
+                absorption_tau=np.array([0.1]),
+                gas_absorption_tau=np.array([0.1]),
+                rayleigh_scattering_tau=np.array([0.2]),
+            )
 
 
 if __name__ == "__main__":

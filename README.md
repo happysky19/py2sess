@@ -113,7 +113,9 @@ Rayleigh/aerosol fractions and endpoint aerosol moments.
 
 If component optical depths are available, `py2sess.optical.properties` can
 derive `tau`, `ssa`, Rayleigh fraction, and aerosol fractions before the phase
-step. It does not compute gas spectroscopy or aerosol microphysics.
+step. Use `absorption_tau` for total non-scattering absorption, or
+`gas_absorption_tau` when that absorption is specifically gas-only. This helper
+does not compute gas spectroscopy or aerosol microphysics.
 
 Result names:
 

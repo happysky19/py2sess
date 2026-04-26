@@ -123,7 +123,8 @@ def _resolve_aerosol_scattering(
 
 def build_layer_optical_properties(
     *,
-    gas_absorption_tau=0.0,
+    absorption_tau=None,
+    gas_absorption_tau=None,
     rayleigh_scattering_tau=0.0,
     aerosol_extinction_tau=None,
     aerosol_scattering_tau=None,
@@ -135,30 +136,41 @@ def build_layer_optical_properties(
     combines already integrated component optical depths into the quantities
     consumed by the RT solver:
 
-    ``tau = gas_absorption_tau + rayleigh_scattering_tau + sum(aerosol_extinction_tau)``
+    ``tau = absorption_tau + rayleigh_scattering_tau + sum(aerosol_extinction_tau)``
 
     ``ssa = (rayleigh_scattering_tau + sum(aerosol_scattering_tau)) / tau``
 
     Fractions are normalized by total scattering optical depth and are zero
     where the layer has no scattering.
     """
-    aerosol_leading = None
+    if absorption_tau is not None and gas_absorption_tau is not None:
+        raise ValueError("pass only one of absorption_tau or gas_absorption_tau")
+    if absorption_tau is None:
+        absorption_tau = 0.0 if gas_absorption_tau is None else gas_absorption_tau
+
     if aerosol_extinction_tau is not None:
         aerosol_ext = np.asarray(aerosol_extinction_tau, dtype=float)
         if aerosol_ext.ndim == 0:
             raise ValueError("aerosol_extinction_tau must include an aerosol axis")
         aerosol_leading = aerosol_ext.shape[:-1]
-    else:
-        if aerosol_scattering_tau is not None or aerosol_single_scattering_albedo is not None:
-            raise ValueError("aerosol scattering inputs require aerosol_extinction_tau")
+    elif aerosol_scattering_tau is not None:
+        aerosol_scat = np.asarray(aerosol_scattering_tau, dtype=float)
+        if aerosol_scat.ndim == 0:
+            raise ValueError("aerosol_scattering_tau must include an aerosol axis")
         aerosol_ext = None
+        aerosol_leading = aerosol_scat.shape[:-1]
+    else:
+        aerosol_ext = None
+        aerosol_leading = None
+        if aerosol_single_scattering_albedo is not None:
+            raise ValueError("aerosol_single_scattering_albedo requires aerosol_extinction_tau")
 
     layer_shape = _resolve_layer_shape(
-        gas_absorption_tau,
+        absorption_tau,
         rayleigh_scattering_tau,
         aerosol_leading,
     )
-    gas_tau = _broadcast_to_shape("gas_absorption_tau", gas_absorption_tau, layer_shape)
+    absorption = _broadcast_to_shape("absorption_tau", absorption_tau, layer_shape)
     ray_tau = _broadcast_to_shape(
         "rayleigh_scattering_tau",
         rayleigh_scattering_tau,
@@ -166,8 +178,16 @@ def build_layer_optical_properties(
     )
 
     if aerosol_ext is None:
-        aerosol_ext_b = np.zeros(layer_shape + (0,), dtype=float)
-        aerosol_scat_b = aerosol_ext_b
+        if aerosol_scattering_tau is None:
+            aerosol_ext_b = np.zeros(layer_shape + (0,), dtype=float)
+            aerosol_scat_b = aerosol_ext_b
+        else:
+            aerosol_scat_b = _aerosol_array(
+                "aerosol_scattering_tau",
+                aerosol_scattering_tau,
+                layer_shape,
+            )
+            aerosol_ext_b = aerosol_scat_b
     else:
         aerosol_ext_b = _aerosol_array(
             "aerosol_extinction_tau",
@@ -181,7 +201,7 @@ def build_layer_optical_properties(
             layer_shape=layer_shape,
         )
 
-    total_tau = gas_tau + ray_tau + np.sum(aerosol_ext_b, axis=-1)
+    total_tau = absorption + ray_tau + np.sum(aerosol_ext_b, axis=-1)
     scattering_tau = ray_tau + np.sum(aerosol_scat_b, axis=-1)
     ssa = ssa_from_optical_depth(total_tau, scattering_tau)
     rayleigh_fraction = ssa_from_optical_depth(scattering_tau, ray_tau)

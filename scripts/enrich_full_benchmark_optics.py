@@ -31,8 +31,43 @@ def _reverse_endpoint_interp_fraction(wavelengths: np.ndarray) -> np.ndarray:
     return (grid[::-1] - grid[0]) / span
 
 
+def _add_rt_equivalent_components(
+    arrays: dict[str, np.ndarray],
+    *,
+    tau_key: str,
+    ssa_key: str,
+) -> None:
+    required = (tau_key, ssa_key, "rayleigh_fraction", "aerosol_fraction")
+    if not all(key in arrays for key in required):
+        return
+    if {"absorption_tau", "rayleigh_scattering_tau", "aerosol_scattering_tau"}.issubset(arrays):
+        return
+
+    tau = np.asarray(arrays[tau_key], dtype=np.float64)
+    ssa = np.asarray(arrays[ssa_key], dtype=np.float64)
+    rayleigh_fraction = np.asarray(arrays["rayleigh_fraction"], dtype=np.float64)
+    aerosol_fraction = np.asarray(arrays["aerosol_fraction"], dtype=np.float64)
+    if tau.shape != ssa.shape or tau.shape != rayleigh_fraction.shape:
+        raise ValueError("tau, ssa, and rayleigh_fraction shapes must match")
+    if aerosol_fraction.shape[:-1] != tau.shape:
+        raise ValueError("aerosol_fraction must have shape tau.shape + (n_aerosol,)")
+    if np.any(ssa < 0.0) or np.any(ssa > 1.0):
+        raise ValueError("ssa must satisfy 0 <= ssa <= 1")
+
+    scattering_tau = tau * ssa
+    absorption_tau = tau - scattering_tau
+    absorption_tau = np.where(np.abs(absorption_tau) < 1.0e-14, 0.0, absorption_tau)
+    if np.any(absorption_tau < 0.0):
+        raise ValueError("derived absorption_tau is negative")
+
+    arrays.setdefault("absorption_tau", absorption_tau)
+    arrays.setdefault("rayleigh_scattering_tau", scattering_tau * rayleigh_fraction)
+    arrays.setdefault("aerosol_scattering_tau", scattering_tau[..., None] * aerosol_fraction)
+
+
 def _copy_bundle_with_optics(
     *,
+    kind: str,
     bundle_path: Path,
     output_path: Path,
     optics: dict[str, np.ndarray],
@@ -49,6 +84,10 @@ def _copy_bundle_with_optics(
             for key, value in optics.items()
         }
     arrays.update(optics)
+    if kind == "uv":
+        _add_rt_equivalent_components(arrays, tau_key="tau", ssa_key="omega")
+    else:
+        _add_rt_equivalent_components(arrays, tau_key="tau_arr", ssa_key="omega_arr")
     np.savez_compressed(output_path, **arrays)
 
 
@@ -152,7 +191,12 @@ def main() -> None:
         raise FileNotFoundError(args.bundle)
 
     optics = _parse_uv_dump(args.dump) if args.kind == "uv" else _parse_tir_dump(args.dump)
-    _copy_bundle_with_optics(bundle_path=args.bundle, output_path=args.output, optics=optics)
+    _copy_bundle_with_optics(
+        kind=args.kind,
+        bundle_path=args.bundle,
+        output_path=args.output,
+        optics=optics,
+    )
     print(f"wrote {args.output}")
 
 

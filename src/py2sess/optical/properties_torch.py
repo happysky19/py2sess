@@ -130,7 +130,8 @@ def _resolve_aerosol_scattering(
 
 def build_layer_optical_properties_torch(
     *,
-    gas_absorption_tau=0.0,
+    absorption_tau=None,
+    gas_absorption_tau=None,
     rayleigh_scattering_tau=0.0,
     aerosol_extinction_tau=None,
     aerosol_scattering_tau=None,
@@ -141,8 +142,13 @@ def build_layer_optical_properties_torch(
     """Builds differentiable RT optical inputs from component optical depths."""
     import torch
 
+    if absorption_tau is not None and gas_absorption_tau is not None:
+        raise ValueError("pass only one of absorption_tau or gas_absorption_tau")
+    if absorption_tau is None:
+        absorption_tau = 0.0 if gas_absorption_tau is None else gas_absorption_tau
+
     dtype, device = _context(
-        gas_absorption_tau,
+        absorption_tau,
         rayleigh_scattering_tau,
         aerosol_extinction_tau,
         aerosol_scattering_tau,
@@ -150,23 +156,29 @@ def build_layer_optical_properties_torch(
         dtype=dtype,
         device=device,
     )
-    aerosol_leading = None
     if aerosol_extinction_tau is not None:
         aerosol_ext = _as_tensor(aerosol_extinction_tau, dtype=dtype, device=device)
         if aerosol_ext.ndim == 0:
             raise ValueError("aerosol_extinction_tau must include an aerosol axis")
         aerosol_leading = tuple(aerosol_ext.shape[:-1])
-    else:
-        if aerosol_scattering_tau is not None or aerosol_single_scattering_albedo is not None:
-            raise ValueError("aerosol scattering inputs require aerosol_extinction_tau")
+    elif aerosol_scattering_tau is not None:
+        aerosol_scat = _as_tensor(aerosol_scattering_tau, dtype=dtype, device=device)
+        if aerosol_scat.ndim == 0:
+            raise ValueError("aerosol_scattering_tau must include an aerosol axis")
         aerosol_ext = None
+        aerosol_leading = tuple(aerosol_scat.shape[:-1])
+    else:
+        aerosol_ext = None
+        aerosol_leading = None
+        if aerosol_single_scattering_albedo is not None:
+            raise ValueError("aerosol_single_scattering_albedo requires aerosol_extinction_tau")
 
-    gas_raw = _as_tensor(gas_absorption_tau, dtype=dtype, device=device)
+    absorption_raw = _as_tensor(absorption_tau, dtype=dtype, device=device)
     ray_raw = _as_tensor(rayleigh_scattering_tau, dtype=dtype, device=device)
-    layer_shape = _resolve_layer_shape(torch, gas_raw, ray_raw, aerosol_leading)
-    gas_tau = _broadcast_to_shape(
-        "gas_absorption_tau",
-        gas_raw,
+    layer_shape = _resolve_layer_shape(torch, absorption_raw, ray_raw, aerosol_leading)
+    absorption = _broadcast_to_shape(
+        "absorption_tau",
+        absorption_raw,
         layer_shape,
         dtype=dtype,
         device=device,
@@ -180,8 +192,18 @@ def build_layer_optical_properties_torch(
     )
 
     if aerosol_ext is None:
-        aerosol_ext_b = torch.zeros(layer_shape + (0,), dtype=dtype, device=device)
-        aerosol_scat_b = aerosol_ext_b
+        if aerosol_scattering_tau is None:
+            aerosol_ext_b = torch.zeros(layer_shape + (0,), dtype=dtype, device=device)
+            aerosol_scat_b = aerosol_ext_b
+        else:
+            aerosol_scat_b = _aerosol_tensor(
+                "aerosol_scattering_tau",
+                aerosol_scattering_tau,
+                layer_shape,
+                dtype=dtype,
+                device=device,
+            )
+            aerosol_ext_b = aerosol_scat_b
     else:
         aerosol_ext_b = _aerosol_tensor(
             "aerosol_extinction_tau",
@@ -199,7 +221,7 @@ def build_layer_optical_properties_torch(
             device=device,
         )
 
-    total_tau = gas_tau + ray_tau + aerosol_ext_b.sum(dim=-1)
+    total_tau = absorption + ray_tau + aerosol_ext_b.sum(dim=-1)
     scattering_tau = ray_tau + aerosol_scat_b.sum(dim=-1)
     ssa = ssa_from_optical_depth_torch(total_tau, scattering_tau, dtype=dtype, device=device)
     rayleigh_fraction = ssa_from_optical_depth_torch(
