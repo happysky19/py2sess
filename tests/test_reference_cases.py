@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from py2sess import (
+    thermal_source_from_temperature_profile,
     TwoStreamEss,
     TwoStreamEssOptions,
     load_tir_benchmark_case,
@@ -42,6 +43,15 @@ def _generated_tir_phase(case):
         aerosol_moments=case.aerosol_moments,
         aerosol_interp_fraction=case.aerosol_interp_fraction,
     )
+
+
+def _generated_tir_source(case):
+    source = thermal_source_from_temperature_profile(
+        case.level_temperature_k,
+        case.surface_temperature_k,
+        wavenumber_band_cm_inv=case.wavenumber_band_cm_inv,
+    )
+    return np.asarray(source.planck, dtype=float), np.asarray(source.surface_planck, dtype=float)
 
 
 def _generated_uv_phase(case):
@@ -87,16 +97,23 @@ class ReferenceCaseTests(unittest.TestCase):
         _assert_max_rel(self, result.fo_total_up_toa, case.ref_fo, 1.0e-5)
         _assert_max_rel(self, total, case.ref_total, 5.0e-4)
 
+    def test_generated_tir_source_matches_fixture(self) -> None:
+        case = load_tir_benchmark_case()
+        planck, surface_planck = _generated_tir_source(case)
+        np.testing.assert_allclose(planck, case.thermal_bb_input, rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(surface_planck, case.surfbb, rtol=1.0e-12, atol=1.0e-12)
+
     def test_public_forward_tir_fixture_matches_batch_kernel(self) -> None:
         case = load_tir_benchmark_case()
         phase = _generated_tir_phase(case)
+        planck, surface_planck = _generated_tir_source(case)
         kernel = solve_thermal_batch_numpy(
             tau_arr=case.tau_arr,
             omega_arr=case.omega_arr,
             asymm_arr=case.asymm_arr,
             d2s_scaling=case.d2s_scaling,
-            thermal_bb_input=case.thermal_bb_input,
-            surfbb=case.surfbb,
+            thermal_bb_input=planck,
+            surfbb=surface_planck,
             albedo=case.albedo,
             emissivity=case.emissivity,
             heights=case.heights,
@@ -113,8 +130,8 @@ class ReferenceCaseTests(unittest.TestCase):
             stream=case.stream_value,
             albedo=case.albedo,
             delta_m_truncation_factor=phase.delta_m_truncation_factor,
-            planck=case.thermal_bb_input,
-            surface_planck=case.surfbb,
+            planck=planck,
+            surface_planck=surface_planck,
             emissivity=case.emissivity,
             include_fo=True,
         )
@@ -129,13 +146,14 @@ class ReferenceCaseTests(unittest.TestCase):
 
         case = load_tir_benchmark_case()
         phase = _generated_tir_phase(case)
+        planck, surface_planck = _generated_tir_source(case)
         kernel = solve_thermal_batch_torch(
             tau_arr=case.tau_arr,
             omega_arr=case.omega_arr,
             asymm_arr=case.asymm_arr,
             d2s_scaling=case.d2s_scaling,
-            thermal_bb_input=case.thermal_bb_input,
-            surfbb=case.surfbb,
+            thermal_bb_input=planck,
+            surfbb=surface_planck,
             albedo=case.albedo,
             emissivity=case.emissivity,
             heights=case.heights,
@@ -160,8 +178,8 @@ class ReferenceCaseTests(unittest.TestCase):
             stream=case.stream_value,
             albedo=case.albedo,
             delta_m_truncation_factor=phase.delta_m_truncation_factor,
-            planck=case.thermal_bb_input,
-            surface_planck=case.surfbb,
+            planck=planck,
+            surface_planck=surface_planck,
             emissivity=case.emissivity,
             include_fo=True,
         )

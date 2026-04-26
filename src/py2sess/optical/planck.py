@@ -24,6 +24,7 @@ _FORTRAN_PLANCK_NSIMPSON = 25
 _FORTRAN_PLANCK_CRITERION = 1.0e-10
 _FORTRAN_PLANCK_VCUT = 1.5
 _FORTRAN_PLANCK_VCP = (10.25, 5.7, 3.9, 2.9, 2.3, 1.9, 0.0)
+_ROW_BAND_CHUNK_SIZE = 4096
 
 
 @dataclass(frozen=True)
@@ -233,10 +234,109 @@ def _fortran_planck_band_scalar(
     return float(scaling * value)
 
 
+def _validate_wavenumber_band(
+    wavenumber_low_cm_inv: _ScalarOrArrayLike,
+    wavenumber_high_cm_inv: _ScalarOrArrayLike,
+) -> tuple[np.ndarray, np.ndarray]:
+    low = np.asarray(wavenumber_low_cm_inv, dtype=np.float64)
+    high = np.asarray(wavenumber_high_cm_inv, dtype=np.float64)
+    low, high = np.broadcast_arrays(low, high)
+    if not np.all(np.isfinite(low)) or np.any(low < 0.0):
+        raise ValueError("wavenumber_low_cm_inv must be non-negative and finite")
+    if not np.all(np.isfinite(high)) or np.any(high <= low):
+        raise ValueError(
+            "wavenumber_high_cm_inv must be finite and greater than wavenumber_low_cm_inv"
+        )
+    return low, high
+
+
+def _fortran_planck_band_simpson_vectorized(
+    x_low: np.ndarray,
+    x_high: np.ndarray,
+    scaling: np.ndarray,
+) -> np.ndarray:
+    interval = x_high - x_low
+    endpoints = x_low**3 / np.expm1(x_low) + x_high**3 / np.expm1(x_high)
+    previous = endpoints * 0.5 * interval
+    result = np.empty_like(x_low, dtype=np.float64)
+    positions = np.arange(x_low.size)
+    active_x_low = x_low
+    active_interval = interval
+    active_endpoints = endpoints
+    active_previous = previous
+    active_scaling = scaling
+
+    for n in range(1, _FORTRAN_PLANCK_NSIMPSON + 1):
+        step = 0.5 * active_interval / float(n)
+        value = active_endpoints.copy()
+        for k in range(1, 2 * n):
+            x_current = active_x_low + float(k) * step
+            factor = float(2 * (1 + (k % 2)))
+            value += factor * x_current**3 / np.expm1(x_current)
+        value *= step / 3.0
+        converged = np.abs((value - active_previous) / value) <= _FORTRAN_PLANCK_CRITERION
+        if np.any(converged):
+            result[positions[converged]] = (
+                active_scaling[converged] * value[converged] * _FORTRAN_PLANCK_CONC
+            )
+        keep = ~converged
+        if not np.any(keep):
+            return result
+        positions = positions[keep]
+        active_x_low = active_x_low[keep]
+        active_interval = active_interval[keep]
+        active_endpoints = active_endpoints[keep]
+        active_previous = value[keep]
+        active_scaling = active_scaling[keep]
+
+    raise RuntimeError("Fortran-compatible Simpson Planck integration did not converge")
+
+
+def _fortran_planck_band_vectorized(
+    temperature_k: np.ndarray,
+    wavenumber_low_cm_inv: np.ndarray,
+    wavenumber_high_cm_inv: np.ndarray,
+) -> np.ndarray:
+    temperature, low, high = np.broadcast_arrays(
+        temperature_k,
+        wavenumber_low_cm_inv,
+        wavenumber_high_cm_inv,
+    )
+    gamma = _FORTRAN_C2 / temperature
+    x_low = gamma * low
+    x_high = gamma * high
+    scaling = _FORTRAN_SIGMA_OVER_PI * temperature**4
+    narrow = (
+        (x_low > _FORTRAN_PLANCK_EPSIL)
+        & (x_high < _FORTRAN_PLANCK_VMAX)
+        & ((high - low) / high < 1.0e-2)
+    )
+
+    result = np.empty(temperature.shape, dtype=np.float64)
+    if np.any(narrow):
+        result.ravel()[narrow.ravel()] = _fortran_planck_band_simpson_vectorized(
+            x_low[narrow].ravel(),
+            x_high[narrow].ravel(),
+            scaling[narrow].ravel(),
+        )
+    if np.any(~narrow):
+        flat_result = result.ravel()
+        flat_temperature = temperature.ravel()
+        flat_low = low.ravel()
+        flat_high = high.ravel()
+        for index in np.flatnonzero((~narrow).ravel()):
+            flat_result[index] = _fortran_planck_band_scalar(
+                float(flat_temperature[index]),
+                float(flat_low[index]),
+                float(flat_high[index]),
+            )
+    return result
+
+
 def planck_radiance_wavenumber_band(
     temperature_k: _ScalarOrArrayLike,
-    wavenumber_low_cm_inv: float,
-    wavenumber_high_cm_inv: float,
+    wavenumber_low_cm_inv: _ScalarOrArrayLike,
+    wavenumber_high_cm_inv: _ScalarOrArrayLike,
 ) -> np.ndarray:
     """Evaluate the Fortran-compatible band-integrated Planck function.
 
@@ -245,9 +345,11 @@ def planck_radiance_wavenumber_band(
     temperature_k
         Scalar or array of temperatures in Kelvin.
     wavenumber_low_cm_inv
-        Lower band limit in inverse centimeters.
+        Lower band limit in inverse centimeters. Scalars or arrays following
+        NumPy broadcasting rules are accepted.
     wavenumber_high_cm_inv
-        Upper band limit in inverse centimeters.
+        Upper band limit in inverse centimeters. Scalars or arrays following
+        NumPy broadcasting rules are accepted.
 
     Returns
     -------
@@ -256,24 +358,60 @@ def planck_radiance_wavenumber_band(
         ``get_planckfunction`` helper in the original 2S-ESS Fortran.
     """
 
-    if not np.isfinite(wavenumber_low_cm_inv) or wavenumber_low_cm_inv < 0.0:
-        raise ValueError("wavenumber_low_cm_inv must be non-negative and finite")
-    if not np.isfinite(wavenumber_high_cm_inv) or wavenumber_high_cm_inv <= wavenumber_low_cm_inv:
-        raise ValueError(
-            "wavenumber_high_cm_inv must be finite and greater than wavenumber_low_cm_inv"
-        )
-
     temperature = _validate_temperature("temperature_k", temperature_k)
-    result = np.empty_like(temperature, dtype=np.float64)
-    flat_temperature = np.ravel(temperature)
-    flat_result = np.ravel(result)
-    for index, temp in enumerate(flat_temperature):
-        flat_result[index] = _fortran_planck_band_scalar(
-            float(temp),
-            float(wavenumber_low_cm_inv),
-            float(wavenumber_high_cm_inv),
+    low, high = _validate_wavenumber_band(wavenumber_low_cm_inv, wavenumber_high_cm_inv)
+    if low.ndim == 0 and high.ndim == 0:
+        result = np.empty(temperature.shape, dtype=np.float64)
+        flat_temperature = np.ravel(temperature)
+        flat_result = np.ravel(result)
+        for index, temp in enumerate(flat_temperature):
+            flat_result[index] = _fortran_planck_band_scalar(
+                float(temp),
+                float(low),
+                float(high),
+            )
+        return result
+    return _fortran_planck_band_vectorized(temperature, low, high)
+
+
+def _row_band_thermal_source(
+    level_temperature: np.ndarray,
+    surface_temperature: np.ndarray,
+    wavenumber_band_cm_inv: np.ndarray,
+) -> ThermalSourceInputs:
+    bands = np.asarray(wavenumber_band_cm_inv, dtype=np.float64)
+    if bands.ndim != 2 or bands.shape[1] != 2:
+        raise ValueError("wavenumber_band_cm_inv must have shape (n_spectral, 2)")
+    low, high = _validate_wavenumber_band(bands[:, 0], bands[:, 1])
+    n_rows = bands.shape[0]
+    if surface_temperature.ndim > 1:
+        raise ValueError("surface_temperature_k must be scalar or one-dimensional")
+    if surface_temperature.ndim == 1 and surface_temperature.size not in {1, n_rows}:
+        raise ValueError("surface_temperature_k must be scalar or have shape (n_spectral,)")
+
+    planck = np.empty((n_rows, level_temperature.size), dtype=np.float64)
+    surface_planck = np.empty(n_rows, dtype=np.float64)
+    for start in range(0, n_rows, _ROW_BAND_CHUNK_SIZE):
+        stop = min(start + _ROW_BAND_CHUNK_SIZE, n_rows)
+        row_slice = slice(start, stop)
+        low_chunk = low[row_slice]
+        high_chunk = high[row_slice]
+        planck[row_slice] = planck_radiance_wavenumber_band(
+            level_temperature.reshape(1, -1),
+            low_chunk.reshape(-1, 1),
+            high_chunk.reshape(-1, 1),
         )
-    return result
+        surface_chunk = (
+            surface_temperature
+            if surface_temperature.ndim == 0 or surface_temperature.size == 1
+            else surface_temperature[row_slice]
+        )
+        surface_planck[row_slice] = planck_radiance_wavenumber_band(
+            surface_chunk,
+            low_chunk,
+            high_chunk,
+        )
+    return ThermalSourceInputs(planck=planck, surface_planck=surface_planck)
 
 
 def thermal_source_from_temperature_profile(
@@ -282,7 +420,7 @@ def thermal_source_from_temperature_profile(
     *,
     wavelength_microns: _ScalarOrArrayLike | None = None,
     wavenumber_cm_inv: _ScalarOrArrayLike | None = None,
-    wavenumber_band_cm_inv: tuple[float, float] | None = None,
+    wavenumber_band_cm_inv: _ScalarOrArrayLike | None = None,
 ) -> ThermalSourceInputs:
     """Build ``planck`` and ``surface_planck`` from temperatures.
 
@@ -299,7 +437,8 @@ def thermal_source_from_temperature_profile(
     wavenumber_cm_inv
         Wavenumber in inverse centimeters for the Planck evaluation.
     wavenumber_band_cm_inv
-        Two-element ``(low, high)`` wavenumber band in inverse centimeters for
+        Two-element ``(low, high)`` wavenumber band, or an
+        ``(n_spectral, 2)`` array of row-wise bands, in inverse centimeters for
         the Fortran-compatible band-integrated Planck evaluation.
 
     Returns
@@ -330,8 +469,12 @@ def thermal_source_from_temperature_profile(
         planck = planck_radiance_wavenumber(level_grid, spectral_grid)
         surface_planck = planck_radiance_wavenumber(surface_temperature, spectral)
     else:
-        low, high = wavenumber_band_cm_inv
-        planck = planck_radiance_wavenumber_band(level_temperature, low, high)
-        surface_planck = planck_radiance_wavenumber_band(surface_temperature, low, high)
+        band = np.asarray(wavenumber_band_cm_inv, dtype=np.float64)
+        if band.shape == (2,):
+            low, high = band
+            planck = planck_radiance_wavenumber_band(level_temperature, low, high)
+            surface_planck = planck_radiance_wavenumber_band(surface_temperature, low, high)
+        else:
+            return _row_band_thermal_source(level_temperature, surface_temperature, band)
 
     return ThermalSourceInputs(planck=planck, surface_planck=_scalar_or_array(surface_planck))

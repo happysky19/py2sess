@@ -18,6 +18,8 @@ class TirBenchmarkCase:
 
     selected_indices: np.ndarray
     wavelengths: np.ndarray
+    wavenumber_cm_inv: np.ndarray
+    wavenumber_band_cm_inv: np.ndarray
     heights: np.ndarray
     user_angle: float
     tau_arr: np.ndarray
@@ -29,6 +31,8 @@ class TirBenchmarkCase:
     aerosol_fraction: np.ndarray
     aerosol_moments: np.ndarray
     aerosol_interp_fraction: np.ndarray
+    level_temperature_k: np.ndarray
+    surface_temperature_k: np.ndarray
     thermal_bb_input: np.ndarray
     surfbb: np.ndarray
     albedo: np.ndarray
@@ -108,6 +112,8 @@ def load_tir_benchmark_case() -> TirBenchmarkCase:
     return TirBenchmarkCase(
         selected_indices=data["selected_indices"],
         wavelengths=data["wavelengths"],
+        wavenumber_cm_inv=data["wavenumber_cm_inv"],
+        wavenumber_band_cm_inv=data["wavenumber_band_cm_inv"],
         heights=data["heights"],
         user_angle=float(data["user_angle"][0]),
         tau_arr=data["tau_arr"],
@@ -119,6 +125,8 @@ def load_tir_benchmark_case() -> TirBenchmarkCase:
         aerosol_fraction=data["aerosol_fraction"],
         aerosol_moments=data["aerosol_moments"],
         aerosol_interp_fraction=data["aerosol_interp_fraction"],
+        level_temperature_k=data["level_temperature_k"],
+        surface_temperature_k=data["surface_temperature_k"],
         thermal_bb_input=data["thermal_bb_input"],
         surfbb=data["surfbb"],
         albedo=data["albedo"],

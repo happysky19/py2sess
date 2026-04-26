@@ -33,7 +33,12 @@ _TIR_DIRECT_LAYER_KEYS = {"tau_arr", "omega_arr"}
 _TIR_DUMPED_OPTICS_KEYS = {"asymm_arr", "d2s_scaling"}
 _TIR_DIRECT_SOURCE_KEYS = {"thermal_bb_input", "surfbb"}
 _TIR_TEMPERATURE_SOURCE_KEYS = {"level_temperature_k", "surface_temperature_k"}
-_TIR_SOURCE_COORDINATE_KEYS = {"wavenumber_cm_inv", "wavelength_microns"}
+_TIR_SOURCE_COORDINATE_KEYS = {
+    "wavenumber_band_cm_inv",
+    "wavenumber_cm_inv",
+    "wavelength_microns",
+}
+_TIR_AEROSOL_COORDINATE_KEYS = {"wavenumber_cm_inv", "wavelength_microns"}
 
 
 def _looks_like_row_index(values: np.ndarray) -> bool:
@@ -68,7 +73,7 @@ def _can_derive_uv_aerosol_interp(arrays: dict[str, np.ndarray]) -> bool:
 def _can_derive_tir_aerosol_interp(arrays: dict[str, np.ndarray]) -> bool:
     if "wavelengths" in arrays and not _looks_like_row_index(arrays["wavelengths"]):
         return True
-    return any(key in arrays for key in _TIR_SOURCE_COORDINATE_KEYS)
+    return any(key in arrays for key in _TIR_AEROSOL_COORDINATE_KEYS)
 
 
 def minimal_bundle_arrays(kind: str, arrays: dict[str, np.ndarray]) -> dict[str, np.ndarray]:

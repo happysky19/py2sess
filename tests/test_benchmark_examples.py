@@ -146,6 +146,7 @@ class BenchmarkExampleTests(unittest.TestCase):
         self.assertIn("layer optical properties: bundle", output)
         self.assertIn("geometry preprocessing: python-generated", output)
         self.assertIn("optical preprocessing: python-generated", output)
+        self.assertIn("thermal source: temperature (wavenumber_band_cm_inv)", output)
         self.assertIn("preprocessing total:", output)
         self.assertIn("emissivity: bundle", output)
         if has_torch():
@@ -203,6 +204,7 @@ class BenchmarkExampleTests(unittest.TestCase):
                     "wavenumber_cm_inv",
                     "level_temperature_k",
                     "surface_temperature_k",
+                    "wavenumber_band_cm_inv",
                     "thermal_bb_input",
                     "surfbb",
                     "asymm_arr",
@@ -248,17 +250,15 @@ class BenchmarkExampleTests(unittest.TestCase):
         )
         self.assertEqual(
             source_keys,
-            ("level_temperature_k", "surface_temperature_k", "wavenumber_cm_inv"),
+            ("level_temperature_k", "surface_temperature_k", "wavenumber_band_cm_inv"),
         )
         self.assertNotIn("thermal_bb_input", source_keys)
-        self.assertEqual(
+        with self.assertRaisesRegex(ValueError, "temperature-based thermal source"):
             tir._select_source_keys(
                 {"thermal_bb_input", "surfbb"},
                 use_dumped_thermal_source=False,
                 require_python_generated_inputs=True,
-            ),
-            ("thermal_bb_input", "surfbb"),
-        )
+            )
         with self.assertRaisesRegex(ValueError, "temperature-based thermal source"):
             tir._select_source_keys(
                 {"level_temperature_k", "thermal_bb_input", "surfbb"},
@@ -271,7 +271,7 @@ class BenchmarkExampleTests(unittest.TestCase):
                 use_dumped_thermal_source=False,
                 require_python_generated_inputs=True,
             )
-        self.assertNotIn("wavenumber_cm_inv or wavelength_microns", str(caught.exception))
+        self.assertNotIn("wavenumber_band_cm_inv", str(caught.exception))
 
     def test_uv_benchmark_does_not_require_dumped_geometry_or_optics(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "uv_benchmark_fixture.npz"
@@ -400,6 +400,42 @@ class BenchmarkExampleTests(unittest.TestCase):
         )
         self.assertIn("optical preprocessing: python-generated", output)
 
+    def test_tir_strict_mode_uses_python_generated_runtime_inputs(self) -> None:
+        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
+        omitted = {
+            "tau_arr",
+            "omega_arr",
+            "rayleigh_fraction",
+            "aerosol_fraction",
+            "asymm_arr",
+            "d2s_scaling",
+            "thermal_bb_input",
+            "surfbb",
+        }
+        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
+            trimmed = Path(tmpdir) / "tir_strict_generated.npz"
+            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
+            arrays.update(
+                self._component_optical_depths(
+                    tau=np.array(data["tau_arr"]),
+                    ssa=np.array(data["omega_arr"]),
+                    rayleigh_fraction=np.array(data["rayleigh_fraction"]),
+                    aerosol_fraction=np.array(data["aerosol_fraction"]),
+                )
+            )
+            np.savez_compressed(trimmed, **arrays)
+            output = self._run_benchmark(
+                "benchmark_tir_full_spectrum.py",
+                trimmed,
+                extra_args=("--require-python-generated-inputs",),
+            )
+        self.assertIn(
+            "layer optical properties: python-generated from component optical depths",
+            output,
+        )
+        self.assertIn("optical preprocessing: python-generated", output)
+        self.assertIn("thermal source: temperature (wavenumber_band_cm_inv)", output)
+
     def test_tir_benchmark_can_use_wavenumber_for_optical_interpolation(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
         omitted = {"asymm_arr", "d2s_scaling", "aerosol_interp_fraction"}
@@ -428,7 +464,7 @@ class BenchmarkExampleTests(unittest.TestCase):
             arrays["wavenumber_cm_inv"] = np.linspace(700.0, 900.0, n_rows)
             np.savez_compressed(trimmed, **arrays)
             output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
-        self.assertIn("thermal source: temperature (wavenumber_cm_inv)", output)
+        self.assertIn("thermal source: temperature (wavenumber_band_cm_inv)", output)
 
     def test_runtime_minimal_uv_bundle_drops_regenerable_arrays(self) -> None:
         module = _load_script_module("create_runtime_minimal_benchmark_bundle")

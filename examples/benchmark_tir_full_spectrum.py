@@ -66,7 +66,12 @@ _TIR_OPTIONAL_KEYS = ("stream_value", "ref_total", "emissivity")
 
 _TIR_DIRECT_SOURCE_KEYS = ("thermal_bb_input", "surfbb")
 _TIR_TEMPERATURE_SOURCE_KEYS = ("level_temperature_k", "surface_temperature_k")
-_TIR_SOURCE_COORDINATE_KEYS = ("wavenumber_cm_inv", "wavelength_microns")
+_TIR_SOURCE_COORDINATE_KEYS = (
+    "wavenumber_band_cm_inv",
+    "wavenumber_cm_inv",
+    "wavelength_microns",
+)
+_TIR_AEROSOL_COORDINATE_KEYS = ("wavenumber_cm_inv", "wavelength_microns")
 
 
 def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
@@ -95,7 +100,7 @@ def _select_optical_keys(
         if _TIR_AEROSOL_INTERP_KEY in available:
             keys.append(_TIR_AEROSOL_INTERP_KEY)
         else:
-            keys.extend(key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available)
+            keys.extend(key for key in _TIR_AEROSOL_COORDINATE_KEYS if key in available)
         return tuple(keys)
     if require_python_generated_inputs:
         missing = ", ".join(key for key in required_physical if key not in available)
@@ -148,24 +153,17 @@ def _select_source_keys(
     require_python_generated_inputs: bool = False,
 ) -> tuple[str, ...]:
     has_temperature = set(_TIR_TEMPERATURE_SOURCE_KEYS).issubset(available)
-    coordinates = tuple(key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available)
-    has_any_source_physical_input = bool(
-        set(_TIR_TEMPERATURE_SOURCE_KEYS).intersection(available) or coordinates
-    )
-    if (
-        require_python_generated_inputs
-        and use_dumped_thermal_source
-        and has_any_source_physical_input
-    ):
+    coordinate = next((key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available), None)
+    if require_python_generated_inputs and use_dumped_thermal_source:
         raise ValueError(
             "TIR strict generated-input mode cannot be combined with --use-dumped-thermal-source"
         )
-    if not use_dumped_thermal_source and has_temperature and len(coordinates) >= 1:
-        return _TIR_TEMPERATURE_SOURCE_KEYS + coordinates
-    if require_python_generated_inputs and has_any_source_physical_input:
+    if not use_dumped_thermal_source and has_temperature and coordinate is not None:
+        return _TIR_TEMPERATURE_SOURCE_KEYS + (coordinate,)
+    if require_python_generated_inputs:
         missing = [key for key in _TIR_TEMPERATURE_SOURCE_KEYS if key not in available]
-        if not coordinates:
-            missing.append("wavenumber_cm_inv or wavelength_microns")
+        if coordinate is None:
+            missing.append("wavenumber_band_cm_inv, wavenumber_cm_inv, or wavelength_microns")
         missing_text = ", ".join(missing)
         raise ValueError(
             "TIR strict generated-input mode requires temperature-based thermal source inputs"
@@ -223,11 +221,6 @@ def _prepare_thermal_source(
     source_coordinates = [key for key in _TIR_SOURCE_COORDINATE_KEYS if key in bundle]
     has_temperature = _has_keys(bundle, _TIR_TEMPERATURE_SOURCE_KEYS)
     if not use_dumped_thermal_source and has_temperature and source_coordinates:
-        if len(source_coordinates) != 1:
-            raise ValueError(
-                "temperature-based thermal source requires exactly one of "
-                "wavenumber_cm_inv or wavelength_microns"
-            )
         start = time.perf_counter()
         coordinate_name = source_coordinates[0]
         kwargs = {coordinate_name: bundle[coordinate_name]}

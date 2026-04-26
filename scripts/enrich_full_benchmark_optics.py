@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 
 import numpy as np
 
@@ -29,6 +30,49 @@ def _reverse_endpoint_interp_fraction(wavelengths: np.ndarray) -> np.ndarray:
     if span == 0.0:
         return np.zeros_like(grid)
     return (grid[::-1] - grid[0]) / span
+
+
+def _infer_tir_profile_path(dump_path: Path) -> Path:
+    match = re.match(
+        r"Dump_(?P<location>[^_]+)_(?P<date>[^_]+)_(?P<time>[^.]+)\.dat(?:_.+)?$",
+        dump_path.name,
+    )
+    if match is None:
+        raise ValueError("could not infer TIR profile file from dump name; pass --profile-file")
+    profile_name = (
+        f"Profiles_{match.group('location')}_20067{match.group('date')}_{match.group('time')}.dat"
+    )
+    return (dump_path.parent / "../../geocape_data/Profile_Data" / profile_name).resolve()
+
+
+def _parse_tir_profile(profile_path: Path, *, n_layers: int) -> tuple[np.ndarray, np.ndarray]:
+    surface_temperature = None
+    rows: list[list[float]] = []
+    with profile_path.open("r") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped.startswith("surfaceTemperature"):
+                surface_temperature = float(stripped.split("=", maxsplit=1)[1])
+                continue
+            values = stripped.split()
+            if values and values[0].isdigit():
+                rows.append([float(value) for value in values])
+
+    if surface_temperature is None:
+        raise ValueError(f"missing surface temperature in {profile_path}")
+    if len(rows) < n_layers + 1:
+        raise ValueError(
+            f"profile {profile_path} has {len(rows)} levels; expected at least {n_layers + 1}"
+        )
+
+    profile_temperature = np.array([row[2] for row in rows], dtype=np.float64)
+    level_temperature = profile_temperature[-(n_layers + 1) :][::-1]
+    if not np.all(np.isfinite(level_temperature)) or np.any(level_temperature <= 0.0):
+        raise ValueError(f"profile {profile_path} contains invalid level temperatures")
+    return (
+        level_temperature,
+        np.array([surface_temperature], dtype=np.float64),
+    )
 
 
 def _add_rt_equivalent_components(
@@ -139,7 +183,11 @@ def _parse_uv_dump(dump_path: Path) -> dict[str, np.ndarray]:
     }
 
 
-def _parse_tir_dump(dump_path: Path) -> dict[str, np.ndarray]:
+def _parse_tir_dump(
+    dump_path: Path,
+    *,
+    profile_file: Path | None = None,
+) -> dict[str, np.ndarray]:
     with dump_path.open("r") as handle:
         header = handle.readline().split()
         if len(header) < 6:
@@ -152,6 +200,7 @@ def _parse_tir_dump(dump_path: Path) -> dict[str, np.ndarray]:
         aerosol_moments = _read_aerosol_moments(handle, n_moments)
 
         wavelengths = np.empty(n_rows, dtype=np.float64)
+        wavenumber = np.empty(n_rows, dtype=np.float64)
         depol = np.empty(n_rows, dtype=np.float64)
         rayleigh_fraction = np.empty((n_rows, n_layers), dtype=np.float64)
         aerosol_fraction = np.empty((n_rows, n_layers, 5), dtype=np.float64)
@@ -161,6 +210,7 @@ def _parse_tir_dump(dump_path: Path) -> dict[str, np.ndarray]:
             if len(spec) < 7:
                 raise ValueError(f"invalid TIR spectral row {row + 1}")
             wavelengths[row] = float(spec[1])
+            wavenumber[row] = float(spec[2])
             depol[row] = float(spec[4])
             for layer in range(n_layers):
                 values = handle.readline().split()
@@ -171,8 +221,20 @@ def _parse_tir_dump(dump_path: Path) -> dict[str, np.ndarray]:
             if (row + 1) % 50_000 == 0:
                 print(f"  parsed TIR rows: {row + 1}/{n_rows}", flush=True)
 
+    profile_path = _infer_tir_profile_path(dump_path) if profile_file is None else profile_file
+    if not profile_path.is_file():
+        raise FileNotFoundError(f"TIR profile file not found: {profile_path}; pass --profile-file")
+    level_temperature, surface_temperature = _parse_tir_profile(
+        profile_path,
+        n_layers=n_layers,
+    )
+
     return {
         "wavelengths": wavelengths,
+        "wavenumber_cm_inv": wavenumber,
+        "wavenumber_band_cm_inv": np.column_stack((wavenumber - 0.5, wavenumber + 0.5)),
+        "level_temperature_k": level_temperature,
+        "surface_temperature_k": surface_temperature,
         "depol": depol,
         "rayleigh_fraction": rayleigh_fraction,
         "aerosol_fraction": aerosol_fraction,
@@ -187,6 +249,12 @@ def main() -> None:
     parser.add_argument("dump", type=Path, help="Original Fortran text dump.")
     parser.add_argument("bundle", type=Path, help="Existing local benchmark bundle.")
     parser.add_argument("output", type=Path, help="Output enriched benchmark bundle.")
+    parser.add_argument(
+        "--profile-file",
+        type=Path,
+        default=None,
+        help="TIR GEOCAPE profile file. Defaults to the path implied by the dump name.",
+    )
     args = parser.parse_args()
 
     if args.output.resolve() == args.bundle.resolve():
@@ -196,7 +264,11 @@ def main() -> None:
     if not args.bundle.is_file():
         raise FileNotFoundError(args.bundle)
 
-    optics = _parse_uv_dump(args.dump) if args.kind == "uv" else _parse_tir_dump(args.dump)
+    optics = (
+        _parse_uv_dump(args.dump)
+        if args.kind == "uv"
+        else _parse_tir_dump(args.dump, profile_file=args.profile_file)
+    )
     _copy_bundle_with_optics(
         kind=args.kind,
         bundle_path=args.bundle,

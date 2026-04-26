@@ -69,10 +69,9 @@ stored derived arrays.
 Pass `--require-python-generated-inputs` to make that fallback an error. This
 is the preferred check when validating a runtime bundle intended to be
 independent of Fortran-dumped intermediate variables.
-For TIR source terms, this strict mode rejects direct `thermal_bb_input`/`surfbb`
-fallback only when temperature-source fields are present but incomplete or
-explicitly bypassed; older bundles with no temperature fields still use the
-direct source arrays.
+For TIR source terms, this strict mode also requires temperature-based source
+generation. Older bundles that only contain `thermal_bb_input`/`surfbb` must be
+regenerated or run without strict mode.
 
 The benchmark loaders read only the arrays needed for the selected mode. With
 component optical-depth inputs available, the scripts do not load direct
@@ -88,7 +87,7 @@ Current dependency status:
 | 2S phase inputs | `depol`, scattering fractions, `aerosol_moments`, optional `aerosol_interp_fraction` | `g`, `delta_m_truncation_factor` | `asymm`/`scaling` or `asymm_arr`/`d2s_scaling` |
 | Solar FO scatter | same phase inputs plus `user_obsgeom` | `fo_scatter_term` | `fo_exact_scatter` |
 | UV geometry helpers | `heights`, `user_obsgeom`, `stream_value` | `chapman`, `x0`, `user_stream`, `user_secant`, `azmfac`, `px11`, `pxsq`, `px0x`, `ulp` | none required by benchmark scripts |
-| Thermal source | `level_temperature_k`, `surface_temperature_k`, and `wavenumber_cm_inv` or `wavelength_microns` | `planck`, `surface_planck` | `thermal_bb_input`, `surfbb` |
+| Thermal source | `level_temperature_k`, `surface_temperature_k`, and `wavenumber_band_cm_inv`, `wavenumber_cm_inv`, or `wavelength_microns` | `planck`, `surface_planck` | `thermal_bb_input`, `surfbb` |
 
 The benchmark examples normalize legacy bundle fields to these public-style
 names immediately after loading. Low-level kernel calls still receive their
@@ -104,9 +103,11 @@ python3 scripts/enrich_full_benchmark_optics.py tir /path/to/TIR_Dump.dat /path/
 
 The enrichment step writes a new local bundle and leaves the original bundle
 unchanged. It also replaces any spectral row-index placeholder in `wavelengths`
-with the physical wavelength grid from the dump. Re-run this step for older
-local `_with_optics` bundles if they do not contain component optical-depth
-fields such as `absorption_tau` and `rayleigh_scattering_tau`.
+with the physical wavelength grid from the dump. For TIR, it also records
+`wavenumber_band_cm_inv`, `level_temperature_k`, and `surface_temperature_k`
+so the benchmark can rebuild the Planck source in Python. Re-run this step for
+older local `_with_optics` bundles if they do not contain component
+optical-depth fields or TIR temperature/source-coordinate fields.
 
 To write a smaller local runtime bundle after enrichment:
 
@@ -159,7 +160,8 @@ Thermal source inputs, generated:
 
 - `level_temperature_k`
 - `surface_temperature_k`
-- exactly one of `wavenumber_cm_inv` or `wavelength_microns`
+- one of `wavenumber_band_cm_inv`, `wavenumber_cm_inv`, or `wavelength_microns`;
+  the Fortran TIR benchmark uses row-wise `wavenumber_band_cm_inv`
 
 Optional surface input:
 
@@ -203,6 +205,7 @@ Expected shapes:
 - `thermal_bb_input`: `(n_wavelengths, n_layers + 1)`
 - `level_temperature_k`: `(n_layers + 1,)`
 - `surface_temperature_k`: scalar or `(n_wavelengths,)`
+- `wavenumber_band_cm_inv`: `(n_wavelengths, 2)`
 - `wavenumber_cm_inv`, `wavelength_microns`: `(n_wavelengths,)`
 - `surfbb`, `albedo`, `emissivity`, `wavelengths`: `(n_wavelengths,)`
 - `heights`: `(n_layers + 1,)`
