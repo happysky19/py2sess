@@ -1,4 +1,4 @@
-"""Benchmark a full-spectrum UV bundle with NumPy and optional PyTorch."""
+"""Benchmark full-spectrum UV input arrays with NumPy and optional PyTorch."""
 
 from __future__ import annotations
 
@@ -11,20 +11,25 @@ import numpy as np
 from _full_spectrum_benchmark_common import (
     accuracy_summary,
     BenchmarkRow,
-    bundle_keys,
-    load_bundle,
+    input_keys,
+    input_store_kind,
+    load_input_arrays,
     looks_like_row_index,
     layer_optical_keys_are_components,
+    layer_optical_keys_are_scene,
+    layer_optical_keys_generate_fractions,
     print_problem_header,
     prepare_layer_optical_properties,
     print_rows,
     recommended_chunk_size,
+    require_directory_input_store,
     require_python_generated_layer_optical_inputs,
     require_keys,
     scalar_value,
     select_layer_optical_keys,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
+from py2sess.optical.scene_io import build_benchmark_scene_inputs
 from py2sess.optical.phase import (
     aerosol_interp_fraction,
     build_solar_fo_scatter_term,
@@ -74,18 +79,20 @@ def _select_optical_keys(
     available: set[str],
     *,
     use_dumped_derived_optics: bool,
-    layer_optical_from_components: bool,
+    layer_optical_generates_fractions: bool,
+    layer_optical_from_scene: bool,
     require_python_generated_inputs: bool = False,
 ) -> tuple[str, ...]:
     if require_python_generated_inputs and use_dumped_derived_optics:
         raise ValueError(
             "UV strict generated-input mode cannot be combined with --use-dumped-derived-optics"
         )
-    required_physical = (
-        ("depol", "aerosol_moments")
-        if layer_optical_from_components
-        else _UV_REQUIRED_PHYSICAL_OPTICS_KEYS
-    )
+    if layer_optical_from_scene:
+        required_physical = ("aerosol_moments",)
+    elif layer_optical_generates_fractions:
+        required_physical = ("depol", "aerosol_moments")
+    else:
+        required_physical = _UV_REQUIRED_PHYSICAL_OPTICS_KEYS
     has_physical_optics = set(required_physical).issubset(available)
     if not use_dumped_derived_optics and has_physical_optics:
         keys = list(required_physical)
@@ -562,8 +569,13 @@ def main() -> None:
     """Runs the full-spectrum UV benchmark example."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "bundle", type=Path, help="Path to a full-spectrum UV benchmark bundle (.npz)."
+        "input",
+        type=Path,
+        nargs="?",
+        help="Path to a UV runtime array directory, or a legacy full-spectrum .npz bundle.",
     )
+    parser.add_argument("--profile", type=Path, help="Atmospheric profile text file.")
+    parser.add_argument("--scene", type=Path, help="Benchmark scene YAML file.")
     parser.add_argument("--backend", choices=["numpy", "torch", "both"], default="both")
     parser.add_argument("--limit", type=int, default=None, help="Optional spectral-row limit.")
     parser.add_argument(
@@ -592,11 +604,41 @@ def main() -> None:
     args = parser.parse_args()
 
     load_start = time.perf_counter()
-    available = bundle_keys(args.bundle)
+    scene_mode = args.profile is not None or args.scene is not None
+    if scene_mode and (args.profile is None or args.scene is None):
+        parser.error("--profile and --scene must be passed together")
+    if scene_mode and args.input is not None:
+        parser.error("pass either a runtime input store or --profile/--scene, not both")
+    if not scene_mode and args.input is None:
+        parser.error("input store or --profile/--scene is required")
+    if scene_mode and args.use_dumped_derived_optics:
+        parser.error("--use-dumped-derived-optics is not valid with --profile/--scene")
+
+    if scene_mode:
+        bundle = build_benchmark_scene_inputs(
+            kind="uv",
+            profile_path=args.profile,
+            scene_path=args.scene,
+        )
+        available = set(bundle)
+        input_path = args.scene
+        input_kind = "profile+scene"
+    else:
+        if args.require_python_generated_inputs:
+            require_directory_input_store(args.input, label="UV")
+        available = input_keys(args.input)
+        input_path = args.input
+        input_kind = input_store_kind(args.input)
+
     layer_optical_keys = select_layer_optical_keys(
         available,
         total_key="tau",
         ssa_key="omega",
+    )
+    base_keys = tuple(
+        key
+        for key in _UV_BASE_KEYS
+        if key != "heights" or not layer_optical_keys_are_scene(layer_optical_keys)
     )
     if args.require_python_generated_inputs:
         require_python_generated_layer_optical_inputs(
@@ -608,21 +650,26 @@ def main() -> None:
     optical_keys = _select_optical_keys(
         available,
         use_dumped_derived_optics=args.use_dumped_derived_optics,
-        layer_optical_from_components=layer_optical_keys_are_components(layer_optical_keys),
+        layer_optical_generates_fractions=layer_optical_keys_generate_fractions(layer_optical_keys),
+        layer_optical_from_scene=layer_optical_keys_are_scene(layer_optical_keys),
         require_python_generated_inputs=args.require_python_generated_inputs,
     )
-    bundle = load_bundle(
-        args.bundle,
-        keys=_UV_BASE_KEYS + _UV_OPTIONAL_KEYS + layer_optical_keys + optical_keys,
-    )
+    if not scene_mode:
+        bundle = load_input_arrays(
+            args.input,
+            keys=base_keys + _UV_OPTIONAL_KEYS + layer_optical_keys + optical_keys,
+        )
     require_keys(
         bundle,
-        _UV_BASE_KEYS + layer_optical_keys + optical_keys,
+        base_keys + layer_optical_keys + optical_keys,
         label="UV",
     )
-    row_count_key = (
-        layer_optical_keys[0] if layer_optical_keys_are_components(layer_optical_keys) else "tau"
-    )
+    if layer_optical_keys_are_scene(layer_optical_keys):
+        row_count_key = "wavelengths"
+    elif layer_optical_keys_are_components(layer_optical_keys):
+        row_count_key = layer_optical_keys[0]
+    else:
+        row_count_key = "tau"
     total_rows = int(bundle[row_count_key].shape[0])
     wavelengths = total_rows if args.limit is None else min(int(args.limit), total_rows)
     bundle = dict(bundle)
@@ -658,13 +705,14 @@ def main() -> None:
 
     print_problem_header(
         title="UV full-spectrum benchmark",
-        bundle_path=args.bundle,
+        input_path=input_path,
+        input_kind=input_kind,
         wavelengths=wavelengths,
         layers=int(bundle["tau"].shape[1]),
         load_seconds=load_seconds,
         note=(
             "This example benchmarks the UV FO + 2S full-spectrum path. "
-            "wall time (s) excludes bundle load and printed preprocessing, but includes "
+            "wall time (s) excludes input-store load and printed preprocessing, but includes "
             "backend-local overhead such as PyTorch warmup, tensor conversion, and "
             "checksum reduction."
         ),

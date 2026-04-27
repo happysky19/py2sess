@@ -9,8 +9,22 @@ import time
 import numpy as np
 
 from py2sess.optical.properties import build_layer_optical_properties
+from py2sess.optical.scene import (
+    atmospheric_profile_from_levels,
+    build_scene_layer_optical_properties,
+)
 
 
+SCENE_LAYER_REQUIRED_KEYS = ("pressure_hpa", "temperature_k", "gas_cross_sections")
+SCENE_LAYER_OPTIONAL_KEYS = (
+    "gas_vmr",
+    "surface_altitude_m",
+    "co2_ppmv",
+    "aerosol_loadings",
+    "aerosol_wavelengths_microns",
+    "aerosol_bulk_iops",
+    "aerosol_select_wavelength_microns",
+)
 LAYER_OPTICAL_ABSORPTION_KEYS = ("absorption_tau", "gas_absorption_tau")
 LAYER_OPTICAL_RAYLEIGH_KEY = "rayleigh_scattering_tau"
 LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY = "aerosol_extinction_tau"
@@ -41,17 +55,46 @@ class BenchmarkRow:
         return self.wavelengths / self.rt_seconds
 
 
-def bundle_keys(path: Path) -> set[str]:
-    """Returns array names stored in a benchmark bundle."""
+def input_store_kind(path: Path) -> str:
+    """Returns the benchmark input-store kind."""
+    if path.is_dir():
+        return "array-directory"
+    return "npz"
+
+
+def input_keys(path: Path) -> set[str]:
+    """Returns array names stored in a benchmark input store."""
+    if path.is_dir():
+        return {entry.stem for entry in path.glob("*.npy") if entry.is_file()}
     with np.load(path) as data:
         return set(data.files)
 
 
-def load_bundle(path: Path, keys: tuple[str, ...] | None = None) -> dict[str, np.ndarray]:
-    """Loads selected benchmark bundle arrays into memory."""
+def load_input_arrays(path: Path, keys: tuple[str, ...] | None = None) -> dict[str, np.ndarray]:
+    """Loads selected benchmark input arrays.
+
+    Directory inputs store one ``.npy`` file per array and are opened with
+    memory mapping. Legacy ``.npz`` inputs are still read into memory.
+    """
+    if path.is_dir():
+        names = (
+            sorted(input_keys(path))
+            if keys is None
+            else [key for key in keys if (path / f"{key}.npy").is_file()]
+        )
+        return {key: np.load(path / f"{key}.npy", mmap_mode="r") for key in names}
     with np.load(path) as data:
         names = data.files if keys is None else [key for key in keys if key in data.files]
         return {key: np.array(data[key]) for key in names}
+
+
+def require_directory_input_store(path: Path, *, label: str) -> None:
+    """Require the generated-input benchmark path to avoid legacy ``.npz`` loading."""
+    if not path.is_dir():
+        raise ValueError(
+            f"{label} strict generated-input mode requires an array-directory input store, "
+            "not a legacy .npz bundle"
+        )
 
 
 def select_layer_optical_keys(
@@ -66,6 +109,10 @@ def select_layer_optical_keys(
         None,
     )
     if absorption_key is None or LAYER_OPTICAL_RAYLEIGH_KEY not in available:
+        if set(SCENE_LAYER_REQUIRED_KEYS).issubset(available):
+            return SCENE_LAYER_REQUIRED_KEYS + tuple(
+                key for key in SCENE_LAYER_OPTIONAL_KEYS if key in available
+            )
         return (total_key, ssa_key)
 
     keys = [absorption_key, LAYER_OPTICAL_RAYLEIGH_KEY]
@@ -91,6 +138,16 @@ def layer_optical_keys_are_components(keys: tuple[str, ...]) -> bool:
     return any(key in keys for key in LAYER_OPTICAL_ABSORPTION_KEYS)
 
 
+def layer_optical_keys_are_scene(keys: tuple[str, ...]) -> bool:
+    """Returns true when selected optical keys are scene/profile inputs."""
+    return set(SCENE_LAYER_REQUIRED_KEYS).issubset(keys)
+
+
+def layer_optical_keys_generate_fractions(keys: tuple[str, ...]) -> bool:
+    """Returns true when layer setup also generates scattering fractions."""
+    return layer_optical_keys_are_scene(keys) or layer_optical_keys_are_components(keys)
+
+
 def require_python_generated_layer_optical_inputs(
     keys: tuple[str, ...],
     *,
@@ -113,26 +170,75 @@ def prepare_layer_optical_properties(
     ssa_key: str,
 ) -> tuple[dict[str, np.ndarray], float, str]:
     """Builds ``tau``/``ssa`` and scattering fractions when components exist."""
-    if LAYER_OPTICAL_RAYLEIGH_KEY not in bundle:
-        return bundle, 0.0, "bundle"
     absorption_key = next((key for key in LAYER_OPTICAL_ABSORPTION_KEYS if key in bundle), None)
-    if absorption_key is None:
-        return bundle, 0.0, "bundle"
+    if absorption_key is not None and LAYER_OPTICAL_RAYLEIGH_KEY in bundle:
+        start = time.perf_counter()
+        props = build_layer_optical_properties(
+            absorption_tau=bundle[absorption_key],
+            rayleigh_scattering_tau=bundle[LAYER_OPTICAL_RAYLEIGH_KEY],
+            aerosol_extinction_tau=bundle.get(LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY),
+            aerosol_scattering_tau=bundle.get(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY),
+            aerosol_single_scattering_albedo=bundle.get(LAYER_OPTICAL_AEROSOL_SSA_KEY),
+        )
+        prepared = dict(bundle)
+        prepared[total_key] = props.tau
+        prepared[ssa_key] = props.ssa
+        prepared["rayleigh_fraction"] = props.rayleigh_fraction
+        prepared["aerosol_fraction"] = props.aerosol_fraction
+        return (
+            prepared,
+            time.perf_counter() - start,
+            "python-generated from component optical depths",
+        )
 
-    start = time.perf_counter()
-    props = build_layer_optical_properties(
-        absorption_tau=bundle[absorption_key],
-        rayleigh_scattering_tau=bundle[LAYER_OPTICAL_RAYLEIGH_KEY],
-        aerosol_extinction_tau=bundle.get(LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY),
-        aerosol_scattering_tau=bundle.get(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY),
-        aerosol_single_scattering_albedo=bundle.get(LAYER_OPTICAL_AEROSOL_SSA_KEY),
-    )
-    prepared = dict(bundle)
-    prepared[total_key] = props.tau
-    prepared[ssa_key] = props.ssa
-    prepared["rayleigh_fraction"] = props.rayleigh_fraction
-    prepared["aerosol_fraction"] = props.aerosol_fraction
-    return prepared, time.perf_counter() - start, "python-generated from component optical depths"
+    if set(SCENE_LAYER_REQUIRED_KEYS).issubset(bundle):
+        start = time.perf_counter()
+        profile = atmospheric_profile_from_levels(
+            pressure_hpa=bundle["pressure_hpa"],
+            temperature_k=bundle["temperature_k"],
+            gas_vmr=bundle.get("gas_vmr"),
+            heights_km=bundle.get("heights"),
+            surface_altitude_m=scalar_value(bundle.get("surface_altitude_m", 0.0)),
+        )
+        aerosol_kwargs = {}
+        if "aerosol_loadings" in bundle:
+            aerosol_kwargs = {
+                "aerosol_loadings": bundle["aerosol_loadings"],
+                "aerosol_wavelengths_microns": bundle.get("aerosol_wavelengths_microns"),
+                "aerosol_bulk_iops": bundle.get("aerosol_bulk_iops"),
+                "aerosol_select_wavelength_microns": scalar_value(
+                    bundle.get("aerosol_select_wavelength_microns", 0.4)
+                ),
+            }
+        scene = build_scene_layer_optical_properties(
+            wavelengths_nm=bundle["wavelengths"],
+            profile=profile,
+            gas_cross_sections=bundle["gas_cross_sections"],
+            co2_ppmv=scalar_value(bundle.get("co2_ppmv", 385.0)),
+            **aerosol_kwargs,
+        )
+        prepared = dict(bundle)
+        prepared["heights"] = profile.heights_km
+        prepared[total_key] = scene.layer.tau
+        prepared[ssa_key] = scene.layer.ssa
+        prepared["absorption_tau"] = scene.gas_absorption_tau
+        prepared["rayleigh_scattering_tau"] = scene.rayleigh_scattering_tau
+        prepared["aerosol_extinction_tau"] = scene.aerosol_extinction_tau
+        prepared["aerosol_scattering_tau"] = scene.aerosol_scattering_tau
+        prepared["rayleigh_fraction"] = scene.layer.rayleigh_fraction
+        prepared["aerosol_fraction"] = scene.layer.aerosol_fraction
+        prepared["depol"] = scene.depol
+        return (
+            prepared,
+            time.perf_counter() - start,
+            "python-generated from scene/profile inputs",
+        )
+
+    if LAYER_OPTICAL_RAYLEIGH_KEY not in bundle:
+        return bundle, 0.0, "direct input"
+    if absorption_key is None:
+        return bundle, 0.0, "direct input"
+    return bundle, 0.0, "direct input"
 
 
 def require_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...], *, label: str) -> None:
@@ -140,7 +246,7 @@ def require_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...], *, label:
     missing = [key for key in keys if key not in bundle]
     if missing:
         missing_text = ", ".join(missing)
-        raise KeyError(f"{label} bundle is missing required arrays: {missing_text}")
+        raise KeyError(f"{label} input store is missing required arrays: {missing_text}")
 
 
 def recommended_chunk_size(
@@ -173,7 +279,8 @@ def recommended_chunk_size(
 def print_problem_header(
     *,
     title: str,
-    bundle_path: Path,
+    input_path: Path,
+    input_kind: str,
     wavelengths: int,
     layers: int,
     load_seconds: float | None = None,
@@ -181,7 +288,8 @@ def print_problem_header(
 ) -> None:
     """Prints the benchmark header."""
     print(title)
-    print(f"  bundle: {bundle_path}")
+    print(f"  input: {input_path}")
+    print(f"  input kind: {input_kind}")
     print(f"  wavelengths: {wavelengths}")
     print(f"  layers: {layers}")
     if load_seconds is not None:

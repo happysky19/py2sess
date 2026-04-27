@@ -15,13 +15,16 @@ them explicitly.
 | `n_moments` / `fo_n_moments` | Defaults to `5000`; `0` means isotropic phase, negative values are rejected. The default HG fallback uses the closed-form phase function for any positive value; explicit phase moments remain a separate preprocessing path. | FO phase-function control |
 | `delta_m_truncation_factor` | Defaults to the differentiable HG fallback `g**2`; `py2sess.optical.phase` can derive the mixed Rayleigh/aerosol Fortran value from phase-moment inputs. | Python-generated unless explicit |
 | `fo_scatter_term` | Solar FO builds a differentiable HG term from `ssa`, `g`, geometry, and `delta_m_truncation_factor` when omitted; `py2sess.optical.phase` can derive the mixed Rayleigh/aerosol Fortran term from phase-moment inputs. | Python-generated unless explicit |
+| Scene optical inputs | `py2sess.optical.scene_io` loads profile text plus YAML scene files. `py2sess.optical.scene` covers GEOCAPE-style hydrostatic profile setup, air columns, Rayleigh Bodhaine cross section/depolarization, simple gas optical-depth integration, aerosol table interpolation, and `build_scene_opacity_components()` for the Python equivalents of CreateProps `taug`, `taudp`, `omega`, `fr`, and `fa`. `py2sess.optical.createprops` can read a local Fortran CreateProps provider directory for current benchmark parity. | Python-generated foundation plus interim provider |
 | Layer optical properties | `py2sess.optical.properties` can combine component optical depths into `tau`, `ssa`, Rayleigh scattering fraction, and aerosol scattering fractions. Prefer `absorption_tau` for total non-scattering absorption; `gas_absorption_tau` is accepted when that absorption is specifically gas-only. | Python-generated when component optical depths exist |
 | BRDF and surface leaving | Disabled unless `brdf_surface` or `surface_leaving` options and matching coefficient dictionaries are provided. | Explicit surface supplements |
 | Thermal source terms | Thermal RT requires `planck` and `surface_planck`. Benchmark bundles may provide legacy `thermal_bb_input`/`surfbb` directly, or provide temperatures plus a wavelength, wavenumber, or wavenumber-band coordinate so Python can generate the public source inputs. | Python-generated when physical inputs exist |
 | Thermal surface terms | `emissivity` and `albedo` are independent inputs. Benchmark bundles use explicit `emissivity` when available and fall back to `1 - albedo` only for older bundles. | Caller-controlled convention |
 
-Known limitation: Python helpers now cover component optical-depth mixing and
-RT-adjacent phase mixing, but not the full raw CreateProps/GEOCAPE
-optical-property pipeline. Gas cross sections, Rayleigh extinction,
-aerosol microphysics, and endpoint aerosol moments still need to come from an
-upstream optical-property provider.
+Known limitation: Python helpers now cover RT-adjacent phase mixing and the
+first scene-to-component optical-property pieces. The Fortran CreateProps
+provider is an interim source of component optical depths and phase inputs for
+benchmark parity; it is not the final raw-opacity layer. Gas cross-section
+lookup, O4 special handling, surface table readers, aerosol loading/profile
+readers, and endpoint aerosol moment table generation still need upstream
+Python providers or pyharp-style adapters.

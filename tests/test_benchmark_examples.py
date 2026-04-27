@@ -70,6 +70,11 @@ class BenchmarkExampleTests(unittest.TestCase):
             "aerosol_scattering_tau": scattering_tau[..., None] * aerosol_fraction,
         }
 
+    def _write_array_dir(self, path: Path, arrays: dict[str, np.ndarray]) -> None:
+        path.mkdir()
+        for key, value in arrays.items():
+            np.save(path / f"{key}.npy", np.asarray(value))
+
     def _run_benchmark_process(
         self,
         script: str,
@@ -128,7 +133,8 @@ class BenchmarkExampleTests(unittest.TestCase):
         )
         self.assertIn("numpy", output)
         self.assertIn("numpy-forward", output)
-        self.assertIn("layer optical properties: bundle", output)
+        self.assertIn("input kind: npz", output)
+        self.assertIn("layer optical properties: direct input", output)
         self.assertIn("geometry preprocessing: python-generated", output)
         self.assertIn("optical preprocessing: python-generated", output)
         self.assertIn("preprocessing total:", output)
@@ -143,135 +149,56 @@ class BenchmarkExampleTests(unittest.TestCase):
         )
         self.assertIn("numpy", output)
         self.assertIn("numpy-forward", output)
-        self.assertIn("layer optical properties: bundle", output)
+        self.assertIn("input kind: npz", output)
+        self.assertIn("layer optical properties: direct input", output)
         self.assertIn("geometry preprocessing: python-generated", output)
         self.assertIn("optical preprocessing: python-generated", output)
         self.assertIn("thermal source: temperature (wavenumber_band_cm_inv)", output)
         self.assertIn("preprocessing total:", output)
-        self.assertIn("emissivity: bundle", output)
+        self.assertIn("emissivity: direct input", output)
         if has_torch():
             self.assertIn("torch-cpu-float64-forward", output)
         self.assertIn("max abs diff", output)
 
-    def test_key_selection_prefers_python_generated_inputs(self) -> None:
+    def test_scene_profile_inputs_generate_layer_optics(self) -> None:
         common = _load_example_module("_full_spectrum_benchmark_common")
-        uv = _load_example_module("benchmark_uv_full_spectrum")
-        tir = _load_example_module("benchmark_tir_full_spectrum")
+        bundle = {
+            "wavelengths": np.array([500.0, 600.0]),
+            "heights": np.array([2.0, 1.0, 0.0]),
+            "pressure_hpa": np.array([100.0, 500.0, 1000.0]),
+            "temperature_k": np.array([220.0, 260.0, 290.0]),
+            "gas_vmr": np.array([[1.0e-8], [2.0e-8], [3.0e-8]]),
+            "gas_cross_sections": np.array([[1.0e-22], [2.0e-22]]),
+            "aerosol_loadings": np.array([[2.0], [1.0]]),
+            "aerosol_wavelengths_microns": np.array([0.4, 0.5, 0.7]),
+            "aerosol_select_wavelength_microns": np.array(0.5),
+            "aerosol_bulk_iops": np.array(
+                [
+                    [[10.0], [20.0], [40.0]],
+                    [[5.0], [10.0], [20.0]],
+                ]
+            ),
+        }
 
-        cases = [
-            {
-                "label": "uv",
-                "module": uv,
-                "available": {
-                    "tau",
-                    "omega",
-                    "absorption_tau",
-                    "rayleigh_scattering_tau",
-                    "aerosol_scattering_tau",
-                    "depol",
-                    "rayleigh_fraction",
-                    "aerosol_fraction",
-                    "aerosol_moments",
-                    "aerosol_interp_fraction",
-                    "asymm",
-                    "scaling",
-                    "fo_exact_scatter",
-                },
-                "total_key": "tau",
-                "ssa_key": "omega",
-                "expected_layer": (
-                    "absorption_tau",
-                    "rayleigh_scattering_tau",
-                    "aerosol_scattering_tau",
-                ),
-                "expected_optical": ("depol", "aerosol_moments", "aerosol_interp_fraction"),
-                "forbidden": {"tau", "omega", "asymm", "fo_exact_scatter"},
-            },
-            {
-                "label": "tir",
-                "module": tir,
-                "available": {
-                    "tau_arr",
-                    "omega_arr",
-                    "absorption_tau",
-                    "rayleigh_scattering_tau",
-                    "aerosol_extinction_tau",
-                    "aerosol_single_scattering_albedo",
-                    "depol",
-                    "rayleigh_fraction",
-                    "aerosol_fraction",
-                    "aerosol_moments",
-                    "wavenumber_cm_inv",
-                    "level_temperature_k",
-                    "surface_temperature_k",
-                    "wavenumber_band_cm_inv",
-                    "thermal_bb_input",
-                    "surfbb",
-                    "asymm_arr",
-                    "d2s_scaling",
-                },
-                "total_key": "tau_arr",
-                "ssa_key": "omega_arr",
-                "expected_layer": (
-                    "absorption_tau",
-                    "rayleigh_scattering_tau",
-                    "aerosol_extinction_tau",
-                    "aerosol_single_scattering_albedo",
-                ),
-                "expected_optical": ("depol", "aerosol_moments", "wavenumber_cm_inv"),
-                "forbidden": {"tau_arr", "omega_arr", "asymm_arr", "d2s_scaling"},
-            },
-        ]
-
-        for case in cases:
-            with self.subTest(case=case["label"]):
-                layer_keys = common.select_layer_optical_keys(
-                    case["available"],
-                    total_key=case["total_key"],
-                    ssa_key=case["ssa_key"],
-                )
-                optical_keys = case["module"]._select_optical_keys(
-                    case["available"],
-                    use_dumped_derived_optics=False,
-                    layer_optical_from_components=common.layer_optical_keys_are_components(
-                        layer_keys
-                    ),
-                    require_python_generated_inputs=True,
-                )
-
-                self.assertEqual(layer_keys, case["expected_layer"])
-                self.assertEqual(optical_keys, case["expected_optical"])
-                self.assertTrue(case["forbidden"].isdisjoint(layer_keys + optical_keys))
-
-        source_keys = tir._select_source_keys(
-            cases[1]["available"],
-            use_dumped_thermal_source=False,
-            require_python_generated_inputs=True,
+        layer_keys = common.select_layer_optical_keys(
+            set(bundle),
+            total_key="tau",
+            ssa_key="omega",
         )
-        self.assertEqual(
-            source_keys,
-            ("level_temperature_k", "surface_temperature_k", "wavenumber_band_cm_inv"),
+        self.assertTrue(common.layer_optical_keys_are_scene(layer_keys))
+
+        prepared, _, mode = common.prepare_layer_optical_properties(
+            bundle,
+            total_key="tau",
+            ssa_key="omega",
         )
-        self.assertNotIn("thermal_bb_input", source_keys)
-        with self.assertRaisesRegex(ValueError, "temperature-based thermal source"):
-            tir._select_source_keys(
-                {"thermal_bb_input", "surfbb"},
-                use_dumped_thermal_source=False,
-                require_python_generated_inputs=True,
-            )
-        with self.assertRaisesRegex(ValueError, "temperature-based thermal source"):
-            tir._select_source_keys(
-                {"level_temperature_k", "thermal_bb_input", "surfbb"},
-                use_dumped_thermal_source=False,
-                require_python_generated_inputs=True,
-            )
-        with self.assertRaisesRegex(ValueError, "surface_temperature_k") as caught:
-            tir._select_source_keys(
-                {"level_temperature_k", "wavenumber_cm_inv", "thermal_bb_input", "surfbb"},
-                use_dumped_thermal_source=False,
-                require_python_generated_inputs=True,
-            )
-        self.assertNotIn("wavenumber_band_cm_inv", str(caught.exception))
+
+        self.assertEqual(mode, "python-generated from scene/profile inputs")
+        self.assertEqual(prepared["tau"].shape, (2, 2))
+        self.assertEqual(prepared["omega"].shape, (2, 2))
+        self.assertEqual(prepared["depol"].shape, (2,))
+        self.assertEqual(prepared["rayleigh_fraction"].shape, (2, 2))
+        self.assertEqual(prepared["aerosol_fraction"].shape, (2, 2, 1))
 
     def test_uv_benchmark_does_not_require_dumped_geometry_or_optics(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "uv_benchmark_fixture.npz"
@@ -310,7 +237,7 @@ class BenchmarkExampleTests(unittest.TestCase):
             "fo_exact_scatter",
         }
         with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
-            trimmed = Path(tmpdir) / "uv_component_optics.npz"
+            trimmed = Path(tmpdir) / "uv_component_optics"
             arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
             arrays.update(
                 self._component_optical_depths(
@@ -320,31 +247,20 @@ class BenchmarkExampleTests(unittest.TestCase):
                     aerosol_fraction=np.array(data["aerosol_fraction"]),
                 )
             )
-            np.savez_compressed(trimmed, **arrays)
+            self._write_array_dir(trimmed, arrays)
             output = self._run_benchmark(
                 "benchmark_uv_full_spectrum.py",
                 trimmed,
                 extra_args=("--require-python-generated-inputs",),
             )
+        self.assertIn("input kind: array-directory", output)
         self.assertIn(
             "layer optical properties: python-generated from component optical depths",
             output,
         )
         self.assertIn("optical preprocessing: python-generated", output)
 
-    def test_uv_benchmark_rejects_row_index_wavelengths_for_generated_optics(self) -> None:
-        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "uv_benchmark_fixture.npz"
-        omitted = {"asymm", "scaling", "fo_exact_scatter", "aerosol_interp_fraction"}
-        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
-            trimmed = Path(tmpdir) / "uv_row_index_wavelengths.npz"
-            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
-            arrays["wavelengths"] = np.arange(1, data["wavelengths"].size + 1, dtype=float)
-            np.savez_compressed(trimmed, **arrays)
-            result = self._run_benchmark_process("benchmark_uv_full_spectrum.py", trimmed)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("physical wavelengths", result.stderr)
-
-    def test_strict_generated_input_mode_rejects_direct_layer_inputs(self) -> None:
+    def test_strict_generated_input_mode_rejects_legacy_npz_input_store(self) -> None:
         for script, fixture in (
             ("benchmark_uv_full_spectrum.py", "uv_benchmark_fixture.npz"),
             ("benchmark_tir_full_spectrum.py", "tir_benchmark_fixture.npz"),
@@ -356,49 +272,26 @@ class BenchmarkExampleTests(unittest.TestCase):
                     extra_args=("--require-python-generated-inputs",),
                 )
                 self.assertNotEqual(result.returncode, 0)
+                self.assertIn("array-directory input store", result.stderr)
+
+    def test_strict_generated_input_mode_rejects_direct_layer_inputs(self) -> None:
+        for script, fixture in (
+            ("benchmark_uv_full_spectrum.py", "uv_benchmark_fixture.npz"),
+            ("benchmark_tir_full_spectrum.py", "tir_benchmark_fixture.npz"),
+        ):
+            with self.subTest(script=script):
+                fixture_path = ROOT / "src" / "py2sess" / "data" / "benchmark" / fixture
+                with np.load(fixture_path) as data, tempfile.TemporaryDirectory() as tmpdir:
+                    input_dir = Path(tmpdir) / "direct_inputs"
+                    arrays = {key: np.array(data[key]) for key in data.files}
+                    self._write_array_dir(input_dir, arrays)
+                    result = self._run_benchmark_process(
+                        script,
+                        input_dir,
+                        extra_args=("--require-python-generated-inputs",),
+                    )
+                self.assertNotEqual(result.returncode, 0)
                 self.assertIn("strict generated-input mode requires component", result.stderr)
-
-    def test_tir_benchmark_does_not_require_dumped_optics(self) -> None:
-        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
-        omitted = {"asymm_arr", "d2s_scaling", "emissivity", "aerosol_interp_fraction"}
-        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
-            trimmed = Path(tmpdir) / "tir_minimal.npz"
-            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
-            arrays["wavelength_microns"] = np.array(data["wavelengths"]) / 1000.0
-            arrays["wavelengths"] = np.arange(1, data["wavelengths"].size + 1, dtype=float)
-            np.savez_compressed(trimmed, **arrays)
-            output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
-        self.assertIn("optical preprocessing: python-generated", output)
-        self.assertIn("emissivity: 1 - albedo", output)
-
-    def test_tir_benchmark_can_generate_layer_optical_properties(self) -> None:
-        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
-        omitted = {
-            "tau_arr",
-            "omega_arr",
-            "rayleigh_fraction",
-            "aerosol_fraction",
-            "asymm_arr",
-            "d2s_scaling",
-        }
-        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
-            trimmed = Path(tmpdir) / "tir_component_optics.npz"
-            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
-            arrays.update(
-                self._component_optical_depths(
-                    tau=np.array(data["tau_arr"]),
-                    ssa=np.array(data["omega_arr"]),
-                    rayleigh_fraction=np.array(data["rayleigh_fraction"]),
-                    aerosol_fraction=np.array(data["aerosol_fraction"]),
-                )
-            )
-            np.savez_compressed(trimmed, **arrays)
-            output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
-        self.assertIn(
-            "layer optical properties: python-generated from component optical depths",
-            output,
-        )
-        self.assertIn("optical preprocessing: python-generated", output)
 
     def test_tir_strict_mode_uses_python_generated_runtime_inputs(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
@@ -413,7 +306,7 @@ class BenchmarkExampleTests(unittest.TestCase):
             "surfbb",
         }
         with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
-            trimmed = Path(tmpdir) / "tir_strict_generated.npz"
+            trimmed = Path(tmpdir) / "tir_strict_generated"
             arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
             arrays.update(
                 self._component_optical_depths(
@@ -423,33 +316,19 @@ class BenchmarkExampleTests(unittest.TestCase):
                     aerosol_fraction=np.array(data["aerosol_fraction"]),
                 )
             )
-            np.savez_compressed(trimmed, **arrays)
+            self._write_array_dir(trimmed, arrays)
             output = self._run_benchmark(
                 "benchmark_tir_full_spectrum.py",
                 trimmed,
                 extra_args=("--require-python-generated-inputs",),
             )
+        self.assertIn("input kind: array-directory", output)
         self.assertIn(
             "layer optical properties: python-generated from component optical depths",
             output,
         )
         self.assertIn("optical preprocessing: python-generated", output)
         self.assertIn("thermal source: temperature (wavenumber_band_cm_inv)", output)
-
-    def test_tir_benchmark_can_use_wavenumber_for_optical_interpolation(self) -> None:
-        fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
-        omitted = {"asymm_arr", "d2s_scaling", "aerosol_interp_fraction"}
-        with np.load(fixture) as data, tempfile.TemporaryDirectory() as tmpdir:
-            trimmed = Path(tmpdir) / "tir_wavenumber_optics.npz"
-            arrays = {key: np.array(data[key]) for key in data.files if key not in omitted}
-            arrays["wavenumber_cm_inv"] = 1.0e7 / np.array(data["wavelengths"])
-            arrays["wavelengths"] = np.arange(1, data["wavelengths"].size + 1, dtype=float)
-            np.savez_compressed(trimmed, **arrays)
-            output = self._run_benchmark("benchmark_tir_full_spectrum.py", trimmed)
-        self.assertIn(
-            "optical preprocessing: python-generated (aerosol interpolation from wavenumber_cm_inv)",
-            output,
-        )
 
     def test_tir_benchmark_can_generate_thermal_source_from_temperature(self) -> None:
         fixture = ROOT / "src" / "py2sess" / "data" / "benchmark" / "tir_benchmark_fixture.npz"
@@ -479,7 +358,7 @@ class BenchmarkExampleTests(unittest.TestCase):
                     aerosol_fraction=np.array(data["aerosol_fraction"]),
                 )
             )
-        minimal = module.minimal_bundle_arrays("uv", arrays)
+        minimal = module.minimal_input_arrays("uv", arrays)
 
         for key in ("tau", "omega", "asymm", "scaling", "fo_exact_scatter", "chapman"):
             self.assertNotIn(key, minimal)
@@ -522,7 +401,7 @@ class BenchmarkExampleTests(unittest.TestCase):
                 900.0,
                 int(data["tau_arr"].shape[0]),
             )
-        minimal = module.minimal_bundle_arrays("tir", arrays)
+        minimal = module.minimal_input_arrays("tir", arrays)
 
         for key in (
             "tau_arr",
