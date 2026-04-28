@@ -26,6 +26,13 @@ def gas_cross_sections_from_table3d(
     target_spectral = _target_spectral_axis(table, spectral)
     xsec = _align_table_axes(table, gas_names=gas_names)
     xsec = _interp_spectral(table["spectral"], xsec, target_spectral)
+    if xsec.ndim == 3:
+        return _profile_table_cross_sections(
+            table=table,
+            cross_section=xsec,
+            pressure_hpa=np.asarray(pressure_hpa, dtype=float),
+            temperature_k=np.asarray(temperature_k, dtype=float),
+        )
     return _interp_pressure_temperature(
         pressure_axis=np.asarray(table["pressure_hpa"], dtype=float),
         temperature_axis=np.asarray(table["temperature_k"], dtype=float),
@@ -109,8 +116,11 @@ def _align_table_axes(
     table: dict[str, np.ndarray | tuple[str, ...]], *, gas_names: tuple[str, ...]
 ) -> np.ndarray:
     xsec = np.asarray(table["cross_section"], dtype=float)
-    if xsec.ndim != 4:
-        raise ValueError("cross_section must have shape (gas, spectral, pressure, temperature)")
+    if xsec.ndim not in {3, 4}:
+        raise ValueError(
+            "cross_section must have shape (gas, spectral, level) "
+            "or (gas, spectral, pressure, temperature)"
+        )
     if not np.all(np.isfinite(xsec)) or np.any(xsec < 0.0):
         raise ValueError("cross_section must be finite and nonnegative")
     if table.get("gas_names") is not None:
@@ -147,8 +157,31 @@ def _interp_spectral(axis: np.ndarray, xsec: np.ndarray, target: np.ndarray) -> 
     if np.any(target < axis[0]) or np.any(target > axis[-1]):
         raise ValueError("scene spectral grid extends outside opacity table")
     lower, upper, weight = _bracket(axis, target, "spectral axis")
-    weight = weight[np.newaxis, :, np.newaxis, np.newaxis]
-    return (1.0 - weight) * xsec[:, lower, :, :] + weight * xsec[:, upper, :, :]
+    weight = weight.reshape((1, target.size) + (1,) * (xsec.ndim - 2))
+    return (1.0 - weight) * xsec[:, lower, ...] + weight * xsec[:, upper, ...]
+
+
+def _profile_table_cross_sections(
+    *,
+    table: dict[str, np.ndarray | tuple[str, ...]],
+    cross_section: np.ndarray,
+    pressure_hpa: np.ndarray,
+    temperature_k: np.ndarray,
+) -> np.ndarray:
+    pressure = np.asarray(table["pressure_hpa"], dtype=float)
+    temperature = np.asarray(table["temperature_k"], dtype=float)
+    target_pressure = _profile_axis(pressure_hpa, "pressure_hpa")
+    target_temperature = _profile_axis(temperature_k, "temperature_k")
+    if pressure.shape != target_pressure.shape or temperature.shape != target_temperature.shape:
+        raise ValueError("profile-level opacity table does not match profile level count")
+    if not (
+        np.allclose(pressure, target_pressure, rtol=1.0e-12, atol=1.0e-12)
+        and np.allclose(temperature, target_temperature, rtol=1.0e-12, atol=1.0e-12)
+    ):
+        raise ValueError("profile-level opacity table pressure/temperature do not match profile")
+    if cross_section.shape[2] != target_pressure.size:
+        raise ValueError("profile-level opacity table level axis does not match profile")
+    return np.moveaxis(cross_section, 0, -1)
 
 
 def _interp_pressure_temperature(

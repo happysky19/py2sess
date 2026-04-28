@@ -25,9 +25,18 @@ opacity:
 
 The NetCDF table must provide `cross_section(gas, spectral, pressure,
 temperature)` plus `pressure_hpa`, `temperature_k`, and either
-`wavenumber_cm_inv`, `wavelength_nm`, or `wavelength_microns`.
+`wavenumber_cm_inv`, `wavelength_nm`, or `wavelength_microns`. For exact
+benchmark caches, `cross_section(gas, spectral, level)` with matching profile
+`pressure_hpa(level)` and `temperature_k(level)` is also accepted.
 
-To build a local HITRAN table offline:
+To build an exact local HITRAN table for a profile and scene:
+
+```bash
+PYTHONPATH=src python3 scripts/create_hitran_opacity_table.py gas_xsec.nc \
+  --profile profile.txt --scene scene.yaml
+```
+
+To build a reusable pressure-temperature lookup table:
 
 ```bash
 PYTHONPATH=src python3 scripts/create_hitran_opacity_table.py gas_xsec.nc \

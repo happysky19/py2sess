@@ -40,6 +40,21 @@ class OpacityTableTests(unittest.TestCase):
         np.testing.assert_allclose(got, expected)
         np.testing.assert_allclose(o3, expected[:, :, 1:2])
 
+    def test_profile_level_table_matches_exact_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "xsec.nc"
+            raw = self._write_profile_table(path)
+
+            got = gas_cross_sections_from_table3d(
+                path=path,
+                gas_names=("H2O", "O3"),
+                pressure_hpa=np.array([100.0, 500.0, 1000.0]),
+                temperature_k=np.array([220.0, 260.0, 290.0]),
+                spectral={"wavenumber_cm_inv": np.array([999.0, 1000.0])},
+            )
+
+        np.testing.assert_allclose(got, raw[[1, 0]].transpose(1, 2, 0))
+
     def test_scene_builder_accepts_table3d_gas_cross_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -125,6 +140,30 @@ opacity:
                 "d",
                 ("gas", "wave", "pressure", "temperature"),
             )[:] = raw
+        return raw
+
+    @staticmethod
+    def _write_profile_table(path: Path) -> np.ndarray:
+        wavenumber = np.array([999.0, 1000.0])
+        pressure = np.array([100.0, 500.0, 1000.0])
+        temperature = np.array([220.0, 260.0, 290.0])
+        raw = np.empty((2, 2, 3), dtype=float)
+        for gas in range(2):
+            for wave in range(2):
+                for level in range(3):
+                    raw[gas, wave, level] = 1.0e-22 * (1 + gas + 10 * wave + 100 * level)
+
+        with netcdf_file(path, "w") as data:
+            data.createDimension("gas", 2)
+            data.createDimension("wave", 2)
+            data.createDimension("level", 3)
+            data.createDimension("name_strlen", 3)
+            data.createVariable("wavenumber_cm_inv", "d", ("wave",))[:] = wavenumber
+            data.createVariable("pressure_hpa", "d", ("level",))[:] = pressure
+            data.createVariable("temperature_k", "d", ("level",))[:] = temperature
+            names = np.array([[b"O", b"3", b" "], [b"H", b"2", b"O"]], dtype="S1")
+            data.createVariable("gas_names", "c", ("gas", "name_strlen"))[:] = names
+            data.createVariable("cross_section", "d", ("gas", "wave", "level"))[:] = raw
         return raw
 
     @staticmethod
