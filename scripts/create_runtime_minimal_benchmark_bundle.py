@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 
-_SCENE_LAYER_REQUIRED_KEYS = {"pressure_hpa", "temperature_k", "gas_cross_sections"}
+_SCENE_LAYER_REQUIRED_KEYS = {"pressure_hpa", "temperature_k", "gas_absorption_tau"}
 _ABSORPTION_KEYS = ("absorption_tau", "gas_absorption_tau")
 _AEROSOL_EXTINCTION_KEY = "aerosol_extinction_tau"
 _AEROSOL_SCATTERING_KEY = "aerosol_scattering_tau"
@@ -141,7 +141,7 @@ def minimal_input_arrays(kind: str, arrays: dict[str, np.ndarray]) -> dict[str, 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("kind", choices=["uv", "tir"])
-    parser.add_argument("input", type=Path, help="Input enriched benchmark .npz bundle.")
+    parser.add_argument("input", type=Path, help="Input benchmark .npz bundle.")
     parser.add_argument("output", type=Path, help="Output runtime-minimal .npy directory.")
     args = parser.parse_args()
 

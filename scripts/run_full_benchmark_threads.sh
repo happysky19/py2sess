@@ -129,6 +129,7 @@ run_case() {
   MKL_NUM_THREADS="$threads" \
   VECLIB_MAXIMUM_THREADS="$threads" \
   NUMEXPR_NUM_THREADS="$threads" \
+  NUMBA_NUM_THREADS="$threads" \
   PYTHONDONTWRITEBYTECODE=1 \
   PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
     "${command[@]}" \

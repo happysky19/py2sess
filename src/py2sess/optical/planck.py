@@ -24,7 +24,8 @@ _FORTRAN_PLANCK_NSIMPSON = 25
 _FORTRAN_PLANCK_CRITERION = 1.0e-10
 _FORTRAN_PLANCK_VCUT = 1.5
 _FORTRAN_PLANCK_VCP = (10.25, 5.7, 3.9, 2.9, 2.3, 1.9, 0.0)
-_ROW_BAND_CHUNK_SIZE = 4096
+_ROW_BAND_CHUNK_SIZE = 16384
+_ROW_BAND_UNIFORM_CHUNK_SIZE = 32768
 
 
 @dataclass(frozen=True)
@@ -88,20 +89,7 @@ def planck_radiance_wavelength(
     temperature_k: _ScalarOrArrayLike,
     wavelength_microns: _ScalarOrArrayLike,
 ) -> np.ndarray:
-    """Evaluate the Planck function in wavelength form.
-
-    Parameters
-    ----------
-    temperature_k
-        Scalar or array of temperatures in Kelvin.
-    wavelength_microns
-        Scalar or array of wavelengths in microns.
-
-    Returns
-    -------
-    numpy.ndarray
-        Spectral radiance values in SI wavelength units.
-    """
+    """Evaluate the Planck function in wavelength form."""
 
     temperature = _validate_temperature("temperature_k", temperature_k)
     wavelength = _validate_positive_coordinate("wavelength_microns", wavelength_microns)
@@ -118,20 +106,7 @@ def planck_radiance_wavenumber(
     temperature_k: _ScalarOrArrayLike,
     wavenumber_cm_inv: _ScalarOrArrayLike,
 ) -> np.ndarray:
-    """Evaluate the Planck function in wavenumber form.
-
-    Parameters
-    ----------
-    temperature_k
-        Scalar or array of temperatures in Kelvin.
-    wavenumber_cm_inv
-        Scalar or array of wavenumbers in inverse centimeters.
-
-    Returns
-    -------
-    numpy.ndarray
-        Spectral radiance values in SI wavenumber units.
-    """
+    """Evaluate the Planck function in wavenumber form."""
 
     temperature = _validate_temperature("temperature_k", temperature_k)
     wavenumber = _validate_positive_coordinate("wavenumber_cm_inv", wavenumber_cm_inv)
@@ -256,17 +231,50 @@ def _fortran_planck_band_simpson_vectorized(
     scaling: np.ndarray,
 ) -> np.ndarray:
     interval = x_high - x_low
-    endpoints = x_low**3 / np.expm1(x_low) + x_high**3 / np.expm1(x_high)
+    f_low = x_low**3 / np.expm1(x_low)
+    f_high = x_high**3 / np.expm1(x_high)
+    endpoints = f_low + f_high
     previous = endpoints * 0.5 * interval
     result = np.empty_like(x_low, dtype=np.float64)
-    positions = np.arange(x_low.size)
-    active_x_low = x_low
-    active_interval = interval
-    active_endpoints = endpoints
-    active_previous = previous
-    active_scaling = scaling
 
-    for n in range(1, _FORTRAN_PLANCK_NSIMPSON + 1):
+    mid = x_low + 0.5 * interval
+    value = (endpoints + 4.0 * mid**3 / np.expm1(mid)) * interval / 6.0
+    converged = np.abs((value - previous) / value) <= _FORTRAN_PLANCK_CRITERION
+    if np.any(converged):
+        result[converged] = scaling[converged] * value[converged] * _FORTRAN_PLANCK_CONC
+    if np.all(converged):
+        return result
+
+    active = ~converged
+    q1 = x_low[active] + 0.25 * interval[active]
+    q3 = x_low[active] + 0.75 * interval[active]
+    value2 = (
+        (
+            endpoints[active]
+            + 4.0 * q1**3 / np.expm1(q1)
+            + 2.0 * mid[active] ** 3 / np.expm1(mid[active])
+            + 4.0 * q3**3 / np.expm1(q3)
+        )
+        * interval[active]
+        / 12.0
+    )
+    converged2 = np.abs((value2 - value[active]) / value2) <= _FORTRAN_PLANCK_CRITERION
+    active_positions = np.flatnonzero(active)
+    if np.any(converged2):
+        result[active_positions[converged2]] = (
+            scaling[active][converged2] * value2[converged2] * _FORTRAN_PLANCK_CONC
+        )
+    if np.all(converged2):
+        return result
+
+    keep_positions = active_positions[~converged2]
+    active_x_low = x_low[keep_positions]
+    active_interval = interval[keep_positions]
+    active_endpoints = endpoints[keep_positions]
+    active_previous = value2[~converged2]
+    active_scaling = scaling[keep_positions]
+
+    for n in range(3, _FORTRAN_PLANCK_NSIMPSON + 1):
         step = 0.5 * active_interval / float(n)
         value = active_endpoints.copy()
         for k in range(1, 2 * n):
@@ -276,13 +284,16 @@ def _fortran_planck_band_simpson_vectorized(
         value *= step / 3.0
         converged = np.abs((value - active_previous) / value) <= _FORTRAN_PLANCK_CRITERION
         if np.any(converged):
-            result[positions[converged]] = (
+            result[keep_positions[converged]] = (
                 active_scaling[converged] * value[converged] * _FORTRAN_PLANCK_CONC
             )
+        if not np.any(converged):
+            active_previous = value
+            continue
         keep = ~converged
         if not np.any(keep):
             return result
-        positions = positions[keep]
+        keep_positions = keep_positions[keep]
         active_x_low = active_x_low[keep]
         active_interval = active_interval[keep]
         active_endpoints = active_endpoints[keep]
@@ -338,25 +349,7 @@ def planck_radiance_wavenumber_band(
     wavenumber_low_cm_inv: _ScalarOrArrayLike,
     wavenumber_high_cm_inv: _ScalarOrArrayLike,
 ) -> np.ndarray:
-    """Evaluate the Fortran-compatible band-integrated Planck function.
-
-    Parameters
-    ----------
-    temperature_k
-        Scalar or array of temperatures in Kelvin.
-    wavenumber_low_cm_inv
-        Lower band limit in inverse centimeters. Scalars or arrays following
-        NumPy broadcasting rules are accepted.
-    wavenumber_high_cm_inv
-        Upper band limit in inverse centimeters. Scalars or arrays following
-        NumPy broadcasting rules are accepted.
-
-    Returns
-    -------
-    numpy.ndarray
-        Planck radiance integrated over the wavenumber band, matching the
-        ``get_planckfunction`` helper in the original 2S-ESS Fortran.
-    """
+    """Evaluate the Fortran-compatible band-integrated Planck function."""
 
     temperature = _validate_temperature("temperature_k", temperature_k)
     low, high = _validate_wavenumber_band(wavenumber_low_cm_inv, wavenumber_high_cm_inv)
@@ -389,6 +382,15 @@ def _row_band_thermal_source(
     if surface_temperature.ndim == 1 and surface_temperature.size not in {1, n_rows}:
         raise ValueError("surface_temperature_k must be scalar or have shape (n_spectral,)")
 
+    uniform_source = _row_band_thermal_source_uniform_grid(
+        level_temperature,
+        surface_temperature,
+        low,
+        high,
+    )
+    if uniform_source is not None:
+        return uniform_source
+
     planck = np.empty((n_rows, level_temperature.size), dtype=np.float64)
     surface_planck = np.empty(n_rows, dtype=np.float64)
     for start in range(0, n_rows, _ROW_BAND_CHUNK_SIZE):
@@ -414,6 +416,124 @@ def _row_band_thermal_source(
     return ThermalSourceInputs(planck=planck, surface_planck=surface_planck)
 
 
+def _uniform_band_offsets(
+    low: np.ndarray, high: np.ndarray
+) -> tuple[float, float, np.ndarray] | None:
+    if low.size < 2:
+        return None
+    steps = np.diff(low)
+    widths = high - low
+    step = float(np.median(steps))
+    width = float(np.median(widths))
+    if step <= 0.0 or width <= 0.0:
+        return None
+    if not np.allclose(steps, step, rtol=1.0e-10, atol=1.0e-12):
+        return None
+    if not np.allclose(widths, width, rtol=1.0e-10, atol=1.0e-12):
+        return None
+    offsets = np.rint(np.array([0.0, 0.25, 0.5, 0.75, 1.0]) * width / step).astype(int)
+    if np.any(offsets < 0):
+        return None
+    if not np.allclose(offsets * step, np.array([0.0, 0.25, 0.5, 0.75, 1.0]) * width):
+        return None
+    return step, width, offsets
+
+
+def _row_band_thermal_source_uniform_grid(
+    level_temperature: np.ndarray,
+    surface_temperature: np.ndarray,
+    low: np.ndarray,
+    high: np.ndarray,
+) -> ThermalSourceInputs | None:
+    uniform = _uniform_band_offsets(low, high)
+    if uniform is None:
+        return None
+    if surface_temperature.ndim == 1 and surface_temperature.size > 1:
+        return None
+    step, width, offsets = uniform
+    temperatures = np.concatenate(
+        (
+            level_temperature,
+            np.asarray(surface_temperature, dtype=np.float64).reshape(-1)[:1],
+        )
+    )
+    if not _uniform_band_path_is_narrow(temperatures, low, high):
+        return None
+
+    n_rows = low.size
+    values = np.empty((n_rows, temperatures.size), dtype=np.float64)
+    for start in range(0, n_rows, _ROW_BAND_UNIFORM_CHUNK_SIZE):
+        stop = min(start + _ROW_BAND_UNIFORM_CHUNK_SIZE, n_rows)
+        chunk = _uniform_band_chunk(
+            temperatures=temperatures,
+            first_low=float(low[0]),
+            step=step,
+            width=width,
+            offsets=offsets,
+            start=start,
+            stop=stop,
+        )
+        if chunk is None:
+            return None
+        values[start:stop] = chunk
+    return ThermalSourceInputs(planck=values[:, :-1], surface_planck=values[:, -1])
+
+
+def _uniform_band_path_is_narrow(
+    temperatures: np.ndarray,
+    low: np.ndarray,
+    high: np.ndarray,
+) -> bool:
+    gamma = _FORTRAN_C2 / temperatures
+    x_low_min = float(np.min(gamma) * np.min(low))
+    x_high_max = float(np.max(gamma) * np.max(high))
+    relative_width_max = float(np.max((high - low) / high))
+    return (
+        x_low_min > _FORTRAN_PLANCK_EPSIL
+        and x_high_max < _FORTRAN_PLANCK_VMAX
+        and relative_width_max < 1.0e-2
+    )
+
+
+def _uniform_band_chunk(
+    *,
+    temperatures: np.ndarray,
+    first_low: float,
+    step: float,
+    width: float,
+    offsets: np.ndarray,
+    start: int,
+    stop: int,
+) -> np.ndarray | None:
+    n_rows = stop - start
+    wavenumber = first_low + step * np.arange(start, stop + int(offsets[-1]), dtype=np.float64)
+    gamma = _FORTRAN_C2 / temperatures
+    interval = width * gamma
+    x_grid = wavenumber[:, np.newaxis] * gamma[np.newaxis, :]
+    f_grid = x_grid**3 / np.expm1(x_grid)
+    endpoint = f_grid[:n_rows] + f_grid[offsets[4] : offsets[4] + n_rows]
+    midpoint = f_grid[offsets[2] : offsets[2] + n_rows]
+    previous = endpoint * 0.5 * interval
+    value1 = (endpoint + 4.0 * midpoint) * interval / 6.0
+    value2 = (
+        (
+            endpoint
+            + 4.0 * f_grid[offsets[1] : offsets[1] + n_rows]
+            + 2.0 * midpoint
+            + 4.0 * f_grid[offsets[3] : offsets[3] + n_rows]
+        )
+        * interval
+        / 12.0
+    )
+    converged1 = np.abs((value1 - previous) / value1) <= _FORTRAN_PLANCK_CRITERION
+    converged2 = np.abs((value2 - value1) / value2) <= _FORTRAN_PLANCK_CRITERION
+    if not np.all(converged1 | converged2):
+        return None
+    value = np.where(converged1, value1, value2)
+    scaling = _FORTRAN_SIGMA_OVER_PI * temperatures**4
+    return value * scaling[np.newaxis, :] * _FORTRAN_PLANCK_CONC
+
+
 def thermal_source_from_temperature_profile(
     level_temperature_k: _VectorLike,
     surface_temperature_k: _ScalarOrArrayLike,
@@ -422,30 +542,7 @@ def thermal_source_from_temperature_profile(
     wavenumber_cm_inv: _ScalarOrArrayLike | None = None,
     wavenumber_band_cm_inv: _ScalarOrArrayLike | None = None,
 ) -> ThermalSourceInputs:
-    """Build ``planck`` and ``surface_planck`` from temperatures.
-
-    Exactly one spectral coordinate must be provided.
-
-    Parameters
-    ----------
-    level_temperature_k
-        One-dimensional model-level temperatures in Kelvin.
-    surface_temperature_k
-        Scalar or spectral-array surface temperature in Kelvin.
-    wavelength_microns
-        Wavelength in microns for the Planck evaluation.
-    wavenumber_cm_inv
-        Wavenumber in inverse centimeters for the Planck evaluation.
-    wavenumber_band_cm_inv
-        Two-element ``(low, high)`` wavenumber band, or an
-        ``(n_spectral, 2)`` array of row-wise bands, in inverse centimeters for
-        the Fortran-compatible band-integrated Planck evaluation.
-
-    Returns
-    -------
-    ThermalSourceInputs
-        Thermal source inputs suitable for ``py2sess`` thermal forward calls.
-    """
+    """Build ``planck`` and ``surface_planck`` from one spectral coordinate."""
 
     level_temperature = _as_float_array("level_temperature_k", level_temperature_k)
     _validate_temperature("level_temperature_k", level_temperature)

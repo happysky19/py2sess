@@ -11,48 +11,55 @@ import numpy as np
 from _full_spectrum_benchmark_common import (
     accuracy_summary,
     BenchmarkRow,
+    has_keys,
     input_keys,
     input_store_kind,
     load_input_arrays,
     looks_like_row_index,
     layer_optical_keys_are_components,
     layer_optical_keys_are_scene,
-    layer_optical_keys_generate_fractions,
+    print_preprocessing_summary,
     print_problem_header,
     prepare_layer_optical_properties,
     print_rows,
+    public_bvp_solver,
     recommended_chunk_size,
     require_directory_input_store,
     require_python_generated_layer_optical_inputs,
     require_keys,
     scalar_value,
     select_layer_optical_keys,
+    select_phase_optical_keys,
+    slice_spectral_rows,
+    trim_spectral_rows,
+    with_layer_aliases,
 )
 from py2sess import (
     thermal_source_from_temperature_profile,
     TwoStreamEss,
     TwoStreamEssOptions,
 )
-from py2sess.optical.phase import aerosol_interp_fraction, build_two_stream_phase_inputs
+from py2sess.optical.phase import (
+    aerosol_interp_fraction,
+    build_two_stream_phase_inputs,
+    build_two_stream_phase_inputs_from_scattering_tau,
+)
 from py2sess.optical.scene_io import build_benchmark_scene_inputs
 from py2sess.rtsolver import precompute_fo_thermal_geometry_numpy
 from py2sess.rtsolver.backend import has_torch
 from py2sess.rtsolver.thermal_batch_numpy import _fo_thermal_toa, _two_stream_thermal_toa
 
 
-def _public_bvp_solver(engine: str) -> str:
-    """Maps low-level benchmark BVP names to public option names."""
-    if engine == "block":
-        return "banded"
-    if engine == "pentadiagonal":
-        return "pentadiag"
-    return "scipy"
-
-
 _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS = (
     "depol",
     "rayleigh_fraction",
     "aerosol_fraction",
+    "aerosol_moments",
+)
+_TIR_COMPONENT_PHASE_KEYS = (
+    "depol",
+    "rayleigh_scattering_tau",
+    "aerosol_scattering_tau",
     "aerosol_moments",
 )
 
@@ -78,44 +85,31 @@ _TIR_SOURCE_COORDINATE_KEYS = (
 )
 _TIR_AEROSOL_COORDINATE_KEYS = ("wavenumber_cm_inv", "wavelength_microns")
 
-
-def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
-    return all(key in bundle for key in keys)
-
-
-def _select_optical_keys(
-    available: set[str],
-    *,
-    use_dumped_derived_optics: bool,
-    layer_optical_generates_fractions: bool,
-    layer_optical_from_scene: bool,
-    require_python_generated_inputs: bool = False,
-) -> tuple[str, ...]:
-    if require_python_generated_inputs and use_dumped_derived_optics:
-        raise ValueError(
-            "TIR strict generated-input mode cannot be combined with --use-dumped-derived-optics"
-        )
-    if layer_optical_from_scene:
-        required_physical = ("aerosol_moments",)
-    elif layer_optical_generates_fractions:
-        required_physical = ("depol", "aerosol_moments")
-    else:
-        required_physical = _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS
-    has_physical_optics = set(required_physical).issubset(available)
-    if not use_dumped_derived_optics and has_physical_optics:
-        keys = list(required_physical)
-        if _TIR_AEROSOL_INTERP_KEY in available:
-            keys.append(_TIR_AEROSOL_INTERP_KEY)
-        else:
-            keys.extend(key for key in _TIR_AEROSOL_COORDINATE_KEYS if key in available)
-        return tuple(keys)
-    if require_python_generated_inputs:
-        missing = ", ".join(key for key in required_physical if key not in available)
-        raise ValueError(
-            "TIR strict generated-input mode requires physical phase inputs"
-            + (f": {missing}" if missing else "")
-        )
-    return _TIR_DUMPED_OPTICS_KEYS
+_TIR_CHUNK_KEYS = (
+    "tau",
+    "ssa",
+    "g",
+    "delta_m_truncation_factor",
+    "planck",
+    "surface_planck",
+    "albedo",
+    "emissivity",
+)
+_TIR_LIMIT_KEYS = (
+    _TIR_BASE_KEYS
+    + _TIR_DIRECT_SOURCE_KEYS
+    + _TIR_SOURCE_COORDINATE_KEYS
+    + _TIR_DUMPED_OPTICS_KEYS
+    + (
+        "emissivity",
+        "surface_temperature_k",
+        "depol",
+        "rayleigh_fraction",
+        "aerosol_fraction",
+        "aerosol_interp_fraction",
+        "ref_total",
+    )
+)
 
 
 def _positive_coordinate(name: str, values: np.ndarray) -> np.ndarray:
@@ -179,40 +173,46 @@ def _select_source_keys(
     return _TIR_DIRECT_SOURCE_KEYS
 
 
-def _normalize_layer_inputs(bundle: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    prepared = dict(bundle)
-    prepared["tau"] = bundle["tau_arr"]
-    prepared["ssa"] = bundle["omega_arr"]
-    return prepared
-
-
 def _prepare_optics(
     bundle: dict[str, np.ndarray],
     *,
     use_dumped_derived_optics: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
-    if use_dumped_derived_optics or not _has_keys(bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS):
+    has_component_phase = has_keys(bundle, _TIR_COMPONENT_PHASE_KEYS)
+    has_fraction_phase = has_keys(bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS)
+    if use_dumped_derived_optics or not (has_component_phase or has_fraction_phase):
         require_keys(bundle, _TIR_DUMPED_OPTICS_KEYS, label="TIR dumped optical")
         prepared = dict(bundle)
         prepared["g"] = bundle["asymm_arr"]
         prepared["delta_m_truncation_factor"] = bundle["d2s_scaling"]
         mode = "dumped-derived"
-        if not use_dumped_derived_optics and not _has_keys(
-            bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS
-        ):
+        if not use_dumped_derived_optics and not (has_component_phase or has_fraction_phase):
             mode = "dumped-derived (physical optical inputs unavailable)"
         return prepared, 0.0, mode
 
     start = time.perf_counter()
     fac, mode = _tir_aerosol_interp_fraction(bundle)
-    optics = build_two_stream_phase_inputs(
-        ssa=bundle["ssa"],
-        depol=bundle["depol"],
-        rayleigh_fraction=bundle["rayleigh_fraction"],
-        aerosol_fraction=bundle["aerosol_fraction"],
-        aerosol_moments=bundle["aerosol_moments"],
-        aerosol_interp_fraction=fac,
-    )
+    if has_component_phase:
+        optics = build_two_stream_phase_inputs_from_scattering_tau(
+            ssa=bundle["ssa"],
+            depol=bundle["depol"],
+            rayleigh_scattering_tau=bundle["rayleigh_scattering_tau"],
+            aerosol_scattering_tau=bundle["aerosol_scattering_tau"],
+            aerosol_moments=bundle["aerosol_moments"],
+            aerosol_interp_fraction=fac,
+            scattering_tau=bundle.get("_scattering_tau"),
+            validate_inputs=False,
+        )
+    else:
+        optics = build_two_stream_phase_inputs(
+            ssa=bundle["ssa"],
+            depol=bundle["depol"],
+            rayleigh_fraction=bundle["rayleigh_fraction"],
+            aerosol_fraction=bundle["aerosol_fraction"],
+            aerosol_moments=bundle["aerosol_moments"],
+            aerosol_interp_fraction=fac,
+            validate_inputs=False,
+        )
     prepared = dict(bundle)
     prepared[_TIR_AEROSOL_INTERP_KEY] = fac
     prepared["g"] = optics.g
@@ -226,7 +226,7 @@ def _prepare_thermal_source(
     use_dumped_thermal_source: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
     source_coordinates = [key for key in _TIR_SOURCE_COORDINATE_KEYS if key in bundle]
-    has_temperature = _has_keys(bundle, _TIR_TEMPERATURE_SOURCE_KEYS)
+    has_temperature = has_keys(bundle, _TIR_TEMPERATURE_SOURCE_KEYS)
     if not use_dumped_thermal_source and has_temperature and source_coordinates:
         start = time.perf_counter()
         coordinate_name = source_coordinates[0]
@@ -288,23 +288,6 @@ def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarr
     return prepared, time.perf_counter() - start
 
 
-def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
-    """Returns one spectral chunk from a TIR benchmark bundle."""
-    chunk = {
-        "tau": bundle["tau"][start:stop],
-        "ssa": bundle["ssa"][start:stop],
-        "g": bundle["g"][start:stop],
-        "delta_m_truncation_factor": bundle["delta_m_truncation_factor"][start:stop],
-        "planck": bundle["planck"][start:stop],
-        "surface_planck": bundle["surface_planck"][start:stop],
-        "albedo": bundle["albedo"][start:stop],
-        "emissivity": bundle["emissivity"][start:stop],
-    }
-    if "ref_total" in bundle:
-        chunk["ref_total"] = bundle["ref_total"][start:stop]
-    return chunk
-
-
 def benchmark_numpy(
     bundle: dict[str, np.ndarray],
     *,
@@ -325,7 +308,7 @@ def benchmark_numpy(
     max_rel_diff_pct = None
     for start in range(0, wavelengths, chunk_size):
         stop = min(start + chunk_size, wavelengths)
-        chunk = _slice_rows(bundle, start, stop)
+        chunk = slice_spectral_rows(bundle, _TIR_CHUNK_KEYS, start, stop)
         t0 = time.perf_counter()
         two_stream = _two_stream_thermal_toa(
             tau=chunk["tau"],
@@ -400,7 +383,7 @@ def benchmark_numpy_forward(
         TwoStreamEssOptions(
             nlyr=int(bundle["tau"].shape[1]),
             mode="thermal",
-            bvp_solver=_public_bvp_solver(numpy_bvp_engine),
+            bvp_solver=public_bvp_solver(numpy_bvp_engine),
             output_levels=output_levels,
         )
     )
@@ -485,7 +468,7 @@ def benchmark_torch(
     max_rel_diff_pct = None
     for start in range(0, wavelengths, chunk_size):
         stop = min(start + chunk_size, wavelengths)
-        chunk = _slice_rows(bundle, start, stop)
+        chunk = slice_spectral_rows(bundle, _TIR_CHUNK_KEYS, start, stop)
         with torch.no_grad():
             tau_t = _as_tensor(chunk["tau"], dtype=dtype, device=device)
             omega_t = _as_tensor(chunk["ssa"], dtype=dtype, device=device)
@@ -589,7 +572,7 @@ def benchmark_torch_forward(
             nlyr=int(bundle["tau"].shape[1]),
             mode="thermal",
             backend="torch",
-            bvp_solver=_public_bvp_solver(torch_bvp_engine),
+            bvp_solver=public_bvp_solver(torch_bvp_engine),
             torch_device=torch_device_name,
             torch_dtype=torch_dtype_name,
             torch_enable_grad=False,
@@ -704,6 +687,7 @@ def main() -> None:
             kind="tir",
             profile_path=args.profile,
             scene_path=args.scene,
+            spectral_limit=args.limit,
         )
         available = set(bundle)
         input_path = args.scene
@@ -720,11 +704,9 @@ def main() -> None:
         total_key="tau_arr",
         ssa_key="omega_arr",
     )
-    base_keys = tuple(
-        key
-        for key in _TIR_BASE_KEYS
-        if key != "heights" or not layer_optical_keys_are_scene(layer_optical_keys)
-    )
+    layer_from_scene = layer_optical_keys_are_scene(layer_optical_keys)
+    layer_from_components = layer_optical_keys_are_components(layer_optical_keys)
+    base_keys = tuple(key for key in _TIR_BASE_KEYS if key != "heights" or not layer_from_scene)
     if args.require_python_generated_inputs:
         require_python_generated_layer_optical_inputs(
             layer_optical_keys,
@@ -732,12 +714,17 @@ def main() -> None:
             ssa_key="omega_arr",
             label="TIR",
         )
-    optical_keys = _select_optical_keys(
+    optical_keys = select_phase_optical_keys(
         available,
+        label="TIR",
         use_dumped_derived_optics=args.use_dumped_derived_optics,
-        layer_optical_generates_fractions=layer_optical_keys_generate_fractions(layer_optical_keys),
-        layer_optical_from_scene=layer_optical_keys_are_scene(layer_optical_keys),
+        layer_optical_generates_fractions=layer_from_scene or layer_from_components,
+        layer_optical_from_scene=layer_from_scene,
         require_python_generated_inputs=args.require_python_generated_inputs,
+        required_fraction_keys=_TIR_REQUIRED_PHYSICAL_OPTICS_KEYS,
+        dumped_keys=_TIR_DUMPED_OPTICS_KEYS,
+        aerosol_interp_key=_TIR_AEROSOL_INTERP_KEY,
+        aerosol_coordinate_keys=_TIR_AEROSOL_COORDINATE_KEYS,
     )
     source_keys = _select_source_keys(
         available,
@@ -754,41 +741,30 @@ def main() -> None:
         base_keys + layer_optical_keys + optical_keys + source_keys,
         label="TIR",
     )
-    if layer_optical_keys_are_scene(layer_optical_keys):
+    if layer_from_scene:
         row_count_key = "wavelengths"
-    elif layer_optical_keys_are_components(layer_optical_keys):
+    elif layer_from_components:
         row_count_key = layer_optical_keys[0]
     else:
         row_count_key = "tau_arr"
     total_rows = int(bundle[row_count_key].shape[0])
     wavelengths = total_rows if args.limit is None else min(int(args.limit), total_rows)
-    bundle = dict(bundle)
-    bundle["wavelengths"] = bundle["wavelengths"][:wavelengths]
-    bundle["albedo"] = bundle["albedo"][:wavelengths]
-    if "emissivity" in bundle:
-        bundle["emissivity"] = bundle["emissivity"][:wavelengths]
-    for key in layer_optical_keys:
-        if key in bundle and np.asarray(bundle[key]).shape[:1] == (total_rows,):
-            bundle[key] = bundle[key][:wavelengths]
-    for key in _TIR_DIRECT_SOURCE_KEYS + ("surface_temperature_k",) + _TIR_SOURCE_COORDINATE_KEYS:
-        if key in bundle and np.asarray(bundle[key]).shape[:1] == (total_rows,):
-            bundle[key] = bundle[key][:wavelengths]
-    for key in _TIR_DUMPED_OPTICS_KEYS:
-        if key in bundle:
-            bundle[key] = bundle[key][:wavelengths]
-    for key in ("depol", "rayleigh_fraction", "aerosol_fraction", "aerosol_interp_fraction"):
-        if key in bundle:
-            bundle[key] = bundle[key][:wavelengths]
-    if "ref_total" in bundle:
-        bundle["ref_total"] = bundle["ref_total"][:wavelengths]
+    bundle = trim_spectral_rows(
+        bundle,
+        _TIR_LIMIT_KEYS + layer_optical_keys,
+        total_rows,
+        wavelengths,
+    )
     load_seconds = time.perf_counter() - load_start
 
     bundle, layer_optical_seconds, layer_optical_mode = prepare_layer_optical_properties(
         bundle,
         total_key="tau_arr",
         ssa_key="omega_arr",
+        validate_inputs=not args.require_python_generated_inputs,
+        include_fractions=False,
     )
-    bundle = _normalize_layer_inputs(bundle)
+    bundle = with_layer_aliases(bundle, tau_key="tau_arr", ssa_key="omega_arr")
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
@@ -813,14 +789,13 @@ def main() -> None:
             "conversion, PyTorch warmup, and checksum reduction."
         ),
     )
-    print(f"  layer optical properties: {layer_optical_mode}, {layer_optical_seconds:.3f} s")
-    print(f"  geometry preprocessing: python-generated, {geometry_seconds:.3f} s")
-    print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
-    print(f"  thermal source: {source_mode}, {source_seconds:.3f} s")
-    print(
-        "  preprocessing total: "
-        f"{layer_optical_seconds + geometry_seconds + optical_seconds + source_seconds:.3f} s "
-        "(layer optical + geometry + phase + thermal source)"
+    print_preprocessing_summary(
+        (
+            ("layer optical properties", layer_optical_mode, layer_optical_seconds),
+            ("geometry preprocessing", "python-generated", geometry_seconds),
+            ("optical preprocessing", optical_mode, optical_seconds),
+            ("thermal source", source_mode, source_seconds),
+        )
     )
     print(f"  emissivity: {emissivity_mode}")
 

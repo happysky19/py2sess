@@ -32,12 +32,7 @@ class AerosolOpticalComponents:
 
 @dataclass(frozen=True)
 class SceneOpacityComponents:
-    """Component optical depths produced by scene opacity providers.
-
-    These fields are the Python-side replacement for the CreateProps layer
-    quantities that later become Fortran ``taug``, ``taudp``, ``omega``, ``fr``,
-    and ``fa``.
-    """
+    """Component optical depths produced by scene opacity providers."""
 
     gas_absorption_tau: np.ndarray
     rayleigh_scattering_tau: np.ndarray
@@ -79,14 +74,7 @@ def atmospheric_profile_from_levels(
     heights_km=None,
     surface_altitude_m: float = 0.0,
 ) -> AtmosphericProfile:
-    """Build level heights, air columns, and gas densities from a profile.
-
-    The hydrostatic height and air-column calculations follow the GEOCAPE
-    ``geocape_profile_setter_2`` convention used by the Fortran benchmark.
-    Pressures, temperatures, and heights use top-to-bottom level ordering.
-    ``gas_vmr`` is a level quantity with shape ``(nlevel, ngas)`` and unitless
-    volume mixing ratio.
-    """
+    """Build level heights, air columns, and gas densities from a profile."""
     pressure = np.asarray(pressure_hpa, dtype=float)
     temperature = np.asarray(temperature_k, dtype=float)
     if pressure.ndim != 1 or temperature.ndim != 1:
@@ -150,11 +138,7 @@ def gas_absorption_tau_from_cross_sections(
     gas_density_per_km,
     cross_sections,
 ) -> np.ndarray:
-    """Integrate layer gas absorption optical depth.
-
-    ``cross_sections`` may have shape ``(nspec, ngas)`` for level-independent
-    cross sections or ``(nspec, nlevel, ngas)`` for level-dependent values.
-    """
+    """Integrate layer gas absorption optical depth."""
     heights = np.asarray(heights_km, dtype=float)
     gas_density = np.asarray(gas_density_per_km, dtype=float)
     xsec = np.asarray(cross_sections, dtype=float)
@@ -185,10 +169,8 @@ def gas_absorption_tau_from_cross_sections(
         raise ValueError("heights_km must decrease from top to bottom")
     upper = gas_density[:-1, :]
     lower = gas_density[1:, :]
-    integrand = (upper[np.newaxis, :, :] * xsec_upper + lower[np.newaxis, :, :] * xsec_lower).sum(
-        axis=-1
-    )
-    return 0.5 * layer_thickness_km[np.newaxis, :] * integrand
+    integrand = upper[np.newaxis, :, :] * xsec_upper + lower[np.newaxis, :, :] * xsec_lower
+    return 0.5 * layer_thickness_km[np.newaxis, :] * integrand.sum(axis=-1)
 
 
 def rayleigh_scattering_tau_from_air_columns(
@@ -216,12 +198,7 @@ def aerosol_components_from_tables(
     aerosol_wavelengths_microns,
     aerosol_bulk_iops,
 ) -> AerosolOpticalComponents:
-    """Interpolate GEOCAPE-style aerosol tables to spectral layer components.
-
-    ``aerosol_bulk_iops[0]`` is the extinction-like quantity and
-    ``aerosol_bulk_iops[1]`` is the scattering-like quantity. ``aerosol_loadings``
-    has shape ``(nlayer, naerosol)``.
-    """
+    """Interpolate GEOCAPE-style aerosol tables to spectral layer components."""
     wavelengths = np.asarray(wavelengths_microns, dtype=float)
     select = float(select_wavelength_microns)
     loadings = np.asarray(aerosol_loadings, dtype=float)
@@ -279,9 +256,37 @@ def build_scene_layer_optical_properties(
         aerosol_select_wavelength_microns=aerosol_select_wavelength_microns,
         co2_ppmv=co2_ppmv,
     )
-    layer = components.layer_properties()
+    return _scene_layer_properties(components)
+
+
+def build_scene_layer_optical_properties_from_gas_tau(
+    *,
+    wavelengths_nm,
+    profile: AtmosphericProfile,
+    gas_absorption_tau,
+    aerosol_loadings=None,
+    aerosol_wavelengths_microns=None,
+    aerosol_bulk_iops=None,
+    aerosol_select_wavelength_microns=0.4,
+    co2_ppmv: float = 385.0,
+) -> SceneLayerOpticalProperties:
+    """Generate RT layer inputs from precomputed layer gas optical depth."""
+    components = build_scene_opacity_components_from_gas_tau(
+        wavelengths_nm=wavelengths_nm,
+        profile=profile,
+        gas_absorption_tau=gas_absorption_tau,
+        aerosol_loadings=aerosol_loadings,
+        aerosol_wavelengths_microns=aerosol_wavelengths_microns,
+        aerosol_bulk_iops=aerosol_bulk_iops,
+        aerosol_select_wavelength_microns=aerosol_select_wavelength_microns,
+        co2_ppmv=co2_ppmv,
+    )
+    return _scene_layer_properties(components)
+
+
+def _scene_layer_properties(components: SceneOpacityComponents) -> SceneLayerOpticalProperties:
     return SceneLayerOpticalProperties(
-        layer=layer,
+        layer=components.layer_properties(),
         gas_absorption_tau=components.gas_absorption_tau,
         rayleigh_scattering_tau=components.rayleigh_scattering_tau,
         aerosol_extinction_tau=components.aerosol_extinction_tau,
@@ -307,6 +312,35 @@ def build_scene_opacity_components(
         gas_density_per_km=profile.gas_density_per_km,
         cross_sections=gas_cross_sections,
     )
+    return build_scene_opacity_components_from_gas_tau(
+        wavelengths_nm=wavelengths_nm,
+        profile=profile,
+        gas_absorption_tau=gas_tau,
+        aerosol_loadings=aerosol_loadings,
+        aerosol_wavelengths_microns=aerosol_wavelengths_microns,
+        aerosol_bulk_iops=aerosol_bulk_iops,
+        aerosol_select_wavelength_microns=aerosol_select_wavelength_microns,
+        co2_ppmv=co2_ppmv,
+    )
+
+
+def build_scene_opacity_components_from_gas_tau(
+    *,
+    wavelengths_nm,
+    profile: AtmosphericProfile,
+    gas_absorption_tau,
+    aerosol_loadings=None,
+    aerosol_wavelengths_microns=None,
+    aerosol_bulk_iops=None,
+    aerosol_select_wavelength_microns=0.4,
+    co2_ppmv: float = 385.0,
+) -> SceneOpacityComponents:
+    """Build gas, Rayleigh, and aerosol optical-depth components."""
+    gas_tau = np.asarray(gas_absorption_tau, dtype=float)
+    if gas_tau.ndim != 2 or gas_tau.shape[1] != profile.air_columns.shape[0]:
+        raise ValueError("gas_absorption_tau must have shape (nspec, nlayer)")
+    if not np.all(np.isfinite(gas_tau)) or np.any(gas_tau < 0.0):
+        raise ValueError("gas_absorption_tau must be finite and nonnegative")
     ray_tau, depol = rayleigh_scattering_tau_from_air_columns(
         wavelengths_nm=wavelengths_nm,
         air_columns=profile.air_columns,

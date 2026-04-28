@@ -100,11 +100,11 @@ def _as_1d(name: str, value: Any, size: int) -> np.ndarray:
     return arr
 
 
-def _as_optional_1d(name: str, value: Any | None, size: int) -> np.ndarray | None:
-    """Converts an optional value to a fixed-length 1D float array."""
-    if value is None:
-        return None
-    return _as_1d(name, value, size)
+def _validate_asymmetry(asymm_arr: np.ndarray) -> None:
+    if not np.all(np.isfinite(asymm_arr)):
+        raise ValueError("g/asymm_arr must be finite")
+    if np.any((asymm_arr <= -1.0) | (asymm_arr >= 1.0)):
+        raise ValueError("g/asymm_arr must satisfy -1 < g < 1")
 
 
 def _validate_inputs(
@@ -155,8 +155,7 @@ def _validate_inputs(
         raise ValueError("tau_arr must be finite")
     if not np.all(np.isfinite(omega_arr)):
         raise ValueError("omega_arr must be finite")
-    if not np.all(np.isfinite(asymm_arr)):
-        raise ValueError("asymm_arr must be finite")
+    _validate_asymmetry(asymm_arr)
     validate_delta_m_truncation_factor(d2s_scaling, omega_arr)
 
     return do_postprocessing, earth_radius
@@ -183,8 +182,7 @@ def _validate_inputs_thermal(
         raise ValueError("tau_arr must be finite")
     if not np.all(np.isfinite(omega_arr)):
         raise ValueError("omega_arr must be finite")
-    if not np.all(np.isfinite(asymm_arr)):
-        raise ValueError("asymm_arr must be finite")
+    _validate_asymmetry(asymm_arr)
     validate_delta_m_truncation_factor(d2s_scaling, omega_arr)
     if not np.all(np.isfinite(thermal_bb_input)):
         raise ValueError("thermal_bb_input must be finite")

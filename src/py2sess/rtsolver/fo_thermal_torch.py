@@ -7,6 +7,7 @@ from .fo_thermal import FoThermalResult
 from .fo_solar_obs import _fo_eps_geometry
 
 torch = _load_torch()
+_OPTICAL_THICKNESS_MIN = 1.0e-12
 
 
 def _as_reference_tensor(value, reference):
@@ -51,6 +52,11 @@ def solve_fo_thermal_torch(
     user_emissivity = torch.ones_like(mu1) * emissivity
     deltaus_all = (
         tau_arr * (1.0 - omega_arr * d2s_scaling) if do_optical_deltam_scaling else tau_arr
+    )
+    deltaus_all = torch.where(
+        deltaus_all <= 0.0,
+        torch.full_like(deltaus_all, _OPTICAL_THICKNESS_MIN),
+        deltaus_all,
     )
 
     tcom0 = []

@@ -136,17 +136,12 @@ def _aerosol_phase_endpoints(moments, cos_scatter):
     return endpoint_phase
 
 
-def _aerosol_moment(
-    *,
-    aerosol_fraction,
-    aerosol_moments,
-    aerosol_interp_fraction,
-    moment_index: int,
+def _aerosol_moment_weights(
+    aerosol_moments, aerosol_interp_fraction, moment_indices: tuple[int, ...]
 ):
-    moment = aerosol_moments[0, moment_index] + aerosol_interp_fraction[..., None] * (
-        aerosol_moments[1, moment_index] - aerosol_moments[0, moment_index]
-    )
-    return torch.einsum("...la,...a->...l", aerosol_fraction, moment)
+    lower = aerosol_moments[0, moment_indices, :].T
+    span = (aerosol_moments[1, moment_indices, :] - aerosol_moments[0, moment_indices, :]).T
+    return lower + aerosol_interp_fraction[..., None, None] * span
 
 
 def build_two_stream_phase_inputs_torch(
@@ -198,18 +193,12 @@ def build_two_stream_phase_inputs_torch(
     )
 
     ray2mom = (1.0 - depol_b) / (2.0 + depol_b)
-    moment1 = _aerosol_moment(
-        aerosol_fraction=aer_frac_b,
-        aerosol_moments=moments,
-        aerosol_interp_fraction=fac_b,
-        moment_index=1,
+    aerosol_moments12 = torch.matmul(
+        aer_frac_b,
+        _aerosol_moment_weights(moments, fac_b, (1, 2)),
     )
-    moment2 = ray_b * ray2mom[..., None] + _aerosol_moment(
-        aerosol_fraction=aer_frac_b,
-        aerosol_moments=moments,
-        aerosol_interp_fraction=fac_b,
-        moment_index=2,
-    )
+    moment1 = aerosol_moments12[..., 0]
+    moment2 = ray_b * ray2mom[..., None] + aerosol_moments12[..., 1]
     g = moment1 / 3.0
     truncation_factor = moment2 / 5.0
     validate_delta_m_truncation_factor_torch(truncation_factor, ssa_b)
@@ -305,7 +294,7 @@ def build_solar_fo_scatter_term_torch(
     aerosol_phase = aerosol_phase_endpoints[0] + fac_b[..., None, None] * (
         aerosol_phase_endpoints[1] - aerosol_phase_endpoints[0]
     )
-    phase_total = phase_total + torch.einsum("...la,...ag->...lg", aer_frac_b, aerosol_phase)
+    phase_total = phase_total + torch.matmul(aer_frac_b, aerosol_phase)
 
     scatter = phase_total * ssa_b[..., None] / (1.0 - factor_b[..., None] * ssa_b[..., None])
     if int(cos_scatter.numel()) == 1:

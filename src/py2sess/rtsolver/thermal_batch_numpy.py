@@ -16,6 +16,10 @@ from .bvp_batch import solve_thermal_bvp_batch
 from ..optical.delta_m import delta_m_scale_optical_properties
 from .taylor import vectorized_taylor_series_1
 
+_NUMBA_THERMAL_FO_MIN_BATCH = 8192
+_THERMAL_FO_KERNEL = None
+_THERMAL_FO_IMPORT_FAILED = False
+
 
 @dataclass(frozen=True)
 class ThermalBatchNumpyResult:
@@ -55,6 +59,16 @@ def _gauss_legendre_interval(x1: float, x2: float, n: int) -> tuple[np.ndarray, 
     return midpoint + half_width * nodes, half_width * weights
 
 
+def _exp_cutoff_owned(values: np.ndarray, cutoff: float) -> np.ndarray:
+    if values.size == 0 or float(np.max(values)) <= cutoff:
+        np.exp(-values, out=values)
+        return values
+    too_deep = values > cutoff
+    np.exp(-values, out=values)
+    np.putmask(values, too_deep, 0.0)
+    return values
+
+
 def _hom_solution_thermal(
     *,
     stream_value: float,
@@ -70,7 +84,7 @@ def _hom_solution_thermal(
     dab = xinv * (pxsq * omega_asymm_3 - 1.0)
     eigenvalue = np.sqrt(sab * dab)
     helpv = eigenvalue * delta_tau
-    eigentrans = np.where(helpv > 88.0, 0.0, np.exp(-helpv))
+    eigentrans = _exp_cutoff_owned(helpv, 88.0)
     difvec = -sab / eigenvalue
     xpos1 = 0.5 * (1.0 + difvec)
     xpos2 = 0.5 * (1.0 - difvec)
@@ -112,15 +126,21 @@ def _thermal_green_function(
     tcp0 = -sum_p
     t_gmult_dn = tterm * (eigentrans * tcm0 + sum_m)
     t_gmult_up = tterm * (eigentrans * tcp0 + tcp1)
-    t_wupper0 = np.where(active, t_gmult_up * xpos2, 0.0)
-    t_wupper1 = np.where(active, t_gmult_up * xpos1, 0.0)
-    t_wlower0 = np.where(active, t_gmult_dn * xpos1, 0.0)
-    t_wlower1 = np.where(active, t_gmult_dn * xpos2, 0.0)
-    tterm_save = np.where(active, tterm, 0.0)
+    t_wupper0 = t_gmult_up * xpos2
+    t_wupper1 = t_gmult_up * xpos1
+    t_wlower0 = t_gmult_dn * xpos1
+    t_wlower1 = t_gmult_dn * xpos2
+    inactive = ~active
+    if np.any(inactive):
+        t_wupper0[inactive] = 0.0
+        t_wupper1[inactive] = 0.0
+        t_wlower0[inactive] = 0.0
+        t_wlower1[inactive] = 0.0
+        tterm[inactive] = 0.0
     return (
         (tcp0, tcp1, tcp2),
         (tcm0, tcm1, tcm2),
-        tterm_save,
+        tterm,
         (t_wupper0, t_wupper1),
         (t_wlower0, t_wlower1),
     )
@@ -178,32 +198,10 @@ def _thermal_layer_sources_up(
     tcm0, tcm1, tcm2 = t_c_minus
     tsgm_uu1 = tcp1 + user_stream * tcp2
     tsgm_ud1 = tcm1 + user_stream * tcm2
-    tsgm_uu0 = -tsgm_uu1 - tcp2 * delta_tau
-    tsgm_ud0 = -tsgm_ud1 - tcm2 * delta_tau
-    su = tcp0 * hmult_1 + tsgm_uu0 * t_delt_userm + tsgm_uu1
-    sd = tcm0 * hmult_2 + tsgm_ud0 * t_delt_userm + tsgm_ud1
+    one_minus_t_delt_userm = 1.0 - t_delt_userm
+    su = tcp0 * hmult_1 + tsgm_uu1 * one_minus_t_delt_userm - tcp2 * delta_tau * t_delt_userm
+    sd = tcm0 * hmult_2 + tsgm_ud1 * one_minus_t_delt_userm - tcm2 * delta_tau * t_delt_userm
     return tterm_save * (u_xpos * sd + u_xneg * su)
-
-
-def _accumulate_upwelling_sources(
-    *,
-    layer_source: np.ndarray,
-    layer_trans: np.ndarray,
-    surface_source: np.ndarray,
-    return_profile: bool = False,
-) -> np.ndarray:
-    """Evaluates the backward layer recurrence in vectorized batch form."""
-    if return_profile:
-        return accumulate_upwelling_profile_numpy(
-            layer_source=layer_source,
-            layer_trans=layer_trans,
-            surface_source=surface_source,
-        )
-    return accumulate_upwelling_sources_numpy(
-        layer_source=layer_source,
-        layer_trans=layer_trans,
-        surface_source=surface_source,
-    )
 
 
 def _two_stream_thermal_toa(
@@ -298,11 +296,16 @@ def _two_stream_thermal_toa(
     ) * stream_value
     surface_source = surface_factor * albedo * idownsurf
     layer_source = lcon * u_xpos * hmult_2 + mcon * u_xneg * hmult_1 + layer_tsup_up
-    return _accumulate_upwelling_sources(
+    if return_profile:
+        return accumulate_upwelling_profile_numpy(
+            layer_source=layer_source,
+            layer_trans=t_delt_userm,
+            surface_source=surface_source,
+        )
+    return accumulate_upwelling_sources_numpy(
         layer_source=layer_source,
         layer_trans=t_delt_userm,
         surface_source=surface_source,
-        return_profile=return_profile,
     )
 
 
@@ -386,6 +389,123 @@ def precompute_fo_thermal_geometry_numpy(
     }
 
 
+def _get_thermal_fo_kernel():
+    global _THERMAL_FO_KERNEL, _THERMAL_FO_IMPORT_FAILED
+    if _THERMAL_FO_KERNEL is not None:
+        return _THERMAL_FO_KERNEL
+    if _THERMAL_FO_IMPORT_FAILED:
+        return None
+    try:  # pragma: no cover - optional acceleration dependency
+        from numba import njit, prange
+
+        @njit(parallel=True, cache=True)
+        def _kernel(
+            tau,
+            omega,
+            scaling,
+            thermal_bb_input,
+            surfbb,
+            emissivity,
+            heights,
+            do_nadir,
+            rayconv,
+            cota,
+            xfine,
+            wfine,
+            csqfine,
+            cotfine,
+            do_optical_deltam_scaling,
+            do_source_deltam_scaling,
+        ):
+            batch, nlay = tau.shape
+            nfine = xfine.shape[0]
+            out = np.empty(batch, np.float64)
+            for row in prange(batch):
+                cum_atmos = 0.0
+                cum_surface = surfbb[row] * emissivity[row]
+                for layer in range(nlay - 1, -1, -1):
+                    tau_layer = tau[row, layer]
+                    omega_layer = omega[row, layer]
+                    scaling_layer = scaling[row, layer]
+                    if do_optical_deltam_scaling:
+                        deltaus = tau_layer * (1.0 - omega_layer * scaling_layer)
+                    else:
+                        deltaus = tau_layer
+                    extinction = deltaus / (heights[layer] - heights[layer + 1])
+                    source_scale = 1.0 - omega_layer
+                    if do_source_deltam_scaling:
+                        source_scale = source_scale / (1.0 - omega_layer * scaling_layer)
+                    lower_bb = thermal_bb_input[row, layer]
+                    therm0 = lower_bb * source_scale
+                    therm1 = (thermal_bb_input[row, layer + 1] - lower_bb) / deltaus * source_scale
+
+                    source = 0.0
+                    if do_nadir:
+                        lostrans = math.exp(-deltaus) if deltaus < 88.0 else 0.0
+                        for j in range(nfine):
+                            xjkn = extinction * xfine[j, layer]
+                            solution = therm0 + xjkn * therm1
+                            source += solution * extinction * math.exp(-xjkn) * wfine[j, layer]
+                    else:
+                        ke = rayconv * extinction
+                        lostau = ke * (cota[layer] - cota[layer + 1])
+                        lostrans = math.exp(-lostau) if lostau < 88.0 else 0.0
+                        for j in range(nfine):
+                            xjkn = extinction * xfine[j, layer]
+                            solution = therm0 + xjkn * therm1
+                            weight = ke * csqfine[j, layer] * wfine[j, layer]
+                            optical_path = ke * (cota[layer] - cotfine[j, layer])
+                            source += solution * weight * math.exp(-optical_path)
+                    cum_surface = lostrans * cum_surface
+                    cum_atmos = lostrans * cum_atmos + source
+                out[row] = cum_atmos + cum_surface
+            return out
+
+        _THERMAL_FO_KERNEL = _kernel
+        return _THERMAL_FO_KERNEL
+    except Exception:  # pragma: no cover - optional acceleration dependency
+        _THERMAL_FO_IMPORT_FAILED = True
+        return None
+
+
+def _fo_thermal_toa_numba(
+    *,
+    tau,
+    omega,
+    scaling,
+    thermal_bb_input,
+    surfbb,
+    emissivity,
+    heights,
+    geometry,
+    do_optical_deltam_scaling: bool,
+    do_source_deltam_scaling: bool,
+) -> np.ndarray | None:
+    if tau.shape[0] < _NUMBA_THERMAL_FO_MIN_BATCH:
+        return None
+    kernel = _get_thermal_fo_kernel()
+    if kernel is None:
+        return None
+    return kernel(
+        np.ascontiguousarray(tau, dtype=np.float64),
+        np.ascontiguousarray(omega, dtype=np.float64),
+        np.ascontiguousarray(scaling, dtype=np.float64),
+        np.ascontiguousarray(thermal_bb_input, dtype=np.float64),
+        np.ascontiguousarray(surfbb, dtype=np.float64),
+        np.ascontiguousarray(emissivity, dtype=np.float64),
+        np.ascontiguousarray(heights, dtype=np.float64),
+        bool(geometry["do_nadir"][0]),
+        float(geometry["raycon"][0]),
+        np.ascontiguousarray(geometry["cota"][:, 0], dtype=np.float64),
+        np.ascontiguousarray(geometry["xfine"][:, :, 0], dtype=np.float64),
+        np.ascontiguousarray(geometry["wfine"][:, :, 0], dtype=np.float64),
+        np.ascontiguousarray(geometry["csqfine"][:, :, 0], dtype=np.float64),
+        np.ascontiguousarray(geometry["cotfine"][:, :, 0], dtype=np.float64),
+        bool(do_optical_deltam_scaling),
+        bool(do_source_deltam_scaling),
+    )
+
+
 def _fo_thermal_toa(
     *,
     tau,
@@ -423,6 +543,21 @@ def _fo_thermal_toa(
             earth_radius=earth_radius,
             nfine=nfine,
         )
+    if not return_profile:
+        accelerated = _fo_thermal_toa_numba(
+            tau=tau,
+            omega=omega,
+            scaling=scaling,
+            thermal_bb_input=thermal_bb_input,
+            surfbb=surfbb,
+            emissivity=emissivity,
+            heights=heights,
+            geometry=geometry,
+            do_optical_deltam_scaling=do_optical_deltam_scaling,
+            do_source_deltam_scaling=do_source_deltam_scaling,
+        )
+        if accelerated is not None:
+            return accelerated
     do_nadir = bool(geometry["do_nadir"][0])
     if do_nadir:
         xfine = geometry["xfine"][:, :, 0]

@@ -52,8 +52,12 @@ class FoSolarObsBatchResult:
 
 def _exp_cutoff_owned(values: np.ndarray) -> np.ndarray:
     """Applies the Fortran 88-optical-depth cutoff in place."""
+    if values.size == 0 or float(np.max(values)) < 88.0:
+        np.exp(-values, out=values)
+        return values
+    too_deep = values >= 88.0
     np.exp(-values, out=values)
-    np.putmask(values, values <= math.exp(-88.0), 0.0)
+    np.putmask(values, too_deep, 0.0)
     return values
 
 
@@ -73,7 +77,7 @@ def _ensure_c_contiguous(values: np.ndarray, *, dtype) -> np.ndarray:
 
 def _numba_fo_enabled(batch_size: int) -> bool:
     """Returns whether the optional Numba UV FO kernel should be enabled."""
-    flag = os.environ.get("PY2SESS_NUMBA_FO", "off").lower()
+    flag = os.environ.get("PY2SESS_NUMBA_FO", "auto").lower()
     if flag in {"0", "false", "off", "no"}:
         return False
     if flag in {"1", "true", "on", "yes"}:
@@ -96,7 +100,7 @@ def _get_numba_fo_kernel():
         _NUMBA_FO_IMPORT_FAILED = True
         return None
 
-    @njit(parallel=True, cache=False)
+    @njit(parallel=True, cache=True)
     def _solve_fo_solar_eps_nonnadir_kernel(
         extinction,
         phase_terms,
@@ -119,14 +123,12 @@ def _get_numba_fo_kernel():
             cot_1 = cota[nlayers]
             cumsource_up = 0.0
             cumsource_db = 4.0 * mu0 * albedo[row] * attenuation_nl[row]
-            sources = np.empty(nlayers, np.float64)
-            lostrans = np.empty(nlayers, np.float64)
 
             for n_fortran in range(nlayers, 0, -1):
                 layer = n_fortran - 1
                 cot_2 = cota[layer]
                 ke = rayconv * extinction[row, layer]
-                lostrans[layer] = math.exp(-ke * (cot_2 - cot_1))
+                lostrans = math.exp(-ke * (cot_2 - cot_1))
                 layer_sum = 0.0
                 nfine_layer = nfinedivs[layer]
                 for j in range(nfine_layer):
@@ -139,12 +141,10 @@ def _get_numba_fo_kernel():
                         * tran
                         * wfine[j, layer]
                     )
-                sources[layer] = layer_sum * ke
+                source = layer_sum * ke
+                cumsource_db = lostrans * cumsource_db
+                cumsource_up = lostrans * cumsource_up + source
                 cot_1 = cot_2
-
-            for layer in range(nlayers - 1, -1, -1):
-                cumsource_db = lostrans[layer] * cumsource_db
-                cumsource_up = lostrans[layer] * cumsource_up + sources[layer]
             out[row] = 0.25 * solar_flux[row] / math.pi * (cumsource_up + cumsource_db)
         return out
 

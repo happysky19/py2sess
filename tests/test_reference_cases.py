@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 
 import numpy as np
@@ -477,6 +478,52 @@ class ReferenceCaseTests(unittest.TestCase):
             )
         )
         np.testing.assert_allclose(torch_fo, numpy_fo, rtol=1.0e-12, atol=1.0e-12)
+
+    def test_uv_fo_numba_path_matches_vectorized_path(self) -> None:
+        case = load_uv_benchmark_case()
+        repeats = 4096
+        fo_precomputed = fo_solar_obs_batch_precompute(
+            user_obsgeom=case.user_obsgeom,
+            heights=case.heights,
+            earth_radius=6371.0,
+            nfine=3,
+        )
+
+        def tiled(value):
+            arr = np.asarray(value)
+            if arr.ndim == 1:
+                return np.tile(arr, repeats)
+            return np.tile(arr, (repeats, 1))
+
+        previous = os.environ.get("PY2SESS_NUMBA_FO")
+        try:
+            os.environ["PY2SESS_NUMBA_FO"] = "off"
+            vectorized = solve_fo_solar_obs_eps_batch_numpy(
+                tau=tiled(case.tau),
+                omega=tiled(case.omega),
+                scaling=tiled(case.scaling),
+                albedo=tiled(case.albedo),
+                flux_factor=tiled(case.flux_factor),
+                exact_scatter=tiled(case.fo_exact_scatter),
+                precomputed=fo_precomputed,
+            )
+            os.environ["PY2SESS_NUMBA_FO"] = "on"
+            accelerated = solve_fo_solar_obs_eps_batch_numpy(
+                tau=tiled(case.tau),
+                omega=tiled(case.omega),
+                scaling=tiled(case.scaling),
+                albedo=tiled(case.albedo),
+                flux_factor=tiled(case.flux_factor),
+                exact_scatter=tiled(case.fo_exact_scatter),
+                precomputed=fo_precomputed,
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("PY2SESS_NUMBA_FO", None)
+            else:
+                os.environ["PY2SESS_NUMBA_FO"] = previous
+
+        np.testing.assert_allclose(accelerated, vectorized, rtol=1.0e-12, atol=1.0e-14)
 
     def test_uv_torch_fo_batch_supports_autograd(self) -> None:
         if not has_torch():

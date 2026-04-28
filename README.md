@@ -107,6 +107,12 @@ Optional controls include `stream`, `fbeam`, `delta_m_truncation_factor`, `geome
 fallback `g**2`. Pass an explicit factor for mixed phase functions or when
 reusing full-spectrum optical-property fixtures.
 
+`2S` is the fast two-stream multiple-scattering/emission solve. `FO` is the
+first-order solar single-scatter/direct-beam or thermal source-transmission
+correction. Solar angles are `[sza, vza, raz]` in degrees; thermal angles are
+viewing zenith angles in degrees. Heights are in km, top to bottom. Radiance and
+Planck values keep the units supplied by the caller.
+
 For mixed Rayleigh/aerosol phase inputs, `py2sess.optical.phase` can generate
 `g`, `delta_m_truncation_factor`, and solar `fo_scatter_term` from
 Rayleigh/aerosol fractions and endpoint aerosol moments.
@@ -125,7 +131,7 @@ Result names:
 - `result.radiance_total`: explicit total radiance
 - `result.radiance_profile_*`: profile outputs when `output_levels=True`
 
-For the complete argument table and Fortran-name crosswalk, see
+For the complete argument table and Fortran-name mapping, see
 [`docs/api_arguments.md`](docs/api_arguments.md).
 
 ## Examples
