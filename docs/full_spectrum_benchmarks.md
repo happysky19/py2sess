@@ -27,6 +27,15 @@ The NetCDF table must provide `cross_section(gas, spectral, pressure,
 temperature)` plus `pressure_hpa`, `temperature_k`, and either
 `wavenumber_cm_inv`, `wavelength_nm`, or `wavelength_microns`.
 
+To build a local HITRAN table offline:
+
+```bash
+PYTHONPATH=src python3 scripts/create_hitran_opacity_table.py gas_xsec.nc \
+  --hitran-dir /path/to/HITRAN --gas H2O --gas CO2 \
+  --pressure-hpa 100 300 700 1000 --temperature-k 220 260 300 \
+  --wavenumber-start 500 --wavenumber-step 1 --wavenumber-count 1000
+```
+
 ## Commands
 
 Scene inputs:
