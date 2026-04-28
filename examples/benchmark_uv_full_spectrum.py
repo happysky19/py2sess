@@ -11,7 +11,6 @@ import numpy as np
 from _full_spectrum_benchmark_common import (
     accuracy_summary,
     BenchmarkRow,
-    has_keys,
     input_keys,
     input_store_kind,
     load_input_arrays,
@@ -32,7 +31,6 @@ from _full_spectrum_benchmark_common import (
     select_phase_optical_keys,
     slice_spectral_rows,
     trim_spectral_rows,
-    with_layer_aliases,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
 from py2sess.optical.scene_io import build_benchmark_scene_inputs
@@ -160,8 +158,8 @@ def _prepare_optics(
     *,
     use_dumped_derived_optics: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
-    has_component_phase = has_keys(bundle, _UV_COMPONENT_PHASE_KEYS)
-    has_fraction_phase = has_keys(bundle, _UV_REQUIRED_PHYSICAL_OPTICS_KEYS)
+    has_component_phase = all(key in bundle for key in _UV_COMPONENT_PHASE_KEYS)
+    has_fraction_phase = all(key in bundle for key in _UV_REQUIRED_PHYSICAL_OPTICS_KEYS)
     if use_dumped_derived_optics or not (has_component_phase or has_fraction_phase):
         require_keys(bundle, _UV_DUMPED_OPTICS_KEYS, label="UV dumped optical")
         prepared = dict(bundle)
@@ -688,7 +686,7 @@ def main() -> None:
         validate_inputs=not args.require_python_generated_inputs,
         include_fractions=False,
     )
-    bundle = with_layer_aliases(bundle, tau_key="tau", ssa_key="omega")
+    bundle["ssa"] = bundle["omega"]
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,

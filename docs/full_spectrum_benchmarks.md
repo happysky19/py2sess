@@ -10,6 +10,10 @@ Fortran dumps are validation data, not normal RT inputs. Current full UV/TIR
 parity runs can use a local CreateProps provider while raw opacity providers
 mature.
 
+Direct HITRAN line-by-line scenes are useful for limited-row validation and
+offline table generation. They are not yet the recommended full-spectrum timing
+path.
+
 ## Commands
 
 Scene inputs:
@@ -58,7 +62,8 @@ Benchmarks print setup and solver timing separately.
 - `thermal source`: TIR Planck/source generation
 - `rt (s)`: solver time only
 
-Use `rt (s)` for solver speed claims.
+Use `rt (s)` for solver speed claims. Treat `load (s)` and preprocessing as
+opacity/setup cost.
 
 ## Scene Inputs
 

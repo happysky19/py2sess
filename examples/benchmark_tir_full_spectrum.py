@@ -11,7 +11,6 @@ import numpy as np
 from _full_spectrum_benchmark_common import (
     accuracy_summary,
     BenchmarkRow,
-    has_keys,
     input_keys,
     input_store_kind,
     load_input_arrays,
@@ -32,7 +31,6 @@ from _full_spectrum_benchmark_common import (
     select_phase_optical_keys,
     slice_spectral_rows,
     trim_spectral_rows,
-    with_layer_aliases,
 )
 from py2sess import (
     thermal_source_from_temperature_profile,
@@ -178,8 +176,8 @@ def _prepare_optics(
     *,
     use_dumped_derived_optics: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
-    has_component_phase = has_keys(bundle, _TIR_COMPONENT_PHASE_KEYS)
-    has_fraction_phase = has_keys(bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS)
+    has_component_phase = all(key in bundle for key in _TIR_COMPONENT_PHASE_KEYS)
+    has_fraction_phase = all(key in bundle for key in _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS)
     if use_dumped_derived_optics or not (has_component_phase or has_fraction_phase):
         require_keys(bundle, _TIR_DUMPED_OPTICS_KEYS, label="TIR dumped optical")
         prepared = dict(bundle)
@@ -226,7 +224,7 @@ def _prepare_thermal_source(
     use_dumped_thermal_source: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
     source_coordinates = [key for key in _TIR_SOURCE_COORDINATE_KEYS if key in bundle]
-    has_temperature = has_keys(bundle, _TIR_TEMPERATURE_SOURCE_KEYS)
+    has_temperature = all(key in bundle for key in _TIR_TEMPERATURE_SOURCE_KEYS)
     if not use_dumped_thermal_source and has_temperature and source_coordinates:
         start = time.perf_counter()
         coordinate_name = source_coordinates[0]
@@ -764,7 +762,8 @@ def main() -> None:
         validate_inputs=not args.require_python_generated_inputs,
         include_fractions=False,
     )
-    bundle = with_layer_aliases(bundle, tau_key="tau_arr", ssa_key="omega_arr")
+    bundle["tau"] = bundle["tau_arr"]
+    bundle["ssa"] = bundle["omega_arr"]
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,

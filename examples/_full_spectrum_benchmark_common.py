@@ -347,28 +347,12 @@ def require_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...], *, label:
         raise KeyError(f"{label} input store is missing required arrays: {missing_text}")
 
 
-def has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
-    return all(key in bundle for key in keys)
-
-
 def public_bvp_solver(engine: str) -> str:
     if engine == "block":
         return "banded"
     if engine == "pentadiagonal":
         return "pentadiag"
     return "scipy"
-
-
-def with_layer_aliases(
-    bundle: dict[str, np.ndarray],
-    *,
-    tau_key: str,
-    ssa_key: str,
-) -> dict[str, np.ndarray]:
-    prepared = dict(bundle)
-    prepared["tau"] = bundle[tau_key]
-    prepared["ssa"] = bundle[ssa_key]
-    return prepared
 
 
 def slice_spectral_rows(
