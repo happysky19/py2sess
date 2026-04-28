@@ -14,6 +14,19 @@ Direct HITRAN line-by-line scenes are useful for limited-row validation and
 offline table generation. They are not yet the recommended full-spectrum timing
 path.
 
+Fast gas-opacity scenes should use saved pressure-temperature cross-section
+tables:
+
+```yaml
+opacity:
+  gas_cross_sections:
+    table3d: {path: gas_xsec.nc}
+```
+
+The NetCDF table must provide `cross_section(gas, spectral, pressure,
+temperature)` plus `pressure_hpa`, `temperature_k`, and either
+`wavenumber_cm_inv`, `wavelength_nm`, or `wavelength_microns`.
+
 ## Commands
 
 Scene inputs:
@@ -29,10 +42,13 @@ PYTHONPATH=src python3 examples/benchmark_tir_full_spectrum.py \
 Thread sweep:
 
 ```bash
-UV_PROFILE=profile.txt UV_SCENE=uv_scene.yaml \
-TIR_PROFILE=profile.txt TIR_SCENE=tir_scene.yaml \
+UV_PROFILE=profile_uv.txt UV_SCENE=uv_scene.yaml \
+TIR_PROFILE=profile_tir.txt TIR_SCENE=tir_scene.yaml \
 scripts/run_full_benchmark_threads.sh
 ```
+
+For the packaged UV parity run, use the station matching the `D01` reference
+output. Some legacy dump filenames contain a different station number.
 
 Useful environment variables: `BACKEND=numpy|torch|both`, `THREADS="1 2 4"`,
 `LIMIT=1000`, `CHUNK_SIZE=...`, `OUTPUT_LEVELS=1`, and
@@ -85,3 +101,7 @@ Provider directories are created locally, for example:
 PYTHONPATH=src python3 scripts/create_fortran_createprops_provider.py uv \
   /path/to/Dump_9_26_1500.dat_11_114 uv_createprops_provider
 ```
+
+The provider stores Fortran `taug` as `gas_absorption_tau`. The separate
+`absorption_tau` field is the RT-layer non-scattering term reconstructed from
+`taudp` and `omega`; it can include aerosol absorption.

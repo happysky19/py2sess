@@ -20,6 +20,7 @@ from .hitran import (
     load_hitran_partition_functions,
     read_hitran_lines,
 )
+from .opacity_table import gas_cross_sections_from_table3d
 from .phase import aerosol_interp_fraction as phase_aerosol_interp_fraction
 from .scene import (
     AtmosphericProfile,
@@ -441,6 +442,13 @@ def _gas_absorption_tau(
         )
     if isinstance(gas_cfg, dict) and "hitran" in gas_cfg:
         return _hitran_gas_absorption_tau(gas_cfg["hitran"], base_dir, spectral, profile, gases)
+    if isinstance(gas_cfg, dict) and "table3d" in gas_cfg:
+        xsec = _table3d_gas_cross_sections(gas_cfg["table3d"], base_dir, spectral, profile, gases)
+        return gas_absorption_tau_from_cross_sections(
+            heights_km=profile.heights_km,
+            gas_density_per_km=profile.gas_density_per_km,
+            cross_sections=xsec,
+        )
     if isinstance(gas_cfg, dict) and "tables" in gas_cfg:
         xsec = gas_cross_sections_from_tables(
             wavelengths_nm=spectral["wavelengths"],
@@ -459,6 +467,26 @@ def _gas_absorption_tau(
         heights_km=profile.heights_km,
         gas_density_per_km=profile.gas_density_per_km,
         cross_sections=xsec,
+    )
+
+
+def _table3d_gas_cross_sections(
+    spec: Any,
+    base_dir: Path,
+    spectral: dict[str, np.ndarray],
+    profile: AtmosphericProfile,
+    gases: tuple[str, ...],
+) -> np.ndarray:
+    if not gases:
+        return np.zeros((spectral["wavelengths"].shape[0], profile.heights_km.size, 0), dtype=float)
+    if not isinstance(spec, dict) or "path" not in spec:
+        raise ValueError("gas_cross_sections.table3d requires path")
+    return gas_cross_sections_from_table3d(
+        path=_resolve_path(spec["path"], base_dir),
+        gas_names=gases,
+        pressure_hpa=profile.pressure_hpa,
+        temperature_k=profile.temperature_k,
+        spectral=spectral,
     )
 
 

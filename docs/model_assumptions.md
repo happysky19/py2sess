@@ -19,6 +19,7 @@ This checklist records public defaults that affect solver setup.
 | Thermal source terms | Thermal RT requires `planck` and `surface_planck`. Benchmark bundles may provide legacy `thermal_bb_input`/`surfbb` directly, or provide temperatures plus a wavelength, wavenumber, or wavenumber-band coordinate so Python can generate the public source inputs. | Python-generated when physical inputs exist |
 | Thermal surface terms | `emissivity` and `albedo` are independent inputs. Benchmark bundles use explicit `emissivity` when available and fall back to `1 - albedo` only for older bundles. | Caller-controlled convention |
 
-Known limitation: direct HITRAN line-by-line opacity is currently for limited
-validation/offline table generation, not fast full-spectrum timing. O4,
-surface table readers, and pyharp-style adapters remain separate work.
+Known limitation: direct HITRAN line-by-line opacity is for limited
+validation/offline table generation. Full-spectrum runtime should use saved
+pressure-temperature opacity tables. O4, surface table readers, and pyharp-style
+adapters remain separate work.

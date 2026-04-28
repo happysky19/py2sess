@@ -83,6 +83,7 @@ opacity:
             "heights": np.array([2.0, 1.0, 0.0]),
             "albedo": np.array([0.1, 0.2]),
             "depol": np.array([0.03, 0.03]),
+            "gas_absorption_tau": np.array([[0.008, 0.012], [0.015, 0.007]]),
             "absorption_tau": np.array([[0.01, 0.02], [0.02, 0.01]]),
             "rayleigh_scattering_tau": np.array([[0.03, 0.04], [0.02, 0.03]]),
             "aerosol_scattering_tau": np.zeros((2, 2, 0)),
@@ -300,11 +301,11 @@ surface:
                         "1 0 0 0 0 0 0 0 0 0 0",
                         "2 0 0 0 0 0 0 0 0 0 0",
                         "1 500.0 20000.0 0.1 0.03 1.0",
-                        "1 0.0 0.4 0.75 1.0 0 0 0 0 0",
-                        "2 0.0 0.2 0.50 1.0 0 0 0 0 0",
+                        "1 0.07 0.4 0.75 1.0 0 0 0 0 0",
+                        "2 0.08 0.2 0.50 1.0 0 0 0 0 0",
                         "2 600.0 16666.7 0.2 0.03 1.5",
-                        "1 0.0 0.5 0.80 1.0 0 0 0 0 0",
-                        "2 0.0 0.3 0.25 1.0 0 0 0 0 0",
+                        "1 0.02 0.5 0.80 1.0 0 0 0 0 0",
+                        "2 0.12 0.3 0.25 1.0 0 0 0 0 0",
                         "",
                     ]
                 )
@@ -315,6 +316,7 @@ surface:
             loaded = load_createprops_provider(provider_path, kind="uv")
 
         np.testing.assert_allclose(loaded["wavelengths"], [500.0, 600.0])
+        np.testing.assert_allclose(loaded["gas_absorption_tau"], [[0.07, 0.08], [0.02, 0.12]])
         np.testing.assert_allclose(loaded["absorption_tau"], [[0.1, 0.1], [0.1, 0.225]])
         np.testing.assert_allclose(
             loaded["rayleigh_scattering_tau"],
@@ -339,10 +341,10 @@ surface:
                         "1 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0",
                         "1 14285.0 500.0 0.1 0.03 0.2 0.01",
                         "1 0.01 0.02 0.5 0.4 0.1 0.2 0.3 0.4 0.0 0.01",
-                        "2 0.02 0.03 0.6 0.5 0.2 0.3 0.4 0.5 0.0 0.02",
+                        "2 0.01 0.03 0.6 0.5 0.2 0.3 0.4 0.5 0.0 0.02",
                         "2 14280.0 501.0 0.1 0.03 0.2 0.01",
                         "1 0.01 0.02 0.5 0.4 0.1 0.2 0.3 0.4 0.0 0.01",
-                        "2 0.02 0.03 0.6 0.5 0.2 0.3 0.4 0.5 0.0 0.02",
+                        "2 0.01 0.03 0.6 0.5 0.2 0.3 0.4 0.5 0.0 0.02",
                     ]
                 ),
                 encoding="utf-8",
@@ -362,6 +364,7 @@ surface:
             parsed = parse_createprops_dump(dump_path, kind="tir", profile_file=profile_path)
 
         np.testing.assert_allclose(parsed["wavenumber_cm_inv"], [500.0, 501.0])
+        np.testing.assert_allclose(parsed["gas_absorption_tau"], [[0.01, 0.01], [0.01, 0.01]])
         np.testing.assert_allclose(
             parsed["wavenumber_band_cm_inv"],
             [[499.5, 500.5], [500.5, 501.5]],

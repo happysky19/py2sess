@@ -14,6 +14,7 @@ _COMMON_PROVIDER_KEYS = (
     "heights",
     "albedo",
     "depol",
+    "gas_absorption_tau",
     "absorption_tau",
     "rayleigh_scattering_tau",
     "aerosol_scattering_tau",
@@ -109,6 +110,10 @@ def _validate_provider_arrays(arrays: dict[str, np.ndarray], *, kind: str) -> No
     aerosol = np.asarray(arrays["aerosol_scattering_tau"])
     if absorption.ndim != 2:
         raise ValueError("absorption_tau must have shape (nspec, nlayer)")
+    if "gas_absorption_tau" in arrays:
+        gas_absorption = np.asarray(arrays["gas_absorption_tau"])
+        if gas_absorption.shape != absorption.shape:
+            raise ValueError("gas_absorption_tau must match absorption_tau shape")
     if rayleigh.shape != absorption.shape:
         raise ValueError("rayleigh_scattering_tau must match absorption_tau shape")
     if aerosol.ndim != 3 or aerosol.shape[:2] != absorption.shape:
@@ -154,11 +159,17 @@ def _read_aerosol_moments(handle, n_moments: int) -> np.ndarray:
 
 def _component_optical_depths(
     *,
+    gas_absorption_tau: np.ndarray,
     total_tau: np.ndarray,
     ssa: np.ndarray,
     rayleigh_fraction: np.ndarray,
     aerosol_fraction: np.ndarray,
 ) -> dict[str, np.ndarray]:
+    gas_absorption_tau = np.asarray(gas_absorption_tau, dtype=np.float64)
+    if gas_absorption_tau.shape != total_tau.shape:
+        raise ValueError("gas_absorption_tau must match total_tau shape")
+    if not np.all(np.isfinite(gas_absorption_tau)) or np.any(gas_absorption_tau < 0.0):
+        raise ValueError("CreateProps dump has invalid gas_absorption_tau")
     scattering_tau = total_tau * ssa
     absorption_tau = total_tau - scattering_tau
     negative = absorption_tau < 0.0
@@ -168,6 +179,7 @@ def _component_optical_depths(
             raise ValueError("CreateProps dump implies negative absorption_tau")
         absorption_tau = np.where(negative, 0.0, absorption_tau)
     return {
+        "gas_absorption_tau": gas_absorption_tau,
         "absorption_tau": absorption_tau,
         "rayleigh_scattering_tau": scattering_tau * rayleigh_fraction,
         "aerosol_scattering_tau": scattering_tau[..., None] * aerosol_fraction,
@@ -190,6 +202,7 @@ def _parse_uv_dump(dump_path: Path) -> dict[str, np.ndarray]:
         albedo = np.empty(n_rows, dtype=np.float64)
         depol = np.empty(n_rows, dtype=np.float64)
         flux_factor = np.empty(n_rows, dtype=np.float64)
+        gas_absorption_tau = np.empty((n_rows, n_layers), dtype=np.float64)
         total_tau = np.empty((n_rows, n_layers), dtype=np.float64)
         ssa = np.empty((n_rows, n_layers), dtype=np.float64)
         rayleigh_fraction = np.empty((n_rows, n_layers), dtype=np.float64)
@@ -207,6 +220,7 @@ def _parse_uv_dump(dump_path: Path) -> dict[str, np.ndarray]:
                 values = handle.readline().split()
                 if len(values) < 10:
                     raise ValueError(f"invalid UV layer row {row + 1}, layer {layer + 1}")
+                gas_absorption_tau[row, layer] = float(values[1])
                 total_tau[row, layer] = float(values[2])
                 ssa[row, layer] = float(values[3])
                 rayleigh_fraction[row, layer] = float(values[4])
@@ -226,6 +240,7 @@ def _parse_uv_dump(dump_path: Path) -> dict[str, np.ndarray]:
     }
     arrays.update(
         _component_optical_depths(
+            gas_absorption_tau=gas_absorption_tau,
             total_tau=total_tau,
             ssa=ssa,
             rayleigh_fraction=rayleigh_fraction,
@@ -257,6 +272,7 @@ def _parse_tir_dump(
         wavenumber = np.empty(n_rows, dtype=np.float64)
         albedo = np.empty(n_rows, dtype=np.float64)
         depol = np.empty(n_rows, dtype=np.float64)
+        gas_absorption_tau = np.empty((n_rows, n_layers), dtype=np.float64)
         total_tau = np.empty((n_rows, n_layers), dtype=np.float64)
         ssa = np.empty((n_rows, n_layers), dtype=np.float64)
         rayleigh_fraction = np.empty((n_rows, n_layers), dtype=np.float64)
@@ -274,6 +290,7 @@ def _parse_tir_dump(
                 values = handle.readline().split()
                 if len(values) < 11:
                     raise ValueError(f"invalid TIR layer row {row + 1}, layer {layer + 1}")
+                gas_absorption_tau[row, layer] = float(values[1])
                 total_tau[row, layer] = float(values[2])
                 ssa[row, layer] = float(values[3])
                 rayleigh_fraction[row, layer] = float(values[4])
@@ -301,6 +318,7 @@ def _parse_tir_dump(
     }
     arrays.update(
         _component_optical_depths(
+            gas_absorption_tau=gas_absorption_tau,
             total_tau=total_tau,
             ssa=ssa,
             rayleigh_fraction=rayleigh_fraction,

@@ -452,12 +452,18 @@ def _cross_sections_all_levels(
     temperature_k: np.ndarray,
 ) -> np.ndarray:
     spec = np.zeros((wavenumber.size, pressure_atm.size), dtype=float)
+    nvoigt, voigt_grid = _fortran_voigt_grid(wavenumber)
     rt0t = _T0 / temperature_k
     rc2t = _C2 / temperature_k
     rc2t0 = _C2 / _T0
     for i in range(lines.size):
         sigma = lines.center_cm_inv[i] + lines.pressure_shift[i] * pressure_atm
-        start, stop = _line_window(float(np.min(sigma)), float(np.max(sigma)), wavenumber)
+        nvlo, nvhi = _fortran_voigt_windows(voigt_grid, nvoigt, sigma)
+        has_window = nvhi >= nvlo
+        if not np.any(has_window):
+            continue
+        start = max(0, int(np.min(nvlo[has_window])) - nvoigt)
+        stop = min(wavenumber.size, int(np.max(nvhi[has_window])) - nvoigt + 1)
         if stop <= start:
             continue
 
@@ -472,17 +478,60 @@ def _cross_sections_all_levels(
         ratio = ratio1 / ratio2 * q296[i] / q[:, i]
         vnorm = ratio * lines.strength[i] / vg * _INV_SQRT_PI
         local_wave = wavenumber[start:stop]
-        active = np.abs(local_wave[np.newaxis, :] - sigma[:, np.newaxis]) <= _VOIGT_EXTRA
+        central_index = nvoigt + np.arange(start, stop)
+        active = has_window[:, np.newaxis] & (
+            (central_index[np.newaxis, :] >= nvlo[:, np.newaxis])
+            & (central_index[np.newaxis, :] <= nvhi[:, np.newaxis])
+        )
         x = (local_wave[np.newaxis, :] - sigma[:, np.newaxis]) / vg[:, np.newaxis]
         contribution = vnorm[:, np.newaxis] * humlicek_voigt(x, voigta[:, np.newaxis])
         spec[start:stop] += np.where(active, contribution, 0.0).T
     return spec
 
 
-def _line_window(sigma_min: float, sigma_max: float, wavenumber: np.ndarray) -> tuple[int, int]:
-    start = int(np.searchsorted(wavenumber, sigma_min - _VOIGT_EXTRA, side="left"))
-    stop = int(np.searchsorted(wavenumber, sigma_max + _VOIGT_EXTRA, side="right"))
-    return start, stop
+def _fortran_voigt_grid(wavenumber: np.ndarray) -> tuple[int, np.ndarray]:
+    if wavenumber.size < 2:
+        return 0, wavenumber.copy()
+    step = (wavenumber[-1] - wavenumber[0]) / (wavenumber.size - 1)
+    if step <= 0.0:
+        raise ValueError("wavenumber grid must be increasing")
+    nvoigt = int(_VOIGT_EXTRA / step)
+    grid = np.empty(wavenumber.size + 2 * nvoigt, dtype=float)
+    grid[nvoigt : nvoigt + wavenumber.size] = wavenumber
+    if nvoigt:
+        grid[:nvoigt] = wavenumber[0] - step * np.arange(nvoigt, 0, -1)
+        grid[nvoigt + wavenumber.size :] = wavenumber[-1] + step * np.arange(1, nvoigt + 1)
+    return nvoigt, grid
+
+
+def _fortran_voigt_windows(
+    voigt_grid: np.ndarray,
+    nvoigt: int,
+    sigma: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    npoints = voigt_grid.size
+    insert = np.searchsorted(voigt_grid, sigma, side="left")
+    idx = insert - 1
+    valid = (idx >= 0) & (insert < npoints)
+
+    nvlo = np.empty(sigma.shape, dtype=int)
+    nvhi = np.empty(sigma.shape, dtype=int)
+    nvlo[valid] = np.maximum(0, idx[valid] - nvoigt)
+    nvhi[valid] = np.minimum(npoints - 1, idx[valid] + nvoigt)
+
+    no_bin = ~valid
+    outside = no_bin & (
+        (sigma < voigt_grid[0] - _VOIGT_EXTRA) | (sigma > voigt_grid[-1] + _VOIGT_EXTRA)
+    )
+    below = no_bin & ~outside & (sigma < voigt_grid[0])
+    above = no_bin & ~outside & ~below
+    nvlo[outside] = 1
+    nvhi[outside] = 0
+    nvlo[below] = 0
+    nvhi[below] = nvoigt - 1
+    nvlo[above] = npoints - nvoigt
+    nvhi[above] = npoints - 1
+    return nvlo, nvhi
 
 
 def _wavenumber_grid(grid: np.ndarray, *, is_wavenumber: bool) -> tuple[np.ndarray, np.ndarray]:
