@@ -182,7 +182,6 @@ def _thermal_user_solution(*, stream_value: float, user_stream: float, xpos1, xp
 def _thermal_layer_sources_up(
     *,
     user_stream,
-    tcutoff,
     t_delt_userm,
     delta_tau,
     u_xpos,
@@ -263,7 +262,6 @@ def _two_stream_thermal_toa(
     )
     layer_tsup_up = _thermal_layer_sources_up(
         user_stream=user_stream,
-        tcutoff=thermal_tcutoff,
         t_delt_userm=t_delt_userm,
         delta_tau=delta_tau,
         u_xpos=u_xpos,
@@ -524,10 +522,7 @@ def _fo_thermal_toa(
     do_source_deltam_scaling: bool = False,
 ):
     """Computes batched FO thermal upwelling TOA radiance."""
-    if do_optical_deltam_scaling:
-        deltaus = tau * (1.0 - omega * scaling)
-    else:
-        deltaus = tau
+    deltaus = tau * (1.0 - omega * scaling) if do_optical_deltam_scaling else tau
     lower_bb = thermal_bb_input[:, :-1]
     upper_bb = thermal_bb_input[:, 1:]
     single_scatter_scale = 1.0 - omega

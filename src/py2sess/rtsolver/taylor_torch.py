@@ -56,9 +56,7 @@ def taylor_series_2_torch(order: int, small: float, eps, y, delta, fac1, fac2, s
             total = total + ac[j] * d[m - j]
         cc.append(total)
 
-    term_1 = []
-    for m in range(mterms + 1):
-        term_1.append(fac1 * ac[m] - fac2 * cc[m])
+    term_1 = [fac1 * ac[m] - fac2 * cc[m] for m in range(mterms + 1)]
 
     power = torch.ones_like(delta)
     mult = term_1[1]

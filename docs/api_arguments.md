@@ -1,10 +1,7 @@
 # Public API Argument Reference
 
-`py2sess` exposes one canonical public API at `TwoStreamEss` and keeps
-Fortran-derived names at the internal solver boundary. The public names follow
-pydisort where the physics has a direct match: `nlyr`, `tau`, `ssa`, `fbeam`,
-and `albedo`. It intentionally keeps `g` instead of DISORT `pmom` because
-2S-ESS takes one layer asymmetry factor rather than a full phase-moment array.
+`py2sess` exposes one canonical public API at `TwoStreamEss`. User code should
+use the public names below; Fortran-style names stay at the solver boundary.
 
 `2S` is the two-stream multiple-scattering/emission component. It solves the
 layer boundary-value problem with two quadrature directions and is the fast
@@ -12,15 +9,10 @@ default path. `FO` is the first-order correction: direct-beam/single-scatter
 solar radiance, or first-order thermal source transmission. When `include_fo`
 is enabled, `result.radiance_total` is the validated `2S + FO` total.
 
-Angles are in degrees. Solar observation geometry is `[sza, vza, raz]`, where
-`sza` is solar zenith, `vza` is viewing zenith, and `raz` is relative azimuth.
-Thermal `angles` are viewing zenith angles only. Internally these angles are
-converted to cosines, secants, Chapman factors, and phase-angle terms. Relative
-azimuth is used through trigonometric factors, so `raz=360` is equivalent to
-`raz=0`. Heights `z` are in km and ordered top to bottom. Layer optical
-thickness is positive downward. Optical thickness, `ssa`, `g`, albedo,
-emissivity, Planck radiance, and radiance use the caller's consistent unit
-convention; the solver does not convert radiance units.
+Angles are in degrees. Solar geometry is `[sza, vza, raz]`; thermal geometry is
+viewing zenith angle only. Heights `z` are in km, ordered top to bottom. Layer
+optical thickness is positive downward. Radiance and Planck values use the
+caller's unit convention; the solver does not convert radiance units.
 
 `forward()` accepts either a single atmosphere with shape `(nlyr,)` or leading
 batch dimensions such as `(nwave, nlyr)` and `(ncol, nwave, nlyr)`. Batch
@@ -30,9 +22,6 @@ geometries append one final geometry axis. The default batched path returns TOA
 Set `TwoStreamEssOptions(output_levels=True)` when you need
 upwelling radiance profiles; profile arrays use the final axis for levels,
 ordered from TOA to BOA.
-
-See [`model_assumptions.md`](model_assumptions.md) for the compact checklist of
-defaults and hard-coded RT conventions.
 
 | Public name | Meaning | Shape | Default | Fortran/internal name |
 |---|---|---:|---|---|
@@ -72,6 +61,9 @@ defaults and hard-coded RT conventions.
 - `stream=None` becomes `1 / sqrt(3)`. Fortran parity examples pass their
   benchmark stream explicitly, such as `stream=0.5` for the packaged TIR case.
 - `fbeam` defaults to `1.0`.
+- `earth_radius` defaults to `6371.0 km`.
+- `nfine` / `fo_nfine` defaults to `3` for EPS FO spherical-path integration.
+- `n_moments` / `fo_n_moments` defaults to `5000`; `0` means isotropic phase.
 - `delta_m_truncation_factor=None` derives the HG-like fallback `f = g**2`,
   clipped to `0 <= f < 1`.
 - Pass `delta_m_truncation_factor=np.zeros(nlyr)` only when no truncation is
@@ -82,6 +74,8 @@ defaults and hard-coded RT conventions.
 - `geometry="pseudo_spherical"` maps to the EPS FO geometry path.
 - Solar and thermal source handling are mode-exclusive. A single `TwoStreamEss`
   call does not combine direct solar and Planck thermal sources in this pass.
+- Direct HITRAN line-by-line opacity is for limited validation/offline table
+  generation. Full-spectrum runtime should use saved gas cross-section tables.
 
 ## Result Names
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 import time
@@ -18,6 +19,7 @@ from py2sess.optical.scene import (
     build_scene_layer_optical_properties,
     build_scene_layer_optical_properties_from_gas_tau,
 )
+from py2sess.optical.scene_io import build_benchmark_scene_inputs
 
 
 SCENE_LAYER_CROSS_SECTION_REQUIRED_KEYS = ("pressure_hpa", "temperature_k", "gas_cross_sections")
@@ -97,6 +99,82 @@ def require_directory_input_store(path: Path, *, label: str) -> None:
             f"{label} strict generated-input mode requires an array-directory input store, "
             "not a legacy .npz bundle"
         )
+
+
+def add_common_benchmark_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    input_help: str,
+    torch_bvp_choices: tuple[str, ...] = ("auto", "block"),
+) -> None:
+    parser.add_argument("input", type=Path, nargs="?", help=input_help)
+    parser.add_argument("--profile", type=Path, help="Atmospheric profile text file.")
+    parser.add_argument("--scene", type=Path, help="Benchmark scene YAML file.")
+    parser.add_argument("--backend", choices=["numpy", "torch", "both"], default="both")
+    parser.add_argument("--limit", type=int, default=None, help="Optional spectral-row limit.")
+    parser.add_argument(
+        "--chunk-size", type=int, default=None, help="Optional chunk size override."
+    )
+    parser.add_argument("--numpy-bvp-engine", choices=["auto", "block"], default="auto")
+    parser.add_argument("--torch-bvp-engine", choices=torch_bvp_choices, default="auto")
+    parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
+    parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
+    parser.add_argument("--torch-threads", type=int, default=1)
+    parser.add_argument(
+        "--output-levels",
+        action="store_true",
+        help="Benchmark the public forward profile path instead of endpoint-only output.",
+    )
+    parser.add_argument(
+        "--use-dumped-derived-optics",
+        action="store_true",
+        help="Use stored optical preprocessing outputs instead of Python preprocessing.",
+    )
+    parser.add_argument(
+        "--require-python-generated-inputs",
+        action="store_true",
+        help="Fail instead of falling back to direct or dumped derived RT inputs.",
+    )
+
+
+def validate_scene_input_args(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    *,
+    forbidden_scene_flags: tuple[tuple[str, str], ...] = (),
+) -> bool:
+    scene_mode = args.profile is not None or args.scene is not None
+    if scene_mode and (args.profile is None or args.scene is None):
+        parser.error("--profile and --scene must be passed together")
+    if scene_mode and args.input is not None:
+        parser.error("pass either a runtime input store or --profile/--scene, not both")
+    if not scene_mode and args.input is None:
+        parser.error("input store or --profile/--scene is required")
+    for attr, flag in forbidden_scene_flags:
+        if scene_mode and getattr(args, attr):
+            parser.error(f"{flag} is not valid with --profile/--scene")
+    return scene_mode
+
+
+def benchmark_input_source(
+    args: argparse.Namespace,
+    *,
+    kind: str,
+    label: str,
+    scene_mode: bool,
+) -> tuple[dict[str, np.ndarray] | None, set[str], Path, str]:
+    if scene_mode:
+        bundle = build_benchmark_scene_inputs(
+            kind=kind,
+            profile_path=args.profile,
+            scene_path=args.scene,
+            spectral_limit=args.limit,
+        )
+        return bundle, set(bundle), args.scene, "profile+scene"
+
+    if args.require_python_generated_inputs:
+        require_directory_input_store(args.input, label=label)
+    return None, input_keys(args.input), args.input, input_store_kind(args.input)
 
 
 def select_layer_optical_keys(
@@ -239,11 +317,14 @@ def prepare_layer_optical_properties(
                             continue
                         if not np.all(np.isfinite(value)) or np.any(value < 0.0):
                             raise ValueError(f"{name} must be finite and nonnegative")
-                    if aerosol_ext_arr is not None and aerosol_scat_arr is not None:
-                        if np.any(aerosol_scat_arr > aerosol_ext_arr + 1.0e-14):
-                            raise ValueError(
-                                "aerosol_scattering_tau must not exceed aerosol_extinction_tau"
-                            )
+                    if (
+                        aerosol_ext_arr is not None
+                        and aerosol_scat_arr is not None
+                        and np.any(aerosol_scat_arr > aerosol_ext_arr + 1.0e-14)
+                    ):
+                        raise ValueError(
+                            "aerosol_scattering_tau must not exceed aerosol_extinction_tau"
+                        )
                 aerosol_scat_sum = (
                     0.0 if aerosol_scat_arr is None else sum_component_axis(aerosol_scat_arr)
                 )
@@ -255,9 +336,7 @@ def prepare_layer_optical_properties(
                 total_tau = absorption + rayleigh + aerosol_ext_sum
                 scattering_tau = rayleigh + aerosol_scat_sum
                 ssa = ssa_from_optical_depth(total_tau, scattering_tau)
-                prepared = dict(bundle)
-                prepared[total_key] = total_tau
-                prepared[ssa_key] = ssa
+                prepared = {**bundle, total_key: total_tau, ssa_key: ssa}
                 prepared["_scattering_tau"] = scattering_tau
                 return (
                     prepared,
@@ -272,9 +351,7 @@ def prepare_layer_optical_properties(
             aerosol_single_scattering_albedo=bundle.get(LAYER_OPTICAL_AEROSOL_SSA_KEY),
             validate_inputs=validate_inputs,
         )
-        prepared = dict(bundle)
-        prepared[total_key] = props.tau
-        prepared[ssa_key] = props.ssa
+        prepared = {**bundle, total_key: props.tau, ssa_key: props.ssa}
         prepared["rayleigh_fraction"] = props.rayleigh_fraction
         prepared["aerosol_fraction"] = props.aerosol_fraction
         return (
@@ -304,33 +381,35 @@ def prepare_layer_optical_properties(
                     bundle.get("aerosol_select_wavelength_microns", 0.4)
                 ),
             }
+        scene_kwargs = {
+            "wavelengths_nm": bundle.get("opacity_wavelengths", bundle["wavelengths"]),
+            "profile": profile,
+            "co2_ppmv": scalar_value(bundle.get("co2_ppmv", 385.0)),
+            **aerosol_kwargs,
+        }
         if "gas_absorption_tau" in bundle:
             scene = build_scene_layer_optical_properties_from_gas_tau(
-                wavelengths_nm=bundle.get("opacity_wavelengths", bundle["wavelengths"]),
-                profile=profile,
                 gas_absorption_tau=bundle["gas_absorption_tau"],
-                co2_ppmv=scalar_value(bundle.get("co2_ppmv", 385.0)),
-                **aerosol_kwargs,
+                **scene_kwargs,
             )
         else:
             scene = build_scene_layer_optical_properties(
-                wavelengths_nm=bundle.get("opacity_wavelengths", bundle["wavelengths"]),
-                profile=profile,
                 gas_cross_sections=bundle["gas_cross_sections"],
-                co2_ppmv=scalar_value(bundle.get("co2_ppmv", 385.0)),
-                **aerosol_kwargs,
+                **scene_kwargs,
             )
-        prepared = dict(bundle)
-        prepared["heights"] = profile.heights_km
-        prepared[total_key] = scene.layer.tau
-        prepared[ssa_key] = scene.layer.ssa
-        prepared["absorption_tau"] = scene.gas_absorption_tau
-        prepared["rayleigh_scattering_tau"] = scene.rayleigh_scattering_tau
-        prepared["aerosol_extinction_tau"] = scene.aerosol_extinction_tau
-        prepared["aerosol_scattering_tau"] = scene.aerosol_scattering_tau
-        prepared["rayleigh_fraction"] = scene.layer.rayleigh_fraction
-        prepared["aerosol_fraction"] = scene.layer.aerosol_fraction
-        prepared["depol"] = scene.depol
+        prepared = {
+            **bundle,
+            "heights": profile.heights_km,
+            total_key: scene.layer.tau,
+            ssa_key: scene.layer.ssa,
+            "absorption_tau": scene.gas_absorption_tau,
+            "rayleigh_scattering_tau": scene.rayleigh_scattering_tau,
+            "aerosol_extinction_tau": scene.aerosol_extinction_tau,
+            "aerosol_scattering_tau": scene.aerosol_scattering_tau,
+            "rayleigh_fraction": scene.layer.rayleigh_fraction,
+            "aerosol_fraction": scene.layer.aerosol_fraction,
+            "depol": scene.depol,
+        }
         return (
             prepared,
             time.perf_counter() - start,

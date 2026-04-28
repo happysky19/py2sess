@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a pressure-temperature gas cross-section table from HITRAN lines."""
+"""Create a NetCDF gas cross-section table from HITRAN lines."""
 
 from __future__ import annotations
 
@@ -37,44 +37,54 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        if args.profile is not None or args.scene is not None:
-            gases, hitran_dir, wavenumber, pressure, temperature, table = _profile_table(args)
-        else:
-            gases, hitran_dir, wavenumber, pressure, temperature, table = _lookup_table(args)
+        inputs = _table_inputs(args)
     except ValueError as exc:
         parser.error(str(exc))
-    _write_table(args.output, gases, wavenumber, pressure, temperature, table)
-    print(f"wrote {args.output} from {hitran_dir}")
+
+    partition = load_hitran_partition_functions(inputs["hitran_dir"])
+    with netcdf_file(args.output, "w") as data:
+        xsec_var = _create_table_file(data, inputs)
+        for index, gas in enumerate(inputs["gases"]):
+            lines = read_hitran_lines(inputs["hitran_dir"], gas, inputs["wavenumber"])
+            xsec = hitran_cross_sections(
+                hitran_dir=inputs["hitran_dir"],
+                molecule=gas,
+                spectral_grid=inputs["wavenumber"],
+                pressure_atm=inputs["pressure_atm"],
+                temperature_k=inputs["temperature_calc"],
+                fwhm=args.fwhm,
+                partition_functions=partition,
+                lines=lines,
+            )
+            xsec_var[index] = xsec.reshape(xsec_var.shape[1:])
+    print(f"wrote {args.output} from {inputs['hitran_dir']}")
 
 
-def _profile_table(
-    args: argparse.Namespace,
-) -> tuple[tuple[str, ...], Path, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    if args.profile is None or args.scene is None:
-        raise ValueError("--profile and --scene must be passed together")
-    scene = load_scene_yaml(args.scene)
-    gases = tuple(args.gas or _scene_gases(scene))
-    if not gases:
-        raise ValueError("scene must define gases or pass --gas")
-    hitran_dir = args.hitran_dir or _scene_hitran_dir(scene, args.scene.parent)
-    wavenumber = _scene_wavenumber(scene, args.scene.parent)
-    if args.spectral_limit is not None:
-        wavenumber = wavenumber[: args.spectral_limit]
-    profile = load_profile_text(args.profile)
-    table = _cross_sections(
-        hitran_dir=hitran_dir,
-        gases=gases,
-        wavenumber=wavenumber,
-        pressure_atm=profile.pressure_hpa / 1013.25,
-        temperature_k=profile.temperature_k,
-        fwhm=args.fwhm,
-    )
-    return gases, hitran_dir, wavenumber, profile.pressure_hpa, profile.temperature_k, table
+def _table_inputs(args: argparse.Namespace) -> dict[str, object]:
+    if args.spectral_limit is not None and args.spectral_limit < 2:
+        raise ValueError("--spectral-limit must be at least 2")
+    if args.profile is not None or args.scene is not None:
+        if args.profile is None or args.scene is None:
+            raise ValueError("--profile and --scene must be passed together")
+        scene = load_scene_yaml(args.scene)
+        gases = tuple(args.gas or _scene_gases(scene))
+        if not gases:
+            raise ValueError("scene must define gases or pass --gas")
+        profile = load_profile_text(args.profile)
+        wavenumber = _scene_wavenumber(scene, args.scene.parent)
+        if args.spectral_limit is not None:
+            wavenumber = wavenumber[: args.spectral_limit]
+        return {
+            "gases": gases,
+            "hitran_dir": args.hitran_dir or _scene_hitran_dir(scene, args.scene.parent),
+            "wavenumber": wavenumber,
+            "pressure_hpa": profile.pressure_hpa,
+            "temperature_k": profile.temperature_k,
+            "pressure_atm": profile.pressure_hpa / 1013.25,
+            "temperature_calc": profile.temperature_k,
+            "is_lookup": False,
+        }
 
-
-def _lookup_table(
-    args: argparse.Namespace,
-) -> tuple[tuple[str, ...], Path, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     missing = [
         name
         for name in ("hitran_dir", "gas", "pressure_hpa", "temperature_k")
@@ -82,46 +92,19 @@ def _lookup_table(
     ]
     if missing:
         raise ValueError("missing required lookup-table option(s): " + ", ".join(missing))
-    wavenumber = _wavenumber_grid(args)
     pressure = np.asarray(args.pressure_hpa, dtype=float)
     temperature = np.asarray(args.temperature_k, dtype=float)
     pgrid, tgrid = np.meshgrid(pressure / 1013.25, temperature, indexing="ij")
-    flat = _cross_sections(
-        hitran_dir=args.hitran_dir,
-        gases=tuple(args.gas),
-        wavenumber=wavenumber,
-        pressure_atm=pgrid.reshape(-1),
-        temperature_k=tgrid.reshape(-1),
-        fwhm=args.fwhm,
-    )
-    table = flat.reshape((len(args.gas), wavenumber.size, pressure.size, temperature.size))
-    return tuple(args.gas), args.hitran_dir, wavenumber, pressure, temperature, table
-
-
-def _cross_sections(
-    *,
-    hitran_dir: Path,
-    gases: tuple[str, ...],
-    wavenumber: np.ndarray,
-    pressure_atm: np.ndarray,
-    temperature_k: np.ndarray,
-    fwhm: float,
-) -> np.ndarray:
-    partition = load_hitran_partition_functions(hitran_dir)
-    table = np.empty((len(gases), wavenumber.size, pressure_atm.size), dtype=float)
-    for index, gas in enumerate(gases):
-        lines = read_hitran_lines(hitran_dir, gas, wavenumber)
-        table[index] = hitran_cross_sections(
-            hitran_dir=hitran_dir,
-            molecule=gas,
-            spectral_grid=wavenumber,
-            pressure_atm=pressure_atm,
-            temperature_k=temperature_k,
-            fwhm=fwhm,
-            partition_functions=partition,
-            lines=lines,
-        )
-    return table
+    return {
+        "gases": tuple(args.gas),
+        "hitran_dir": args.hitran_dir,
+        "wavenumber": _wavenumber_grid(args),
+        "pressure_hpa": pressure,
+        "temperature_k": temperature,
+        "pressure_atm": pgrid.reshape(-1),
+        "temperature_calc": tgrid.reshape(-1),
+        "is_lookup": True,
+    }
 
 
 def _wavenumber_grid(args: argparse.Namespace) -> np.ndarray:
@@ -136,10 +119,9 @@ def _wavenumber_grid(args: argparse.Namespace) -> np.ndarray:
         if missing:
             raise ValueError("pass --wavenumber-file or start/step/count")
         grid = args.wavenumber_start + args.wavenumber_step * np.arange(args.wavenumber_count)
-    grid = np.asarray(grid, dtype=float).reshape(-1)
-    if grid.size < 2 or np.any(np.diff(grid) <= 0.0):
-        raise ValueError("wavenumber grid must be strictly increasing")
-    return grid
+    if args.spectral_limit is not None:
+        grid = np.asarray(grid, dtype=float).reshape(-1)[: args.spectral_limit]
+    return _increasing_grid(grid)
 
 
 def _scene_wavenumber(scene: dict, base_dir: Path) -> np.ndarray:
@@ -155,12 +137,15 @@ def _scene_wavenumber(scene: dict, base_dir: Path) -> np.ndarray:
     else:
         raise ValueError("scene spectral section must define a HITRAN-compatible grid")
     grid = np.asarray(grid, dtype=float).reshape(-1)
-    if grid.size < 2:
-        raise ValueError("spectral grid must contain at least two points")
-    if np.any(np.diff(grid) < 0.0):
+    if grid.size >= 2 and np.any(np.diff(grid) < 0.0):
         grid = grid[::-1]
-    if np.any(np.diff(grid) <= 0.0):
-        raise ValueError("wavenumber grid must be unique")
+    return _increasing_grid(grid)
+
+
+def _increasing_grid(values) -> np.ndarray:
+    grid = np.asarray(values, dtype=float).reshape(-1)
+    if grid.size < 2 or np.any(np.diff(grid) <= 0.0):
+        raise ValueError("wavenumber grid must be strictly increasing")
     return grid
 
 
@@ -194,41 +179,34 @@ def _scene_hitran_dir(scene: dict, base_dir: Path) -> Path:
 
 def _resolve_path(value, base_dir: Path) -> Path:
     path = Path(value).expanduser()
-    return path if path.is_absolute() else (base_dir / path)
+    return path if path.is_absolute() else base_dir / path
 
 
-def _write_table(
-    output: Path,
-    gases: tuple[str, ...],
-    wavenumber: np.ndarray,
-    pressure_hpa: np.ndarray,
-    temperature_k: np.ndarray,
-    cross_section: np.ndarray,
-) -> None:
+def _create_table_file(data, inputs: dict[str, object]):
+    gases = inputs["gases"]
+    wavenumber = inputs["wavenumber"]
+    pressure = inputs["pressure_hpa"]
+    temperature = inputs["temperature_k"]
     names = _gas_name_chars(gases)
-    with netcdf_file(output, "w") as data:
-        data.createDimension("gas", len(gases))
-        data.createDimension("spectral", wavenumber.size)
-        data.createDimension("name_strlen", names.shape[1])
-        data.createVariable("gas_names", "c", ("gas", "name_strlen"))[:] = names
-        data.createVariable("wavenumber_cm_inv", "d", ("spectral",))[:] = wavenumber
-        if cross_section.ndim == 3:
-            data.createDimension("level", pressure_hpa.size)
-            data.createVariable("pressure_hpa", "d", ("level",))[:] = pressure_hpa
-            data.createVariable("temperature_k", "d", ("level",))[:] = temperature_k
-            data.createVariable("cross_section", "d", ("gas", "spectral", "level"))[:] = (
-                cross_section
-            )
-        else:
-            data.createDimension("pressure", pressure_hpa.size)
-            data.createDimension("temperature", temperature_k.size)
-            data.createVariable("pressure_hpa", "d", ("pressure",))[:] = pressure_hpa
-            data.createVariable("temperature_k", "d", ("temperature",))[:] = temperature_k
-            data.createVariable(
-                "cross_section",
-                "d",
-                ("gas", "spectral", "pressure", "temperature"),
-            )[:] = cross_section
+    data.createDimension("gas", len(gases))
+    data.createDimension("spectral", wavenumber.size)
+    data.createDimension("name_strlen", names.shape[1])
+    data.createVariable("gas_names", "c", ("gas", "name_strlen"))[:] = names
+    data.createVariable("wavenumber_cm_inv", "d", ("spectral",))[:] = wavenumber
+    if not inputs["is_lookup"]:
+        data.createDimension("level", pressure.size)
+        data.createVariable("pressure_hpa", "d", ("level",))[:] = pressure
+        data.createVariable("temperature_k", "d", ("level",))[:] = temperature
+        return data.createVariable("cross_section", "d", ("gas", "spectral", "level"))
+    data.createDimension("pressure", pressure.size)
+    data.createDimension("temperature", temperature.size)
+    data.createVariable("pressure_hpa", "d", ("pressure",))[:] = pressure
+    data.createVariable("temperature_k", "d", ("temperature",))[:] = temperature
+    return data.createVariable(
+        "cross_section",
+        "d",
+        ("gas", "spectral", "pressure", "temperature"),
+    )
 
 
 def _gas_name_chars(gases: tuple[str, ...]) -> np.ndarray:

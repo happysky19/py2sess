@@ -101,9 +101,8 @@ class UvBenchmarkCase:
 def _load_npz(name: str) -> dict[str, np.ndarray]:
     """Loads one packaged NumPy fixture into memory."""
     resource = files("py2sess.data.benchmark").joinpath(name)
-    with as_file(resource) as path:
-        with np.load(path) as data:
-            return {key: np.array(data[key]) for key in data.files}
+    with as_file(resource) as path, np.load(path) as data:
+        return {key: np.array(data[key]) for key in data.files}
 
 
 def load_tir_benchmark_case() -> TirBenchmarkCase:

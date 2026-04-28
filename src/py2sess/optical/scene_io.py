@@ -108,12 +108,13 @@ def build_benchmark_scene_inputs(
         )
     else:
         profile = _profile_with_scene_gases(profile, gases=gases, gas_defaults=gas_defaults)
+    surface_altitude = _surface_altitude(scene, profile)
     opacity_profile = atmospheric_profile_from_levels(
         pressure_hpa=profile.pressure_hpa,
         temperature_k=profile.temperature_k,
         gas_vmr=profile.gas_vmr,
         heights_km=profile.heights_km,
-        surface_altitude_m=_surface_altitude(scene, profile),
+        surface_altitude_m=surface_altitude,
     )
     provider_has_components = {
         "absorption_tau",
@@ -127,7 +128,7 @@ def build_benchmark_scene_inputs(
         "temperature_k": profile.temperature_k,
         "gas_vmr": profile.gas_vmr,
         "heights": opacity_profile.heights_km,
-        "surface_altitude_m": np.array(_surface_altitude(scene, profile), dtype=float),
+        "surface_altitude_m": np.array(surface_altitude, dtype=float),
     }
     if not provider_has_components:
         bundle["gas_absorption_tau"] = _gas_absorption_tau(

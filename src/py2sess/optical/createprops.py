@@ -120,20 +120,14 @@ def _validate_provider_arrays(arrays: dict[str, np.ndarray], *, kind: str) -> No
         raise ValueError("aerosol_scattering_tau must have shape (nspec, nlayer, naerosol)")
 
     nspec, nlayer = absorption.shape
-    if "wavelengths" in arrays and np.asarray(arrays["wavelengths"]).shape != (nspec,):
-        raise ValueError("wavelengths must have shape (nspec,)")
-    if "heights" in arrays and np.asarray(arrays["heights"]).shape != (nlayer + 1,):
-        raise ValueError("heights must have shape (nlayer + 1,)")
-    if "albedo" in arrays and np.asarray(arrays["albedo"]).shape != (nspec,):
-        raise ValueError("albedo must have shape (nspec,)")
-    if "depol" in arrays and np.asarray(arrays["depol"]).shape != (nspec,):
-        raise ValueError("depol must have shape (nspec,)")
-    if kind == "uv" and "flux_factor" in arrays:
-        if np.asarray(arrays["flux_factor"]).shape != (nspec,):
-            raise ValueError("flux_factor must have shape (nspec,)")
-    if kind == "tir" and "wavenumber_cm_inv" in arrays:
-        if np.asarray(arrays["wavenumber_cm_inv"]).shape != (nspec,):
-            raise ValueError("wavenumber_cm_inv must have shape (nspec,)")
+    _check_optional_shape(arrays, "wavelengths", (nspec,), "shape (nspec,)")
+    _check_optional_shape(arrays, "heights", (nlayer + 1,), "shape (nlayer + 1,)")
+    _check_optional_shape(arrays, "albedo", (nspec,), "shape (nspec,)")
+    _check_optional_shape(arrays, "depol", (nspec,), "shape (nspec,)")
+    if kind == "uv":
+        _check_optional_shape(arrays, "flux_factor", (nspec,), "shape (nspec,)")
+    if kind == "tir":
+        _check_optional_shape(arrays, "wavenumber_cm_inv", (nspec,), "shape (nspec,)")
     if kind == "tir" and not (
         "wavenumber_cm_inv" in arrays
         or "wavenumber_band_cm_inv" in arrays
@@ -143,6 +137,16 @@ def _validate_provider_arrays(arrays: dict[str, np.ndarray], *, kind: str) -> No
             "TIR CreateProps provider requires wavenumber_cm_inv, "
             "wavenumber_band_cm_inv, or wavelength_microns"
         )
+
+
+def _check_optional_shape(
+    arrays: dict[str, np.ndarray],
+    key: str,
+    shape: tuple[int, ...],
+    shape_text: str,
+) -> None:
+    if key in arrays and np.asarray(arrays[key]).shape != shape:
+        raise ValueError(f"{key} must have {shape_text}")
 
 
 def _read_aerosol_moments(handle, n_moments: int) -> np.ndarray:

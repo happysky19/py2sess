@@ -521,16 +521,18 @@ def prepare_inputs(
             raise ValueError("user_angles must be provided for solar_lat mode")
         if not options.do_mvout_only and relazms.size == 0:
             raise ValueError("user_relazms must be provided for solar_lat mode")
-        obs_rows = []
         if options.do_mvout_only:
-            for sza in beams:
-                obs_rows.append([float(sza), 0.0, 0.0])
+            obsgeoms = np.asarray([[float(sza), 0.0, 0.0] for sza in beams], dtype=float)
         else:
-            for sza in beams:
-                for vza in angles:
-                    for azm in relazms:
-                        obs_rows.append([float(sza), float(vza), float(azm)])
-        obsgeoms = np.asarray(obs_rows, dtype=float)
+            obsgeoms = np.asarray(
+                [
+                    [float(sza), float(vza), float(azm)]
+                    for sza in beams
+                    for vza in angles
+                    for azm in relazms
+                ],
+                dtype=float,
+            )
         do_postprocessing, normalized_earth_radius = _validate_inputs(
             options=options,
             tau_arr=tau,

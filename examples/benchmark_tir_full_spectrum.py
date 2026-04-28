@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import argparse
 import time
-from pathlib import Path
 
 import numpy as np
 
 from _full_spectrum_benchmark_common import (
     accuracy_summary,
+    add_common_benchmark_arguments,
     BenchmarkRow,
-    input_keys,
-    input_store_kind,
+    benchmark_input_source,
     load_input_arrays,
     looks_like_row_index,
     layer_optical_keys_are_components,
@@ -23,7 +22,6 @@ from _full_spectrum_benchmark_common import (
     print_rows,
     public_bvp_solver,
     recommended_chunk_size,
-    require_directory_input_store,
     require_python_generated_layer_optical_inputs,
     require_keys,
     scalar_value,
@@ -31,6 +29,7 @@ from _full_spectrum_benchmark_common import (
     select_phase_optical_keys,
     slice_spectral_rows,
     trim_spectral_rows,
+    validate_scene_input_args,
 )
 from py2sess import (
     thermal_source_from_temperature_profile,
@@ -42,7 +41,6 @@ from py2sess.optical.phase import (
     build_two_stream_phase_inputs,
     build_two_stream_phase_inputs_from_scattering_tau,
 )
-from py2sess.optical.scene_io import build_benchmark_scene_inputs
 from py2sess.rtsolver import precompute_fo_thermal_geometry_numpy
 from py2sess.rtsolver.backend import has_torch
 from py2sess.rtsolver.thermal_batch_numpy import _fo_thermal_toa, _two_stream_thermal_toa
@@ -625,77 +623,34 @@ def benchmark_torch_forward(
 def main() -> None:
     """Runs the full-spectrum TIR benchmark example."""
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "input",
-        type=Path,
-        nargs="?",
-        help="Path to a TIR runtime array directory, or a legacy full-spectrum .npz bundle.",
-    )
-    parser.add_argument("--profile", type=Path, help="Atmospheric profile text file.")
-    parser.add_argument("--scene", type=Path, help="Benchmark scene YAML file.")
-    parser.add_argument("--backend", choices=["numpy", "torch", "both"], default="both")
-    parser.add_argument("--limit", type=int, default=None, help="Optional spectral-row limit.")
-    parser.add_argument(
-        "--chunk-size", type=int, default=None, help="Optional chunk size override."
-    )
-    parser.add_argument("--numpy-bvp-engine", choices=["auto", "block"], default="auto")
-    parser.add_argument(
-        "--torch-bvp-engine", choices=["auto", "block", "pentadiagonal"], default="auto"
-    )
-    parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
-    parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
-    parser.add_argument("--torch-threads", type=int, default=1)
-    parser.add_argument(
-        "--output-levels",
-        action="store_true",
-        help="Benchmark the public forward profile path instead of endpoint-only output.",
-    )
-    parser.add_argument(
-        "--use-dumped-derived-optics",
-        action="store_true",
-        help="Use stored g and delta-M factor instead of Python preprocessing.",
+    add_common_benchmark_arguments(
+        parser,
+        input_help="Path to a TIR runtime array directory, or a legacy full-spectrum .npz bundle.",
+        torch_bvp_choices=("auto", "block", "pentadiagonal"),
     )
     parser.add_argument(
         "--use-dumped-thermal-source",
         action="store_true",
         help="Use stored thermal_bb_input/surfbb instead of temperature-based source generation.",
     )
-    parser.add_argument(
-        "--require-python-generated-inputs",
-        action="store_true",
-        help="Fail instead of falling back to direct or dumped derived RT inputs.",
-    )
     args = parser.parse_args()
 
     load_start = time.perf_counter()
-    scene_mode = args.profile is not None or args.scene is not None
-    if scene_mode and (args.profile is None or args.scene is None):
-        parser.error("--profile and --scene must be passed together")
-    if scene_mode and args.input is not None:
-        parser.error("pass either a runtime input store or --profile/--scene, not both")
-    if not scene_mode and args.input is None:
-        parser.error("input store or --profile/--scene is required")
-    if scene_mode and args.use_dumped_derived_optics:
-        parser.error("--use-dumped-derived-optics is not valid with --profile/--scene")
-    if scene_mode and args.use_dumped_thermal_source:
-        parser.error("--use-dumped-thermal-source is not valid with --profile/--scene")
+    scene_mode = validate_scene_input_args(
+        parser,
+        args,
+        forbidden_scene_flags=(
+            ("use_dumped_derived_optics", "--use-dumped-derived-optics"),
+            ("use_dumped_thermal_source", "--use-dumped-thermal-source"),
+        ),
+    )
 
-    if scene_mode:
-        bundle = build_benchmark_scene_inputs(
-            kind="tir",
-            profile_path=args.profile,
-            scene_path=args.scene,
-            spectral_limit=args.limit,
-        )
-        available = set(bundle)
-        input_path = args.scene
-        input_kind = "profile+scene"
-    else:
-        if args.require_python_generated_inputs:
-            require_directory_input_store(args.input, label="TIR")
-        available = input_keys(args.input)
-        input_path = args.input
-        input_kind = input_store_kind(args.input)
+    bundle, available, input_path, input_kind = benchmark_input_source(
+        args,
+        kind="tir",
+        label="TIR",
+        scene_mode=scene_mode,
+    )
 
     layer_optical_keys = select_layer_optical_keys(
         available,
@@ -782,11 +737,7 @@ def main() -> None:
         wavelengths=wavelengths,
         layers=int(bundle["tau"].shape[1]),
         load_seconds=load_seconds,
-        note=(
-            "RT time is FO + 2S. wall time (s) excludes input-store load and printed "
-            "preprocessing, but includes backend-local overhead such as tensor "
-            "conversion, PyTorch warmup, and checksum reduction."
-        ),
+        note="RT time is FO + 2S. wall time excludes load/preprocessing.",
     )
     print_preprocessing_summary(
         (
