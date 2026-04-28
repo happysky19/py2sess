@@ -70,7 +70,7 @@ class GeocapeInputTests(unittest.TestCase):
             loading = root / "organic_loading.dat"
             ssprops = root / "ssprops"
             self._write_profile(profile)
-            xsec.write_text("300 1.0e-22\n400 2.0e-22\n")
+            xsec.write_text("300 1.0e-22\n400 2.0e-22\n450 2.5e-22\n")
             loading.write_text("1 0.2 0 0\n2 0.1 0 0\n")
             self._write_ssprops(ssprops / "organic" / "70")
             scene.write_text(
@@ -78,7 +78,7 @@ class GeocapeInputTests(unittest.TestCase):
 mode: solar
 gases: [O3]
 spectral:
-  wavelengths_nm: [300.0, 400.0]
+  wavelengths_nm: [300.0, 400.0, 450.0]
 geometry:
   angles: [30.0, 20.0, 0.0]
 surface:
@@ -106,6 +106,7 @@ opacity:
                 profile_path=profile,
                 scene_path=scene,
                 kind="uv",
+                spectral_limit=2,
             )
 
         for forbidden in (
@@ -118,11 +119,13 @@ opacity:
         ):
             self.assertNotIn(forbidden, bundle)
         self.assertEqual(bundle["gas_absorption_tau"].shape, (2, 2))
+        np.testing.assert_allclose(bundle["wavelengths"], [300.0, 400.0])
         self.assertGreater(float(bundle["gas_absorption_tau"].sum()), 0.0)
         np.testing.assert_allclose(bundle["aerosol_loadings"][:, 0], [0.1, 0.2])
         np.testing.assert_allclose(bundle["aerosol_select_wavelength_microns"], 0.4)
         self.assertEqual(bundle["aerosol_bulk_iops"].shape, (2, 4, 1))
         self.assertEqual(bundle["aerosol_moments"].shape, (2, 3, 1))
+        np.testing.assert_allclose(bundle["aerosol_moments"][1, :, 0], [1.0, 0.45, 0.045])
 
     @staticmethod
     def _write_profile(path: Path) -> None:

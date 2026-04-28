@@ -86,6 +86,7 @@ def build_benchmark_scene_inputs(
     mode = _scene_mode(scene, kind)
     provider = _load_opacity_provider(scene, scene_file.parent, kind=kind)
     spectral = _spectral_arrays(scene, provider, scene_file.parent)
+    aerosol_moment_wavelengths = spectral["wavelengths"]
     full_row_count = spectral["wavelengths"].shape[0]
     if spectral_limit is not None:
         if spectral_limit <= 0:
@@ -153,7 +154,13 @@ def build_benchmark_scene_inputs(
         nspec=spectral["wavelengths"].shape[0],
         source_nspec=full_row_count,
     )
-    _add_aerosol_arrays(bundle, scene, scene_file.parent, n_layers=profile.pressure_hpa.size - 1)
+    _add_aerosol_arrays(
+        bundle,
+        scene,
+        scene_file.parent,
+        n_layers=profile.pressure_hpa.size - 1,
+        moment_wavelengths_nm=aerosol_moment_wavelengths,
+    )
     _add_reference_arrays(bundle, scene, scene_file.parent)
 
     rt_config = _section(scene, "rt")
@@ -573,6 +580,7 @@ def _add_aerosol_arrays(
     base_dir: Path,
     *,
     n_layers: int,
+    moment_wavelengths_nm: np.ndarray,
 ) -> None:
     opacity = _section(scene, "opacity")
     aerosol = opacity.get("aerosol", {})
@@ -587,7 +595,7 @@ def _add_aerosol_arrays(
         tables = _load_geocape_ssprops(
             ssprops,
             base_dir,
-            wavelengths_nm=np.asarray(bundle["wavelengths"], dtype=float),
+            wavelengths_nm=np.asarray(moment_wavelengths_nm, dtype=float),
         )
         bundle["aerosol_wavelengths_microns"] = tables.wavelengths_microns
         bundle["aerosol_bulk_iops"] = tables.bulk_iops
