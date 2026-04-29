@@ -87,6 +87,30 @@ def gas_cross_sections_from_tables(
     return np.column_stack(columns)
 
 
+def load_geocape_solar_flux(
+    path: str | Path,
+    wavenumber_cm_inv,
+    *,
+    scale: float = 1.0e4,
+) -> np.ndarray:
+    """Read the GEOCAPE solar spectrum and interpolate it onto wavenumber."""
+    wavenumber = _finite_1d("wavenumber_cm_inv", wavenumber_cm_inv)
+    table = np.loadtxt(path, dtype=float, skiprows=2)
+    if table.ndim != 2 or table.shape[1] < 2:
+        raise ValueError("solar spectrum table must have at least two columns")
+    return np.interp(wavenumber, table[:, 0], table[:, 1]) * float(scale)
+
+
+def load_geocape_surface_albedo(path: str | Path, wavenumber_cm_inv) -> np.ndarray:
+    """Read ASTER emissivity and return Lambertian albedo = 1 - emissivity."""
+    wavenumber = _finite_1d("wavenumber_cm_inv", wavenumber_cm_inv)
+    table = np.loadtxt(path, dtype=float, skiprows=10, max_rows=386)
+    if table.ndim != 2 or table.shape[1] < 2:
+        raise ValueError("surface emissivity table must have at least two columns")
+    emissivity = np.interp(wavenumber, table[:, 0], table[:, 1])
+    return 1.0 - emissivity
+
+
 def load_geocape_aerosol_loadings(
     files: list[str | Path],
     *,
@@ -114,6 +138,13 @@ def load_geocape_aerosol_loadings(
             raise ValueError(f"{path} does not contain select_index {select_index}")
         out[n_layers - active :, component] = data[:active, select_index - 1][::-1]
     return out
+
+
+def _finite_1d(name: str, values) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim != 1 or not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be a finite one-dimensional array")
+    return arr
 
 
 def geocape_select_wavelength_microns(select_index: int) -> float:

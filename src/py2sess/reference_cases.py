@@ -10,6 +10,7 @@ import numpy as np
 
 _TIR_STREAM_VALUE = 0.5
 _UV_STREAM_VALUE = 1.0 / np.sqrt(3.0)
+_REFERENCE_KEYS = ("ref_2s", "ref_fo", "ref_total")
 
 
 @dataclass(frozen=True)
@@ -105,9 +106,18 @@ def _load_npz(name: str) -> dict[str, np.ndarray]:
         return {key: np.array(data[key]) for key in data.files}
 
 
+def _load_reference_outputs(name: str) -> dict[str, np.ndarray]:
+    """Loads a reference-output-only fixture."""
+    data = _load_npz(name)
+    if set(data) != set(_REFERENCE_KEYS):
+        raise ValueError(f"{name} must contain only {', '.join(_REFERENCE_KEYS)}")
+    return data
+
+
 def load_tir_benchmark_case() -> TirBenchmarkCase:
     """Returns the packaged thermal benchmark case."""
     data = _load_npz("tir_benchmark_fixture.npz")
+    refs = _load_reference_outputs("tir_reference_outputs.npz")
     return TirBenchmarkCase(
         selected_indices=data["selected_indices"],
         wavelengths=data["wavelengths"],
@@ -130,15 +140,16 @@ def load_tir_benchmark_case() -> TirBenchmarkCase:
         surfbb=data["surfbb"],
         albedo=data["albedo"],
         emissivity=data["emissivity"],
-        ref_2s=data["ref_2s"],
-        ref_fo=data["ref_fo"],
-        ref_total=data["ref_total"],
+        ref_2s=refs["ref_2s"],
+        ref_fo=refs["ref_fo"],
+        ref_total=refs["ref_total"],
     )
 
 
 def load_uv_benchmark_case() -> UvBenchmarkCase:
     """Returns the packaged solar benchmark case."""
     data = _load_npz("uv_benchmark_fixture.npz")
+    refs = _load_reference_outputs("uv_reference_outputs.npz")
     return UvBenchmarkCase(
         selected_indices=data["selected_indices"],
         wavelengths=data["wavelengths"],
@@ -165,7 +176,7 @@ def load_uv_benchmark_case() -> UvBenchmarkCase:
         pxsq=data["pxsq"],
         px0x=data["px0x"],
         ulp=float(data["ulp"][0]),
-        ref_2s=data["ref_2s"],
-        ref_fo=data["ref_fo"],
-        ref_total=data["ref_total"],
+        ref_2s=refs["ref_2s"],
+        ref_fo=refs["ref_fo"],
+        ref_total=refs["ref_total"],
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib.resources import as_file, files
 import os
 import unittest
 
@@ -78,6 +79,24 @@ def _generated_uv_phase(case):
 
 
 class ReferenceCaseTests(unittest.TestCase):
+    def test_packaged_reference_outputs_are_separate_files(self) -> None:
+        for input_name, reference_name in (
+            ("uv_benchmark_fixture.npz", "uv_reference_outputs.npz"),
+            ("tir_benchmark_fixture.npz", "tir_reference_outputs.npz"),
+        ):
+            with self.subTest(reference=reference_name):
+                with (
+                    as_file(files("py2sess.data.benchmark").joinpath(input_name)) as input_path,
+                    as_file(
+                        files("py2sess.data.benchmark").joinpath(reference_name)
+                    ) as reference_path,
+                    np.load(input_path) as input_data,
+                    np.load(reference_path) as reference_data,
+                ):
+                    self.assertEqual(set(reference_data.files), {"ref_2s", "ref_fo", "ref_total"})
+                    for key in reference_data.files:
+                        np.testing.assert_array_equal(reference_data[key], input_data[key])
+
     def test_tir_fixture_matches_saved_components_and_total(self) -> None:
         case = load_tir_benchmark_case()
         result = solve_thermal_batch_numpy(

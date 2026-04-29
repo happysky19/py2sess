@@ -14,6 +14,8 @@ from .geocape import (
     geocape_select_wavelength_microns,
     load_geocape_aerosol_loadings,
     load_geocape_aerosol_tables,
+    load_geocape_solar_flux,
+    load_geocape_surface_albedo,
 )
 from .hitran import (
     hitran_cross_sections,
@@ -80,10 +82,13 @@ def build_benchmark_scene_inputs(
     scene_path: str | Path,
     kind: str,
     spectral_limit: int | None = None,
+    strict_runtime_inputs: bool = False,
 ) -> dict[str, np.ndarray]:
     """Build benchmark runtime inputs from profile text and scene YAML."""
     scene_file = Path(scene_path)
     scene = load_scene_yaml(scene_file)
+    if strict_runtime_inputs:
+        _validate_strict_runtime_scene(scene)
     mode = _scene_mode(scene, kind)
     provider = _load_opacity_provider(scene, scene_file.parent, kind=kind)
     spectral = _spectral_arrays(scene, provider, scene_file.parent)
@@ -152,6 +157,7 @@ def build_benchmark_scene_inputs(
         bundle,
         scene,
         scene_file.parent,
+        spectral=spectral,
         mode=mode,
         nspec=spectral["wavelengths"].shape[0],
         source_nspec=full_row_count,
@@ -173,11 +179,11 @@ def build_benchmark_scene_inputs(
         if "user_obsgeom" not in bundle or "angles" in _section(scene, "geometry"):
             bundle["user_obsgeom"] = _solar_geometry(scene)
         if "flux_factor" not in bundle or "flux_factor" in _section(scene, "solar"):
-            bundle["flux_factor"] = _broadcast_spectral(
+            bundle["flux_factor"] = _solar_flux_factor(
                 _section(scene, "solar").get("flux_factor", 1.0),
-                spectral["wavelengths"].shape[0],
-                "flux_factor",
                 scene_file.parent,
+                spectral=spectral,
+                nspec=spectral["wavelengths"].shape[0],
                 source_nspec=full_row_count,
             )
     else:
@@ -310,6 +316,23 @@ def _scene_gases(scene: dict[str, Any]) -> tuple[str, ...]:
     if isinstance(gases, str):
         return (gases,)
     return tuple(str(name) for name in gases)
+
+
+def _validate_strict_runtime_scene(scene: dict[str, Any]) -> None:
+    opacity = _section(scene, "opacity")
+    if opacity.get("provider") is not None:
+        raise ValueError(
+            "strict scene mode must not use opacity.provider; use profile, "
+            "opacity.gas_cross_sections.table3d, and aerosol table specs"
+        )
+    gas_cfg = opacity.get("gas_cross_sections")
+    if isinstance(gas_cfg, dict) and "hitran" in gas_cfg:
+        raise ValueError(
+            "strict scene mode must not run direct HITRAN; create a NetCDF "
+            "gas table and use opacity.gas_cross_sections.table3d"
+        )
+    if _scene_gases(scene) and not (isinstance(gas_cfg, dict) and "table3d" in gas_cfg):
+        raise ValueError("strict scene mode requires opacity.gas_cross_sections.table3d")
 
 
 def _scene_gas_vmr_defaults(scene: dict[str, Any], base_dir: Path) -> dict[str, np.ndarray]:
@@ -551,17 +574,18 @@ def _add_surface_arrays(
     scene: dict[str, Any],
     base_dir: Path,
     *,
+    spectral: dict[str, np.ndarray],
     mode: str,
     nspec: int,
     source_nspec: int,
 ) -> None:
     surface = _section(scene, "surface")
     if "albedo" in surface or "albedo" not in bundle:
-        bundle["albedo"] = _broadcast_spectral(
+        bundle["albedo"] = _surface_albedo(
             surface.get("albedo", 0.0),
-            nspec,
-            "albedo",
             base_dir,
+            spectral=spectral,
+            nspec=nspec,
             source_nspec=source_nspec,
         )
     if mode == "thermal" and "emissivity" in surface:
@@ -572,6 +596,49 @@ def _add_surface_arrays(
             base_dir,
             source_nspec=source_nspec,
         )
+
+
+def _surface_albedo(
+    value: Any,
+    base_dir: Path,
+    *,
+    spectral: dict[str, np.ndarray],
+    nspec: int,
+    source_nspec: int,
+) -> np.ndarray:
+    if isinstance(value, dict) and "geocape_emissivity" in value:
+        if "wavenumber_cm_inv" not in spectral:
+            raise ValueError("surface.albedo.geocape_emissivity requires wavenumber_cm_inv")
+        spec = value["geocape_emissivity"]
+        if not isinstance(spec, dict) or "path" not in spec:
+            raise ValueError("surface.albedo.geocape_emissivity requires path")
+        return load_geocape_surface_albedo(
+            _resolve_path(spec["path"], base_dir),
+            spectral["wavenumber_cm_inv"],
+        )[:nspec]
+    return _broadcast_spectral(value, nspec, "albedo", base_dir, source_nspec=source_nspec)
+
+
+def _solar_flux_factor(
+    value: Any,
+    base_dir: Path,
+    *,
+    spectral: dict[str, np.ndarray],
+    nspec: int,
+    source_nspec: int,
+) -> np.ndarray:
+    if isinstance(value, dict) and "geocape_solar_spectrum" in value:
+        if "wavenumber_cm_inv" not in spectral:
+            raise ValueError("solar.flux_factor.geocape_solar_spectrum requires wavenumber_cm_inv")
+        spec = value["geocape_solar_spectrum"]
+        if not isinstance(spec, dict) or "path" not in spec:
+            raise ValueError("solar.flux_factor.geocape_solar_spectrum requires path")
+        return load_geocape_solar_flux(
+            _resolve_path(spec["path"], base_dir),
+            spectral["wavenumber_cm_inv"],
+            scale=float(spec.get("scale", 1.0e4)),
+        )[:nspec]
+    return _broadcast_spectral(value, nspec, "flux_factor", base_dir, source_nspec=source_nspec)
 
 
 def _load_opacity_provider(

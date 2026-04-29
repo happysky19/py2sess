@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Collection
 from dataclasses import dataclass
+from importlib.resources import as_file, files
 from pathlib import Path
 import time
 
 import numpy as np
 
-from py2sess.optical.properties import (
-    build_layer_optical_properties,
-    sum_component_axis,
-)
+from py2sess.optical.properties import sum_component_axis
 from py2sess.optical.phase import ssa_from_optical_depth
 from py2sess.optical.scene import (
     atmospheric_profile_from_levels,
@@ -24,6 +23,10 @@ from py2sess.optical.scene_io import build_benchmark_scene_inputs
 
 SCENE_LAYER_CROSS_SECTION_REQUIRED_KEYS = ("pressure_hpa", "temperature_k", "gas_cross_sections")
 SCENE_LAYER_GAS_TAU_REQUIRED_KEYS = ("pressure_hpa", "temperature_k", "gas_absorption_tau")
+SCENE_LAYER_REQUIRED_KEYSETS = (
+    SCENE_LAYER_GAS_TAU_REQUIRED_KEYS,
+    SCENE_LAYER_CROSS_SECTION_REQUIRED_KEYS,
+)
 SCENE_LAYER_OPTIONAL_KEYS = (
     "gas_vmr",
     "heights",
@@ -39,7 +42,6 @@ LAYER_OPTICAL_ABSORPTION_KEYS = ("absorption_tau", "gas_absorption_tau")
 LAYER_OPTICAL_RAYLEIGH_KEY = "rayleigh_scattering_tau"
 LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY = "aerosol_extinction_tau"
 LAYER_OPTICAL_AEROSOL_SCATTERING_KEY = "aerosol_scattering_tau"
-LAYER_OPTICAL_AEROSOL_SSA_KEY = "aerosol_single_scattering_albedo"
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,14 @@ def load_input_arrays(path: Path, keys: tuple[str, ...] | None = None) -> dict[s
     with np.load(path) as data:
         names = data.files if keys is None else [key for key in keys if key in data.files]
         return {key: np.array(data[key]) for key in names}
+
+
+def load_packaged_reference_total(name: str) -> np.ndarray:
+    resource = files("py2sess.data.benchmark").joinpath(name)
+    with as_file(resource) as path, np.load(path) as data:
+        if set(data.files) != {"ref_2s", "ref_fo", "ref_total"}:
+            raise ValueError(f"{name} must contain only reference outputs")
+        return np.asarray(data["ref_total"], dtype=float)
 
 
 def require_directory_input_store(path: Path, *, label: str) -> None:
@@ -169,6 +179,7 @@ def benchmark_input_source(
             profile_path=args.profile,
             scene_path=args.scene,
             spectral_limit=args.limit,
+            strict_runtime_inputs=args.require_python_generated_inputs,
         )
         return bundle, set(bundle), args.scene, "profile+scene"
 
@@ -188,14 +199,9 @@ def select_layer_optical_keys(
         None,
     )
     if absorption_key is None or LAYER_OPTICAL_RAYLEIGH_KEY not in available:
-        if set(SCENE_LAYER_GAS_TAU_REQUIRED_KEYS).issubset(available):
-            return SCENE_LAYER_GAS_TAU_REQUIRED_KEYS + tuple(
-                key for key in SCENE_LAYER_OPTIONAL_KEYS if key in available
-            )
-        if set(SCENE_LAYER_CROSS_SECTION_REQUIRED_KEYS).issubset(available):
-            return SCENE_LAYER_CROSS_SECTION_REQUIRED_KEYS + tuple(
-                key for key in SCENE_LAYER_OPTIONAL_KEYS if key in available
-            )
+        required = scene_layer_required_keys(available)
+        if required is not None:
+            return required + tuple(key for key in SCENE_LAYER_OPTIONAL_KEYS if key in available)
         return (total_key, ssa_key)
 
     keys = [absorption_key, LAYER_OPTICAL_RAYLEIGH_KEY]
@@ -207,8 +213,6 @@ def select_layer_optical_keys(
                     LAYER_OPTICAL_AEROSOL_SCATTERING_KEY,
                 )
             )
-        elif LAYER_OPTICAL_AEROSOL_SSA_KEY in available:
-            keys.extend((LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY, LAYER_OPTICAL_AEROSOL_SSA_KEY))
         else:
             return (total_key, ssa_key)
     elif LAYER_OPTICAL_AEROSOL_SCATTERING_KEY in available:
@@ -220,11 +224,15 @@ def layer_optical_keys_are_components(keys: tuple[str, ...]) -> bool:
     return any(key in keys for key in LAYER_OPTICAL_ABSORPTION_KEYS)
 
 
+def scene_layer_required_keys(keys: Collection[str]) -> tuple[str, ...] | None:
+    for required in SCENE_LAYER_REQUIRED_KEYSETS:
+        if all(key in keys for key in required):
+            return required
+    return None
+
+
 def layer_optical_keys_are_scene(keys: tuple[str, ...]) -> bool:
-    keyset = set(keys)
-    return set(SCENE_LAYER_GAS_TAU_REQUIRED_KEYS).issubset(keyset) or set(
-        SCENE_LAYER_CROSS_SECTION_REQUIRED_KEYS
-    ).issubset(keyset)
+    return scene_layer_required_keys(keys) is not None
 
 
 def require_python_generated_layer_optical_inputs(
@@ -288,81 +296,51 @@ def prepare_layer_optical_properties(
     total_key: str,
     ssa_key: str,
     validate_inputs: bool = True,
-    include_fractions: bool = True,
 ) -> tuple[dict[str, np.ndarray], float, str]:
     """Builds ``tau``/``ssa`` and scattering fractions when components exist."""
     absorption_key = next((key for key in LAYER_OPTICAL_ABSORPTION_KEYS if key in bundle), None)
     if absorption_key is not None and LAYER_OPTICAL_RAYLEIGH_KEY in bundle:
         start = time.perf_counter()
-        if not include_fractions:
-            aerosol_ext = bundle.get(LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY)
-            aerosol_scat = bundle.get(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY)
-            if aerosol_ext is None or aerosol_scat is not None:
-                absorption = np.asarray(bundle[absorption_key], dtype=float)
-                rayleigh = np.asarray(bundle[LAYER_OPTICAL_RAYLEIGH_KEY], dtype=float)
-                aerosol_scat_arr = (
-                    None if aerosol_scat is None else np.asarray(aerosol_scat, dtype=float)
-                )
-                aerosol_ext_arr = (
-                    None if aerosol_ext is None else np.asarray(aerosol_ext, dtype=float)
-                )
-                if validate_inputs:
-                    for name, value in (
-                        (absorption_key, absorption),
-                        (LAYER_OPTICAL_RAYLEIGH_KEY, rayleigh),
-                        (LAYER_OPTICAL_AEROSOL_SCATTERING_KEY, aerosol_scat_arr),
-                        (LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY, aerosol_ext_arr),
-                    ):
-                        if value is None:
-                            continue
-                        if not np.all(np.isfinite(value)) or np.any(value < 0.0):
-                            raise ValueError(f"{name} must be finite and nonnegative")
-                    if (
-                        aerosol_ext_arr is not None
-                        and aerosol_scat_arr is not None
-                        and np.any(aerosol_scat_arr > aerosol_ext_arr + 1.0e-14)
-                    ):
-                        raise ValueError(
-                            "aerosol_scattering_tau must not exceed aerosol_extinction_tau"
-                        )
-                aerosol_scat_sum = (
-                    0.0 if aerosol_scat_arr is None else sum_component_axis(aerosol_scat_arr)
-                )
-                aerosol_ext_sum = (
-                    aerosol_scat_sum
-                    if aerosol_ext_arr is None
-                    else sum_component_axis(aerosol_ext_arr)
-                )
-                total_tau = absorption + rayleigh + aerosol_ext_sum
-                scattering_tau = rayleigh + aerosol_scat_sum
-                ssa = ssa_from_optical_depth(total_tau, scattering_tau)
-                prepared = {**bundle, total_key: total_tau, ssa_key: ssa}
-                prepared["_scattering_tau"] = scattering_tau
-                return (
-                    prepared,
-                    time.perf_counter() - start,
-                    "python-generated from component optical depths",
-                )
-        props = build_layer_optical_properties(
-            absorption_tau=bundle[absorption_key],
-            rayleigh_scattering_tau=bundle[LAYER_OPTICAL_RAYLEIGH_KEY],
-            aerosol_extinction_tau=bundle.get(LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY),
-            aerosol_scattering_tau=bundle.get(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY),
-            aerosol_single_scattering_albedo=bundle.get(LAYER_OPTICAL_AEROSOL_SSA_KEY),
-            validate_inputs=validate_inputs,
+        aerosol_ext = bundle.get(LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY)
+        aerosol_scat = bundle.get(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY)
+        absorption = np.asarray(bundle[absorption_key], dtype=float)
+        rayleigh = np.asarray(bundle[LAYER_OPTICAL_RAYLEIGH_KEY], dtype=float)
+        aerosol_scat_arr = None if aerosol_scat is None else np.asarray(aerosol_scat, dtype=float)
+        aerosol_ext_arr = None if aerosol_ext is None else np.asarray(aerosol_ext, dtype=float)
+        if validate_inputs:
+            for name, value in (
+                (absorption_key, absorption),
+                (LAYER_OPTICAL_RAYLEIGH_KEY, rayleigh),
+                (LAYER_OPTICAL_AEROSOL_SCATTERING_KEY, aerosol_scat_arr),
+                (LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY, aerosol_ext_arr),
+            ):
+                if value is not None and (not np.all(np.isfinite(value)) or np.any(value < 0.0)):
+                    raise ValueError(f"{name} must be finite and nonnegative")
+            if (
+                aerosol_ext_arr is not None
+                and aerosol_scat_arr is not None
+                and np.any(aerosol_scat_arr > aerosol_ext_arr + 1.0e-14)
+            ):
+                raise ValueError("aerosol_scattering_tau must not exceed aerosol_extinction_tau")
+        aerosol_scat_sum = 0.0 if aerosol_scat_arr is None else sum_component_axis(aerosol_scat_arr)
+        aerosol_ext_sum = (
+            aerosol_scat_sum if aerosol_ext_arr is None else sum_component_axis(aerosol_ext_arr)
         )
-        prepared = {**bundle, total_key: props.tau, ssa_key: props.ssa}
-        prepared["rayleigh_fraction"] = props.rayleigh_fraction
-        prepared["aerosol_fraction"] = props.aerosol_fraction
+        total_tau = absorption + rayleigh + aerosol_ext_sum
+        scattering_tau = rayleigh + aerosol_scat_sum
+        prepared = {
+            **bundle,
+            total_key: total_tau,
+            ssa_key: ssa_from_optical_depth(total_tau, scattering_tau),
+            "_scattering_tau": scattering_tau,
+        }
         return (
             prepared,
             time.perf_counter() - start,
             "python-generated from component optical depths",
         )
 
-    if set(SCENE_LAYER_GAS_TAU_REQUIRED_KEYS).issubset(bundle) or set(
-        SCENE_LAYER_CROSS_SECTION_REQUIRED_KEYS
-    ).issubset(bundle):
+    if scene_layer_required_keys(bundle) is not None:
         start = time.perf_counter()
         profile = atmospheric_profile_from_levels(
             pressure_hpa=bundle["pressure_hpa"],

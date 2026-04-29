@@ -13,6 +13,7 @@ from _full_spectrum_benchmark_common import (
     BenchmarkRow,
     benchmark_input_source,
     load_input_arrays,
+    load_packaged_reference_total,
     looks_like_row_index,
     layer_optical_keys_are_components,
     layer_optical_keys_are_scene,
@@ -70,7 +71,7 @@ _TIR_BASE_KEYS = (
     "albedo",
 )
 
-_TIR_OPTIONAL_KEYS = ("stream_value", "ref_total", "emissivity")
+_TIR_OPTIONAL_KEYS = ("stream_value", "emissivity")
 
 _TIR_DIRECT_SOURCE_KEYS = ("thermal_bb_input", "surfbb")
 _TIR_TEMPERATURE_SOURCE_KEYS = ("level_temperature_k", "surface_temperature_k")
@@ -103,7 +104,6 @@ _TIR_LIMIT_KEYS = (
         "rayleigh_fraction",
         "aerosol_fraction",
         "aerosol_interp_fraction",
-        "ref_total",
     )
 )
 
@@ -708,6 +708,10 @@ def main() -> None:
         total_rows,
         wavelengths,
     )
+    if not scene_mode and args.input.name == "tir_benchmark_fixture.npz":
+        bundle["ref_total"] = load_packaged_reference_total("tir_reference_outputs.npz")[
+            :wavelengths
+        ]
     load_seconds = time.perf_counter() - load_start
 
     bundle, layer_optical_seconds, layer_optical_mode = prepare_layer_optical_properties(
@@ -715,7 +719,6 @@ def main() -> None:
         total_key="tau_arr",
         ssa_key="omega_arr",
         validate_inputs=not args.require_python_generated_inputs,
-        include_fractions=False,
     )
     bundle["tau"] = bundle["tau_arr"]
     bundle["ssa"] = bundle["omega_arr"]

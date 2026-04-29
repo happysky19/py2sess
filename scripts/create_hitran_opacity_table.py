@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+import tempfile
 
 import numpy as np
 from scipy.io import netcdf_file
@@ -34,6 +36,7 @@ def main() -> None:
     parser.add_argument("--wavenumber-count", type=int)
     parser.add_argument("--spectral-limit", type=int)
     parser.add_argument("--fwhm", type=float, default=0.0)
+    parser.add_argument("--workers", type=int, default=1, help="Parallel gas workers.")
     args = parser.parse_args()
 
     try:
@@ -41,22 +44,11 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
-    partition = load_hitran_partition_functions(inputs["hitran_dir"])
+    if args.workers < 1:
+        parser.error("--workers must be positive")
     with netcdf_file(args.output, "w") as data:
         xsec_var = _create_table_file(data, inputs)
-        for index, gas in enumerate(inputs["gases"]):
-            lines = read_hitran_lines(inputs["hitran_dir"], gas, inputs["wavenumber"])
-            xsec = hitran_cross_sections(
-                hitran_dir=inputs["hitran_dir"],
-                molecule=gas,
-                spectral_grid=inputs["wavenumber"],
-                pressure_atm=inputs["pressure_atm"],
-                temperature_k=inputs["temperature_calc"],
-                fwhm=args.fwhm,
-                partition_functions=partition,
-                lines=lines,
-            )
-            xsec_var[index] = xsec.reshape(xsec_var.shape[1:])
+        _write_cross_sections(args.output, inputs, xsec_var, fwhm=args.fwhm, workers=args.workers)
     print(f"wrote {args.output} from {inputs['hitran_dir']}")
 
 
@@ -206,6 +198,74 @@ def _create_table_file(data, inputs: dict[str, object]):
         "cross_section",
         "d",
         ("gas", "spectral", "pressure", "temperature"),
+    )
+
+
+def _write_cross_sections(
+    output: Path,
+    inputs: dict[str, object],
+    xsec_var,
+    *,
+    fwhm: float,
+    workers: int,
+) -> None:
+    gases = tuple(inputs["gases"])
+    if workers == 1 or len(gases) == 1:
+        partition = load_hitran_partition_functions(inputs["hitran_dir"])
+        for index, gas in enumerate(gases):
+            xsec_var[index] = _compute_gas_cross_section(inputs, gas, fwhm, partition).reshape(
+                xsec_var.shape[1:]
+            )
+        return
+
+    worker_count = min(int(workers), len(gases))
+    with tempfile.TemporaryDirectory(prefix=f"{output.stem}_", dir=output.parent) as tmpdir:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    _compute_gas_cross_section_file,
+                    inputs,
+                    index,
+                    gas,
+                    fwhm,
+                    Path(tmpdir) / f"gas_{index}.npy",
+                )
+                for index, gas in enumerate(gases)
+            ]
+            for future in as_completed(futures):
+                index, gas, path = future.result()
+                xsec_var[index] = np.load(path, mmap_mode="r").reshape(xsec_var.shape[1:])
+                print(f"  wrote gas {index + 1}/{len(gases)}: {gas}", flush=True)
+
+
+def _compute_gas_cross_section_file(
+    inputs: dict[str, object],
+    index: int,
+    gas: str,
+    fwhm: float,
+    output: Path,
+) -> tuple[int, str, str]:
+    partition = load_hitran_partition_functions(inputs["hitran_dir"])
+    np.save(output, _compute_gas_cross_section(inputs, gas, fwhm, partition))
+    return index, gas, str(output)
+
+
+def _compute_gas_cross_section(
+    inputs: dict[str, object],
+    gas: str,
+    fwhm: float,
+    partition: dict[tuple[int, int], np.ndarray],
+) -> np.ndarray:
+    lines = read_hitran_lines(inputs["hitran_dir"], gas, inputs["wavenumber"])
+    return hitran_cross_sections(
+        hitran_dir=inputs["hitran_dir"],
+        molecule=gas,
+        spectral_grid=inputs["wavenumber"],
+        pressure_atm=inputs["pressure_atm"],
+        temperature_k=inputs["temperature_calc"],
+        fwhm=fwhm,
+        partition_functions=partition,
+        lines=lines,
     )
 
 

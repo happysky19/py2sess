@@ -13,6 +13,7 @@ from _full_spectrum_benchmark_common import (
     BenchmarkRow,
     benchmark_input_source,
     load_input_arrays,
+    load_packaged_reference_total,
     looks_like_row_index,
     layer_optical_keys_are_components,
     layer_optical_keys_are_scene,
@@ -72,7 +73,7 @@ _UV_BASE_KEYS = (
     "flux_factor",
 )
 
-_UV_OPTIONAL_KEYS = ("stream_value", "ref_total")
+_UV_OPTIONAL_KEYS = ("stream_value",)
 
 _UV_CHUNK_KEYS = (
     "tau",
@@ -91,7 +92,6 @@ _UV_LIMIT_KEYS = (
         "rayleigh_fraction",
         "aerosol_fraction",
         "aerosol_interp_fraction",
-        "ref_total",
     )
 )
 
@@ -630,6 +630,10 @@ def main() -> None:
         total_rows,
         wavelengths,
     )
+    if not scene_mode and args.input.name == "uv_benchmark_fixture.npz":
+        bundle["ref_total"] = load_packaged_reference_total("uv_reference_outputs.npz")[
+            :wavelengths
+        ]
     if "stream_value" not in bundle:
         bundle["stream_value"] = np.array([1.0 / np.sqrt(3.0)], dtype=float)
     load_seconds = time.perf_counter() - load_start
@@ -639,7 +643,6 @@ def main() -> None:
         total_key="tau",
         ssa_key="omega",
         validate_inputs=not args.require_python_generated_inputs,
-        include_fractions=False,
     )
     bundle["ssa"] = bundle["omega"]
     bundle, geometry_seconds = _prepare_geometry(bundle)

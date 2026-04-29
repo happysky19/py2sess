@@ -8,11 +8,16 @@ import tempfile
 import unittest
 
 import numpy as np
+from scipy.io import netcdf_file
 
 from py2sess.optical.createprops import (
     load_createprops_provider,
     parse_createprops_dump,
     write_createprops_provider,
+)
+from py2sess.optical.geocape import (
+    load_geocape_solar_flux,
+    load_geocape_surface_albedo,
 )
 from py2sess.optical.scene_io import (
     build_benchmark_scene_inputs,
@@ -43,7 +48,7 @@ class SceneIoTests(unittest.TestCase):
             )
         )
 
-    def _write_scene(self, path: Path, *, mode: str) -> None:
+    def _write_scene(self, path: Path, *, mode: str, gas_table: str | None = None) -> None:
         if mode == "solar":
             spectral = "wavelengths_nm: [500.0, 600.0]"
             geometry = "angles: [30.0, 20.0, 0.0]"
@@ -52,6 +57,11 @@ class SceneIoTests(unittest.TestCase):
             spectral = "wavenumber_band_cm_inv: [[899.5, 900.5], [900.5, 901.5]]"
             geometry = "view_angle: 20.0"
             source = ""
+        gas_section = (
+            f"    table3d: {{path: {gas_table}}}"
+            if gas_table is not None
+            else "    value:\n      - [1.0e-22]\n      - [2.0e-22]"
+        )
         path.write_text(
             f"""
 mode: {mode}
@@ -64,9 +74,7 @@ surface:
   albedo: 0.1
 opacity:
   gas_cross_sections:
-    value:
-      - [1.0e-22]
-      - [2.0e-22]
+{gas_section}
   aerosol:
     moments:
       value:
@@ -262,6 +270,53 @@ surface:
         np.testing.assert_allclose(bundle["wavelengths"], [500.0, 510.0])
         np.testing.assert_allclose(bundle["albedo"], [0.1, 0.1])
 
+    def test_geocape_surface_and_solar_tables_feed_scene_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            profile_path = root / "profile.dat"
+            scene_path = root / "scene.yaml"
+            solar_path = root / "solar.dat"
+            emiss_path = root / "emiss.asc"
+            self._write_profile(profile_path)
+            solar_path.write_text(
+                "header\nheader\n900 0.1\n1000 0.2\n1100 0.3\n1200 0.4\n",
+                encoding="utf-8",
+            )
+            emiss_grid = np.column_stack(
+                (np.linspace(900.0, 1200.0, 386), np.linspace(0.9, 0.6, 386))
+            )
+            with emiss_path.open("w", encoding="utf-8") as handle:
+                handle.write("header\n" * 10)
+                np.savetxt(handle, emiss_grid)
+            scene_path.write_text(
+                """
+mode: solar
+spectral:
+  wavenumber_cm_inv: [1000.0, 1100.0]
+geometry:
+  angles: [30.0, 20.0, 0.0]
+surface:
+  albedo:
+    geocape_emissivity: {path: emiss.asc}
+solar:
+  flux_factor:
+    geocape_solar_spectrum: {path: solar.dat, scale: 10.0}
+"""
+            )
+
+            bundle = build_benchmark_scene_inputs(
+                profile_path=profile_path,
+                scene_path=scene_path,
+                kind="uv",
+                strict_runtime_inputs=True,
+            )
+            expected_albedo = load_geocape_surface_albedo(emiss_path, [1000.0, 1100.0])
+            expected_flux = load_geocape_solar_flux(solar_path, [1000.0, 1100.0], scale=10.0)
+
+        np.testing.assert_allclose(bundle["flux_factor"], [2.0, 3.0])
+        np.testing.assert_allclose(bundle["albedo"], expected_albedo)
+        np.testing.assert_allclose(bundle["flux_factor"], expected_flux)
+
     def test_scene_builder_accepts_fortran_createprops_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -284,6 +339,47 @@ surface:
         self.assertEqual(bundle["rayleigh_scattering_tau"].shape, (2, 2))
         self.assertEqual(bundle["aerosol_scattering_tau"].shape, (2, 2, 0))
         np.testing.assert_allclose(bundle["user_obsgeom"], [30.0, 20.0, 0.0])
+
+    def test_strict_scene_rejects_fortran_provider_and_direct_hitran(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            profile_path = root / "profile.dat"
+            provider_path = root / "provider"
+            provider_scene = root / "provider.yaml"
+            hitran_scene = root / "hitran.yaml"
+            self._write_profile(profile_path)
+            self._write_provider(provider_path, mode="solar")
+            self._write_provider_scene(provider_scene, provider_path, mode="solar")
+            hitran_scene.write_text(
+                """
+mode: solar
+gases: [O3]
+spectral:
+  wavelengths_nm: [500.0, 600.0]
+geometry:
+  angles: [30.0, 20.0, 0.0]
+surface:
+  albedo: 0.1
+opacity:
+  gas_cross_sections:
+    hitran: {path: hitran}
+"""
+            )
+
+            with self.assertRaisesRegex(ValueError, "opacity.provider"):
+                build_benchmark_scene_inputs(
+                    profile_path=profile_path,
+                    scene_path=provider_scene,
+                    kind="uv",
+                    strict_runtime_inputs=True,
+                )
+            with self.assertRaisesRegex(ValueError, "direct HITRAN"):
+                build_benchmark_scene_inputs(
+                    profile_path=profile_path,
+                    scene_path=hitran_scene,
+                    kind="uv",
+                    strict_runtime_inputs=True,
+                )
 
     def test_createprops_dump_parser_writes_provider_arrays(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -391,10 +487,12 @@ surface:
             root = Path(tmpdir)
             profile_path = root / "profile.dat"
             self._write_profile(profile_path)
+            self._write_xsec_table(root / "solar_xsec.nc", mode="solar")
+            self._write_xsec_table(root / "thermal_xsec.nc", mode="thermal")
             for mode, script, layer_text, setup_text in cases:
                 with self.subTest(mode=mode):
                     scene_path = root / f"{mode}_scene.yaml"
-                    self._write_scene(scene_path, mode=mode)
+                    self._write_scene(scene_path, mode=mode, gas_table=f"{mode}_xsec.nc")
 
                     output = self._run_benchmark_scene(script, profile_path, scene_path)
 
@@ -402,38 +500,45 @@ surface:
                     self.assertIn(layer_text, output)
                     self.assertIn(setup_text, output)
 
-    def test_benchmarks_accept_createprops_provider_strict_mode(self) -> None:
-        cases = (
-            (
-                "solar",
-                "benchmark_uv_full_spectrum.py",
-                "optical preprocessing: python-generated",
-            ),
-            (
-                "thermal",
-                "benchmark_tir_full_spectrum.py",
-                "thermal source: temperature (wavenumber_band_cm_inv)",
-            ),
-        )
+    def test_benchmarks_reject_createprops_provider_strict_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             profile_path = root / "profile.dat"
             self._write_profile(profile_path)
-            for mode, script, setup_text in cases:
+            for mode in ("solar", "thermal"):
                 with self.subTest(mode=mode):
                     provider_path = root / f"{mode}_provider"
                     scene_path = root / f"{mode}_scene.yaml"
                     self._write_provider(provider_path, mode=mode)
                     self._write_provider_scene(scene_path, provider_path, mode=mode)
 
-                    output = self._run_benchmark_scene(script, profile_path, scene_path)
+                    with self.assertRaisesRegex(ValueError, "opacity.provider"):
+                        build_benchmark_scene_inputs(
+                            profile_path=profile_path,
+                            scene_path=scene_path,
+                            kind="uv" if mode == "solar" else "tir",
+                            strict_runtime_inputs=True,
+                        )
 
-                    self.assertIn("input kind: profile+scene", output)
-                    self.assertIn(
-                        "layer optical properties: python-generated from component optical depths",
-                        output,
-                    )
-                    self.assertIn(setup_text, output)
+    @staticmethod
+    def _write_xsec_table(path: Path, *, mode: str) -> None:
+        spectral_name = "wavelength_nm" if mode == "solar" else "wavenumber_cm_inv"
+        spectral = np.array([500.0, 600.0] if mode == "solar" else [900.0, 901.0])
+        pressure = np.array([100.0, 500.0, 1000.0])
+        temperature = np.array([220.0, 260.0, 290.0])
+        raw = np.full((1, 2, 3), 1.0e-22, dtype=float)
+        with netcdf_file(path, "w") as data:
+            data.createDimension("gas", 1)
+            data.createDimension("wave", 2)
+            data.createDimension("level", 3)
+            data.createDimension("name_strlen", 2)
+            data.createVariable(spectral_name, "d", ("wave",))[:] = spectral
+            data.createVariable("pressure_hpa", "d", ("level",))[:] = pressure
+            data.createVariable("temperature_k", "d", ("level",))[:] = temperature
+            data.createVariable("gas_names", "c", ("gas", "name_strlen"))[:] = np.array(
+                [[b"O", b"3"]], dtype="S1"
+            )
+            data.createVariable("cross_section", "d", ("gas", "wave", "level"))[:] = raw
 
 
 if __name__ == "__main__":

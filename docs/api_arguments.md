@@ -1,27 +1,24 @@
 # Public API Argument Reference
 
-`py2sess` exposes one canonical public API at `TwoStreamEss`. User code should
-use the public names below; Fortran-style names stay at the solver boundary.
+`py2sess` exposes one public solver API: `TwoStreamEss.forward(...)`. Use the
+public names below; Fortran-style names are listed only to aid code comparison.
 
-`2S` is the two-stream multiple-scattering/emission component. It solves the
-layer boundary-value problem with two quadrature directions and is the fast
-default path. `FO` is the first-order correction: direct-beam/single-scatter
-solar radiance, or first-order thermal source transmission. When `include_fo`
-is enabled, `result.radiance_total` is the validated `2S + FO` total.
+`2S` is the two-stream multiple-scattering/emission solve. `FO` is the
+first-order solar single-scatter/direct-beam or thermal source-transmission
+correction. With `include_fo=True`, `result.radiance_total` is `2S + FO`.
 
-Angles are in degrees. Solar geometry is `[sza, vza, raz]`; thermal geometry is
-viewing zenith angle only. Heights `z` are in km, ordered top to bottom. Layer
-optical thickness is positive downward. Radiance and Planck values use the
-caller's unit convention; the solver does not convert radiance units.
+Conventions: angles are degrees; solar geometry is `[sza, vza, raz]`; thermal
+geometry is viewing zenith angle only; heights `z` are km from top to bottom;
+layer optical thickness is positive downward. Radiance and Planck units are
+caller-defined and are not converted.
 
 `forward()` accepts either a single atmosphere with shape `(nlyr,)` or leading
 batch dimensions such as `(nwave, nlyr)` and `(ncol, nwave, nlyr)`. Batch
 dimensions are preserved in `result.radiance`; multiple solar or thermal
 geometries append one final geometry axis. The default batched path returns TOA
 `radiance_2s`, optional `radiance_fo`, and `radiance_total`, but not BOA fluxes.
-Set `TwoStreamEssOptions(output_levels=True)` when you need
-upwelling radiance profiles; profile arrays use the final axis for levels,
-ordered from TOA to BOA.
+Set `TwoStreamEssOptions(output_levels=True)` only when level radiance profiles
+are needed; profile arrays use the final axis for TOA-to-BOA levels.
 
 | Public name | Meaning | Shape | Default | Fortran/internal name |
 |---|---|---:|---|---|
@@ -56,24 +53,15 @@ ordered from TOA to BOA.
 | `n_moments` / `fo_n_moments` | Advanced solar FO phase control; `0` is isotropic and positive values use the closed-form HG fallback unless explicit phase data are supplied | scalar | `5000` | `NMOMENTS_INPUT`-style FO moment controls |
 | `nfine` / `fo_nfine` | Number of fine sub-layers used by EPS FO spherical-path integration | scalar | `3` | `NFINEDIVS` |
 
-## Defaults
+## Notes
 
-- `stream=None` becomes `1 / sqrt(3)`. Fortran parity examples pass their
-  benchmark stream explicitly, such as `stream=0.5` for the packaged TIR case.
-- `fbeam` defaults to `1.0`.
-- `earth_radius` defaults to `6371.0 km`.
-- `nfine` / `fo_nfine` defaults to `3` for EPS FO spherical-path integration.
-- `n_moments` / `fo_n_moments` defaults to `5000`; `0` means isotropic phase.
-- `delta_m_truncation_factor=None` derives the HG-like fallback `f = g**2`,
-  clipped to `0 <= f < 1`.
-- Pass `delta_m_truncation_factor=np.zeros(nlyr)` only when no truncation is
-  intended.
-- Set `delta_scaling=False` to disable the 2S optical-property transform. Solar
-  FO still uses `delta_m_truncation_factor` in its single-scatter source term
-  unless you pass `fo_scatter_term` explicitly.
-- `geometry="pseudo_spherical"` maps to the EPS FO geometry path.
+- `delta_m_truncation_factor=None` uses the HG fallback `f = g**2`, clipped to
+  `0 <= f < 1`. Pass explicit values for mixed Rayleigh/aerosol phase inputs.
+- `delta_scaling=False` disables the 2S optical-property transform. Solar FO
+  still uses the truncation factor in its source term unless `fo_scatter_term`
+  is passed explicitly.
 - Solar and thermal source handling are mode-exclusive. A single `TwoStreamEss`
-  call does not combine direct solar and Planck thermal sources in this pass.
+  call does not combine direct solar and Planck thermal sources.
 - Direct HITRAN line-by-line opacity is for limited validation/offline table
   generation. Full-spectrum runtime should use saved gas cross-section tables.
 

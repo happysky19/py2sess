@@ -1,9 +1,8 @@
 # py2sess
 
-`py2sess` is a Python implementation of the optimized 2S-ESS two-stream
-radiative-transfer model. It provides solar and thermal forward calculations
-with NumPy and optional torch backends. The package does not call the original
-Fortran code.
+`py2sess` is a Python implementation of the optimized 2S-ESS radiative-transfer
+model. It supports solar and thermal forward calculations with NumPy and
+optional torch backends. It does not call the original Fortran code.
 
 ## Install
 
@@ -76,20 +75,15 @@ solver = TwoStreamEss(
 )
 ```
 
-## Public Inputs
+## API Notes
 
-Core names are `nlyr`, `mode`, `tau`, `ssa`, `g`, `z`, `angles`, `albedo`,
-`planck`, `surface_planck`, and `emissivity`. Optional controls include
-`stream`, `fbeam`, `delta_m_truncation_factor`, `geometry`, `include_fo`,
-`fo_scatter_term`, and `output_levels`.
+Core inputs are `tau`, `ssa`, `g`, `z`, `angles`, and the surface/source terms
+needed by the selected mode. Solar angles are `[sza, vza, raz]` in degrees;
+thermal angles are viewing zenith angles. Heights are in km, ordered top to
+bottom.
 
-`2S` is the two-stream multiple-scattering/emission solve. `FO` is the
-first-order solar single-scatter/direct-beam or thermal source-transmission
-correction. Solar angles are `[sza, vza, raz]` in degrees; thermal angles are
-viewing zenith angles. Heights are in km, ordered top to bottom.
-
-See [`docs/api_arguments.md`](docs/api_arguments.md) for shapes, defaults, and
-Fortran/internal names.
+See [`docs/api_arguments.md`](docs/api_arguments.md) for the full argument
+table and conventions.
 
 ## Examples
 
@@ -100,14 +94,7 @@ python3 examples/build_thermal_source_from_temperature.py
 python3 examples/retrieve_synthetic_spectra.py --case uv --noise-level 0
 ```
 
-Full-spectrum benchmarks use profile text plus scene YAML:
-
-```bash
-python3 examples/benchmark_uv_full_spectrum.py --profile profile_uv.txt --scene uv_scene.yaml
-python3 examples/benchmark_tir_full_spectrum.py --profile profile_tir.txt --scene tir_scene.yaml
-```
-
-Benchmark details are in
+Full-spectrum benchmark details are in
 [`docs/full_spectrum_benchmarks.md`](docs/full_spectrum_benchmarks.md).
 Retrieval notes are in [`docs/retrieval.md`](docs/retrieval.md).
 
@@ -119,9 +106,7 @@ python3 -m ruff check .
 python3 -m ruff format --check .
 ```
 
-Large benchmark bundles and generated outputs should stay outside git, for
-example under ignored local directories such as `benchmark_bundles/`, `outputs/`,
-`local_outputs/`, or `paper_outputs/`.
+Keep large benchmark bundles and generated outputs out of git.
 
 ## References
 
