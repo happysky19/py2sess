@@ -241,6 +241,30 @@ class ApiTests(unittest.TestCase):
             solver.forward_fo(**kwargs, n_moments=-1)
         with self.assertRaisesRegex(ValueError, "g"):
             solver.forward(**{**kwargs, "g": np.array([0.0, 1.0, 0.0])})
+        with self.assertRaisesRegex(ValueError, "tau must be nonnegative"):
+            solver.forward(**{**kwargs, "tau": np.array([0.01, -0.02, 0.03])})
+        with self.assertRaisesRegex(ValueError, "tau must be nonnegative"):
+            solver.forward(
+                **{
+                    **kwargs,
+                    "tau": np.array([[0.01, -0.02, 0.03]]),
+                    "ssa": np.zeros((1, 3)),
+                    "g": np.zeros((1, 3)),
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "vza < 90"):
+            solver.forward(**{**kwargs, "angles": [30.0, 90.0, 0.0]})
+
+        thermal = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="thermal"))
+        with self.assertRaisesRegex(ValueError, "vza < 90"):
+            thermal.forward(
+                tau=np.full(3, 0.01),
+                ssa=np.zeros(3),
+                g=np.zeros(3),
+                angles=90.0,
+                planck=np.ones(4),
+                surface_planck=1.0,
+            )
 
     def test_missing_solar_angles_error_is_public(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar"))

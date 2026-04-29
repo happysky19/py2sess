@@ -140,8 +140,8 @@ def _validate_inputs(
 
     if not options.do_mvout_only:
         vza = user_obsgeoms[:, 1]
-        if np.any((vza < 0.0) | (vza > 90.0)):
-            raise ValueError("viewing zenith angles must satisfy 0 <= vza <= 90")
+        if np.any((vza < 0.0) | (vza >= 90.0)):
+            raise ValueError("viewing zenith angles must satisfy 0 <= vza < 90")
         azm = user_obsgeoms[:, 2]
         if np.any((azm < 0.0) | (azm > 360.0)):
             raise ValueError("azimuth angles must satisfy 0 <= azimuth <= 360")
@@ -152,7 +152,9 @@ def _validate_inputs(
         raise ValueError("earth_radius must be a positive finite radius in kilometers")
 
     if not np.all(np.isfinite(tau_arr)):
-        raise ValueError("tau_arr must be finite")
+        raise ValueError("tau must be finite")
+    if np.any(tau_arr < 0.0):
+        raise ValueError("tau must be nonnegative")
     if not np.all(np.isfinite(omega_arr)):
         raise ValueError("omega_arr must be finite")
     _validate_asymmetry(asymm_arr)
@@ -176,10 +178,12 @@ def _validate_inputs_thermal(
         raise ValueError("At least one of do_upwelling or do_dnwelling must be true")
     if options.do_mvout_only and options.do_additional_mvout:
         raise ValueError("do_mvout_only and do_additional_mvout cannot both be true")
-    if np.any((user_angles < 0.0) | (user_angles > 90.0)):
-        raise ValueError("viewing zenith angles must satisfy 0 <= vza <= 90")
+    if np.any((user_angles < 0.0) | (user_angles >= 90.0)):
+        raise ValueError("viewing zenith angles must satisfy 0 <= vza < 90")
     if not np.all(np.isfinite(tau_arr)):
-        raise ValueError("tau_arr must be finite")
+        raise ValueError("tau must be finite")
+    if np.any(tau_arr < 0.0):
+        raise ValueError("tau must be nonnegative")
     if not np.all(np.isfinite(omega_arr)):
         raise ValueError("omega_arr must be finite")
     _validate_asymmetry(asymm_arr)

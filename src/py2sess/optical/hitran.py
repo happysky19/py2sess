@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ._hitran_numba import accumulate_hitran_numba
+
 _C2 = 1.4387752
 _T0 = 296.0
 _VOIGT_EXTRA = 25.0
@@ -451,8 +453,43 @@ def _cross_sections_all_levels(
     pressure_atm: np.ndarray,
     temperature_k: np.ndarray,
 ) -> np.ndarray:
-    spec = np.zeros((wavenumber.size, pressure_atm.size), dtype=float)
     nvoigt, voigt_grid = _fortran_voigt_grid(wavenumber)
+    compiled = accumulate_hitran_numba(
+        nspec=wavenumber.size,
+        lines=lines,
+        q296=q296,
+        q=q,
+        pressure_atm=pressure_atm,
+        temperature_k=temperature_k,
+        nvoigt=nvoigt,
+        voigt_grid=voigt_grid,
+    )
+    if compiled is not None:
+        return compiled
+    return _cross_sections_all_levels_numpy(
+        wavenumber=wavenumber,
+        lines=lines,
+        q296=q296,
+        q=q,
+        pressure_atm=pressure_atm,
+        temperature_k=temperature_k,
+        nvoigt=nvoigt,
+        voigt_grid=voigt_grid,
+    )
+
+
+def _cross_sections_all_levels_numpy(
+    *,
+    wavenumber: np.ndarray,
+    lines: HitranLineData,
+    q296: np.ndarray,
+    q: np.ndarray,
+    pressure_atm: np.ndarray,
+    temperature_k: np.ndarray,
+    nvoigt: int,
+    voigt_grid: np.ndarray,
+) -> np.ndarray:
+    spec = np.zeros((wavenumber.size, pressure_atm.size), dtype=float)
     rt0t = _T0 / temperature_k
     rc2t = _C2 / temperature_k
     rc2t0 = _C2 / _T0

@@ -7,6 +7,7 @@ import numpy as np
 from py2sess import (
     NoiseModel,
     OptimalEstimationProblem,
+    OptimalEstimationStatus,
     TwoStreamEss,
     TwoStreamEssOptions,
     evaluate_jacobian,
@@ -142,6 +143,13 @@ class RetrievalTests(unittest.TestCase):
         result = solve_optimal_estimation(problem, max_iter=10)
         np.testing.assert_allclose(result.state.numpy(), truth.numpy(), rtol=1.0e-7, atol=1.0e-7)
         self.assertLess(float(torch.linalg.norm(result.residual)), 1.0e-10)
+        self.assertIn(
+            result.status,
+            {
+                OptimalEstimationStatus.STEP_TOLERANCE,
+                OptimalEstimationStatus.COST_TOLERANCE,
+            },
+        )
 
     def test_zero_noise_thermal_retrieval_recovers_truth(self) -> None:
         import torch
@@ -161,6 +169,13 @@ class RetrievalTests(unittest.TestCase):
         result = solve_optimal_estimation(problem, max_iter=10)
         np.testing.assert_allclose(result.state.numpy(), truth.numpy(), rtol=1.0e-7, atol=1.0e-5)
         self.assertLess(float(torch.linalg.norm(result.residual)), 1.0e-10)
+        self.assertIn(
+            result.status,
+            {
+                OptimalEstimationStatus.STEP_TOLERANCE,
+                OptimalEstimationStatus.COST_TOLERANCE,
+            },
+        )
 
     def test_retrieval_forward_wrapper_matches_direct_forward(self) -> None:
         forward_model, _prior, truth = _solar_problem_parts()

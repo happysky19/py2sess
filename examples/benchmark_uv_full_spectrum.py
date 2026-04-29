@@ -120,6 +120,12 @@ def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarr
         raise ValueError("the low-level UV benchmark path supports exactly one geometry")
 
     sza, vza, raz = geoms[0]
+    if not (0.0 <= sza < 90.0):
+        raise ValueError("solar zenith angle must satisfy 0 <= sza < 90")
+    if not (0.0 <= vza < 90.0):
+        raise ValueError("viewing zenith angle must satisfy 0 <= vza < 90")
+    if not (0.0 <= raz <= 360.0):
+        raise ValueError("relative azimuth angle must satisfy 0 <= raz <= 360")
     deg_to_rad = np.pi / 180.0
     x0 = np.array([np.cos(sza * deg_to_rad)], dtype=float)
     user_stream = np.array([np.cos(vza * deg_to_rad)], dtype=float)

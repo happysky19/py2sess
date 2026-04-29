@@ -111,11 +111,13 @@ def _check_optical_inputs(delta_tau: np.ndarray, omega: np.ndarray, asymm: np.nd
         raise ValueError("Asymmetry parameter outside (-1, 1) after scaling")
 
 
-def _floor_nonpositive_optical_thickness(delta_tau: np.ndarray) -> np.ndarray:
-    if not np.any(delta_tau <= 0.0):
+def _floor_zero_optical_thickness(delta_tau: np.ndarray) -> np.ndarray:
+    if np.any(delta_tau < 0.0):
+        raise ValueError("tau must be nonnegative")
+    if not np.any(delta_tau == 0.0):
         return delta_tau
     floored = np.asarray(delta_tau, dtype=float).copy()
-    np.putmask(floored, floored <= 0.0, _OPTICAL_THICKNESS_MIN)
+    np.putmask(floored, floored == 0.0, _OPTICAL_THICKNESS_MIN)
     return floored
 
 
@@ -145,7 +147,7 @@ def _apply_delta_scaling(
         prepared.d2s_scaling if do_delta_scaling else np.zeros_like(prepared.tau_arr),
     )
 
-    delta_tau = _floor_nonpositive_optical_thickness(delta_tau)
+    delta_tau = _floor_zero_optical_thickness(delta_tau)
     _check_optical_inputs(delta_tau, omega_total, asymm_total)
     return delta_tau, omega_total, asymm_total
 

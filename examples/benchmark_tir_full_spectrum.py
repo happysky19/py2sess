@@ -273,6 +273,8 @@ def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarr
     start = time.perf_counter()
     heights = np.asarray(bundle["heights"], dtype=float)
     user_angle = scalar_value(bundle["user_angle"])
+    if not (0.0 <= user_angle < 90.0):
+        raise ValueError("thermal viewing zenith angle must satisfy 0 <= vza < 90")
     prepared = dict(bundle)
     prepared["fo_geometry"] = precompute_fo_thermal_geometry_numpy(
         heights=heights,

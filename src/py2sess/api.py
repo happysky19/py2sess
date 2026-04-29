@@ -627,6 +627,8 @@ class TwoStreamEss:
         """Raises a public error when a batched input contains non-finite values."""
         if not np.all(np.isfinite(value)):
             raise ValueError(f"{name} must be finite")
+        if name == "tau" and np.any(value < 0.0):
+            raise ValueError("tau must be nonnegative")
         if name == "g" and np.any((value <= -1.0) | (value >= 1.0)):
             raise ValueError("g must satisfy -1 < g < 1")
 
@@ -676,6 +678,15 @@ class TwoStreamEss:
         return np.ascontiguousarray(broadcast.reshape(-1), dtype=float)
 
     @staticmethod
+    def _thermal_angles(value: Any) -> np.ndarray:
+        angles = np.asarray(to_numpy(value), dtype=float).reshape(-1)
+        if angles.size == 0:
+            raise ValueError("angles are required for mode='thermal'")
+        if np.any((angles < 0.0) | (angles >= 90.0)):
+            raise ValueError("thermal angles must satisfy 0 <= vza < 90")
+        return angles
+
+    @staticmethod
     def _require_finite_torch(name: str, value: Any) -> None:
         """Raises a public error when a torch batch input contains non-finite values."""
         from .rtsolver.backend import _load_torch
@@ -685,6 +696,8 @@ class TwoStreamEss:
             raise RuntimeError("backend='torch' requires torch to be installed")
         if not bool(torch.all(torch.isfinite(value)).item()):
             raise ValueError(f"{name} must be finite")
+        if name == "tau" and bool(torch.any(value < 0.0).item()):
+            raise ValueError("tau must be nonnegative")
         if name == "g" and not bool(torch.all((value > -1.0) & (value < 1.0)).item()):
             raise ValueError("g must satisfy -1 < g < 1")
 
@@ -1950,11 +1963,7 @@ class TwoStreamEss:
             "emissivity", emissivity, batch_shape=batch_shape
         )
         self._require_finite("tau", tau)
-        angles = np.asarray(to_numpy(mapped["user_angles"]), dtype=float).reshape(-1)
-        if angles.size == 0:
-            raise ValueError("angles are required for mode='thermal'")
-        if np.any((angles < 0.0) | (angles > 90.0)):
-            raise ValueError("thermal angles must satisfy 0 <= vza <= 90")
+        angles = self._thermal_angles(mapped["user_angles"])
         want_profiles = self.options.output_levels
         two_stream_by_geometry: list[np.ndarray] = []
         fo_by_geometry: list[np.ndarray] = []
@@ -2169,11 +2178,7 @@ class TwoStreamEss:
             batch_shape=batch_shape,
         )
         self._require_finite_torch("tau", tau)
-        angles = np.asarray(to_numpy(mapped["user_angles"]), dtype=float).reshape(-1)
-        if angles.size == 0:
-            raise ValueError("angles are required for mode='thermal'")
-        if np.any((angles < 0.0) | (angles > 90.0)):
-            raise ValueError("thermal angles must satisfy 0 <= vza <= 90")
+        angles = self._thermal_angles(mapped["user_angles"])
         if include_fo and mapped["height_grid"] is None:
             raise ValueError("z is required for batched thermal include_fo=True")
         height_grid = (

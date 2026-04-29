@@ -486,8 +486,10 @@ def apply_delta_scaling_torch(
         asymm_arr,
         d2s_scaling,
     )
+    if bool(torch.any(delta_tau < 0.0).item()):
+        raise ValueError("tau must be nonnegative")
     delta_tau = torch.where(
-        delta_tau <= 0.0,
+        delta_tau == 0.0,
         torch.full_like(delta_tau, _OPTICAL_THICKNESS_MIN),
         delta_tau,
     )
