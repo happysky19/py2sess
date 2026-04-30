@@ -92,6 +92,15 @@ python3 examples/build_thermal_source_from_temperature.py
 python3 examples/retrieve_synthetic_spectra.py --case uv --noise-level 0
 ```
 
+Scene/profile runs:
+
+```python
+from py2sess.scene import load_scene
+
+scene = load_scene(profile="profile.txt", config="scene.yaml")
+result = scene.forward(backend="numpy", include_fo=True)
+```
+
 Full-spectrum benchmark details are in
 [`docs/full_spectrum_benchmarks.md`](docs/full_spectrum_benchmarks.md).
 Retrieval notes are in [`docs/retrieval.md`](docs/retrieval.md).

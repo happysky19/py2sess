@@ -72,10 +72,9 @@ fi
 
 run_case() {
   local name="$1"
-  local script="$2"
-  local profile="$3"
-  local scene="$4"
-  local threads="$5"
+  local profile="$2"
+  local scene="$3"
+  local threads="$4"
 
   echo
   echo "== $name | threads=$threads | backend=$BACKEND =="
@@ -88,7 +87,7 @@ run_case() {
   NUMBA_NUM_THREADS="$threads" \
   PYTHONDONTWRITEBYTECODE=1 \
   PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
-    "$PYTHON" "$ROOT_DIR/examples/$script" \
+    "$PYTHON" "$ROOT_DIR/examples/benchmark_scene_full_spectrum.py" \
       --profile "$profile" \
       --scene "$scene" \
       "${common_args[@]}" \
@@ -102,6 +101,6 @@ echo "  TIR profile: $TIR_PROFILE"
 echo "  TIR scene:   $TIR_SCENE"
 
 for threads in $THREADS; do
-  run_case "UV" "benchmark_uv_full_spectrum.py" "$UV_PROFILE" "$UV_SCENE" "$threads"
-  run_case "TIR" "benchmark_tir_full_spectrum.py" "$TIR_PROFILE" "$TIR_SCENE" "$threads"
+  run_case "UV" "$UV_PROFILE" "$UV_SCENE" "$threads"
+  run_case "TIR" "$TIR_PROFILE" "$TIR_SCENE" "$threads"
 done

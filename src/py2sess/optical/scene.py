@@ -234,6 +234,37 @@ def aerosol_components_from_tables(
     )
 
 
+def aerosol_components_from_unit_loading(
+    *,
+    aerosol_loadings,
+    aerosol_extinction_per_loading,
+    aerosol_scattering_per_loading,
+) -> AerosolOpticalComponents:
+    """Build aerosol optical depths from loading and reusable per-unit tables."""
+    loadings = np.asarray(aerosol_loadings, dtype=float)
+    ext = np.asarray(aerosol_extinction_per_loading, dtype=float)
+    scat = np.asarray(aerosol_scattering_per_loading, dtype=float)
+    if loadings.ndim != 2:
+        raise ValueError("aerosol_loadings must have shape (nlayer, naerosol)")
+    if ext.ndim != 2 or scat.ndim != 2:
+        raise ValueError("aerosol per-loading tables must have shape (nspec, naerosol)")
+    if ext.shape != scat.shape or ext.shape[1] != loadings.shape[1]:
+        raise ValueError("aerosol per-loading table shapes do not match aerosol_loadings")
+    for name, arr in (
+        ("aerosol_loadings", loadings),
+        ("aerosol_extinction_per_loading", ext),
+        ("aerosol_scattering_per_loading", scat),
+    ):
+        if not np.all(np.isfinite(arr)) or np.any(arr < 0.0):
+            raise ValueError(f"{name} must be finite and nonnegative")
+    if np.any(scat > ext + 1.0e-14):
+        raise ValueError("aerosol_scattering_per_loading must not exceed extinction")
+    return AerosolOpticalComponents(
+        extinction_tau=ext[:, np.newaxis, :] * loadings[np.newaxis, :, :],
+        scattering_tau=scat[:, np.newaxis, :] * loadings[np.newaxis, :, :],
+    )
+
+
 def build_scene_layer_optical_properties(
     *,
     wavelengths_nm,
@@ -242,6 +273,8 @@ def build_scene_layer_optical_properties(
     aerosol_loadings=None,
     aerosol_wavelengths_microns=None,
     aerosol_bulk_iops=None,
+    aerosol_extinction_per_loading=None,
+    aerosol_scattering_per_loading=None,
     aerosol_select_wavelength_microns=0.4,
     co2_ppmv: float = 385.0,
 ) -> SceneLayerOpticalProperties:
@@ -253,6 +286,8 @@ def build_scene_layer_optical_properties(
         aerosol_loadings=aerosol_loadings,
         aerosol_wavelengths_microns=aerosol_wavelengths_microns,
         aerosol_bulk_iops=aerosol_bulk_iops,
+        aerosol_extinction_per_loading=aerosol_extinction_per_loading,
+        aerosol_scattering_per_loading=aerosol_scattering_per_loading,
         aerosol_select_wavelength_microns=aerosol_select_wavelength_microns,
         co2_ppmv=co2_ppmv,
     )
@@ -267,6 +302,8 @@ def build_scene_layer_optical_properties_from_gas_tau(
     aerosol_loadings=None,
     aerosol_wavelengths_microns=None,
     aerosol_bulk_iops=None,
+    aerosol_extinction_per_loading=None,
+    aerosol_scattering_per_loading=None,
     aerosol_select_wavelength_microns=0.4,
     co2_ppmv: float = 385.0,
 ) -> SceneLayerOpticalProperties:
@@ -278,6 +315,8 @@ def build_scene_layer_optical_properties_from_gas_tau(
         aerosol_loadings=aerosol_loadings,
         aerosol_wavelengths_microns=aerosol_wavelengths_microns,
         aerosol_bulk_iops=aerosol_bulk_iops,
+        aerosol_extinction_per_loading=aerosol_extinction_per_loading,
+        aerosol_scattering_per_loading=aerosol_scattering_per_loading,
         aerosol_select_wavelength_microns=aerosol_select_wavelength_microns,
         co2_ppmv=co2_ppmv,
     )
@@ -303,6 +342,8 @@ def build_scene_opacity_components(
     aerosol_loadings=None,
     aerosol_wavelengths_microns=None,
     aerosol_bulk_iops=None,
+    aerosol_extinction_per_loading=None,
+    aerosol_scattering_per_loading=None,
     aerosol_select_wavelength_microns=0.4,
     co2_ppmv: float = 385.0,
 ) -> SceneOpacityComponents:
@@ -319,6 +360,8 @@ def build_scene_opacity_components(
         aerosol_loadings=aerosol_loadings,
         aerosol_wavelengths_microns=aerosol_wavelengths_microns,
         aerosol_bulk_iops=aerosol_bulk_iops,
+        aerosol_extinction_per_loading=aerosol_extinction_per_loading,
+        aerosol_scattering_per_loading=aerosol_scattering_per_loading,
         aerosol_select_wavelength_microns=aerosol_select_wavelength_microns,
         co2_ppmv=co2_ppmv,
     )
@@ -332,6 +375,8 @@ def build_scene_opacity_components_from_gas_tau(
     aerosol_loadings=None,
     aerosol_wavelengths_microns=None,
     aerosol_bulk_iops=None,
+    aerosol_extinction_per_loading=None,
+    aerosol_scattering_per_loading=None,
     aerosol_select_wavelength_microns=0.4,
     co2_ppmv: float = 385.0,
 ) -> SceneOpacityComponents:
@@ -349,6 +394,19 @@ def build_scene_opacity_components_from_gas_tau(
     if aerosol_loadings is None:
         aerosol_ext = np.zeros(gas_tau.shape + (0,), dtype=float)
         aerosol_scat = aerosol_ext
+    elif aerosol_extinction_per_loading is not None or aerosol_scattering_per_loading is not None:
+        if aerosol_extinction_per_loading is None or aerosol_scattering_per_loading is None:
+            raise ValueError(
+                "aerosol_loadings requires both aerosol_extinction_per_loading "
+                "and aerosol_scattering_per_loading"
+            )
+        aerosol = aerosol_components_from_unit_loading(
+            aerosol_loadings=aerosol_loadings,
+            aerosol_extinction_per_loading=aerosol_extinction_per_loading,
+            aerosol_scattering_per_loading=aerosol_scattering_per_loading,
+        )
+        aerosol_ext = aerosol.extinction_tau
+        aerosol_scat = aerosol.scattering_tau
     else:
         if aerosol_wavelengths_microns is None or aerosol_bulk_iops is None:
             raise ValueError(

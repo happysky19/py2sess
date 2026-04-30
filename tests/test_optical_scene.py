@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from py2sess.optical.scene import (
+    aerosol_components_from_unit_loading,
     aerosol_components_from_tables,
     atmospheric_profile_from_levels,
     build_scene_layer_optical_properties,
@@ -153,6 +154,19 @@ class OpticalSceneTests(unittest.TestCase):
                 ]
             ),
         )
+
+    def test_aerosol_components_from_unit_loading_use_direct_formula(self) -> None:
+        components = aerosol_components_from_unit_loading(
+            aerosol_loadings=np.array([[2.0, 4.0], [1.0, 8.0]]),
+            aerosol_extinction_per_loading=np.array([[0.2, 0.1], [0.4, 0.2]]),
+            aerosol_scattering_per_loading=np.array([[0.1, 0.05], [0.2, 0.1]]),
+        )
+
+        np.testing.assert_allclose(
+            components.extinction_tau,
+            np.array([[[0.4, 0.4], [0.2, 0.8]], [[0.8, 0.8], [0.4, 1.6]]]),
+        )
+        np.testing.assert_allclose(components.scattering_tau, 0.5 * components.extinction_tau)
 
     def test_scene_layer_builder_combines_profile_components(self) -> None:
         profile = atmospheric_profile_from_levels(
