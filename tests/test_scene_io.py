@@ -10,11 +10,6 @@ import unittest
 import numpy as np
 from scipy.io import netcdf_file
 
-from py2sess.optical.createprops import (
-    load_createprops_provider,
-    parse_createprops_dump,
-    write_createprops_provider,
-)
 from py2sess.optical.geocape import (
     load_geocape_solar_flux,
     load_geocape_surface_albedo,
@@ -84,39 +79,12 @@ opacity:
 """
         )
 
-    def _write_provider(self, path: Path, *, mode: str) -> None:
-        path.mkdir()
-        arrays = {
-            "wavelengths": np.array([500.0, 600.0]),
-            "heights": np.array([2.0, 1.0, 0.0]),
-            "albedo": np.array([0.1, 0.2]),
-            "depol": np.array([0.03, 0.03]),
-            "gas_absorption_tau": np.array([[0.008, 0.012], [0.015, 0.007]]),
-            "absorption_tau": np.array([[0.01, 0.02], [0.02, 0.01]]),
-            "rayleigh_scattering_tau": np.array([[0.03, 0.04], [0.02, 0.03]]),
-            "aerosol_scattering_tau": np.zeros((2, 2, 0)),
-            "aerosol_moments": np.zeros((2, 3, 0)),
-            "aerosol_interp_fraction": np.array([0.0, 1.0]),
-        }
-        if mode == "solar":
-            arrays["user_obsgeom"] = np.array([30.0, 20.0, 0.0])
-            arrays["flux_factor"] = np.array([1.0, 1.0])
-        else:
-            arrays["user_angle"] = np.array([20.0])
-            arrays["wavenumber_band_cm_inv"] = np.array([[899.5, 900.5], [900.5, 901.5]])
-            arrays["wavenumber_cm_inv"] = np.array([900.0, 901.0])
-            arrays["level_temperature_k"] = np.array([220.0, 260.0, 290.0])
-            arrays["surface_temperature_k"] = np.array([291.0])
-        for key, value in arrays.items():
-            np.save(path / f"{key}.npy", value)
-
     def _write_provider_scene(self, path: Path, provider: Path, *, mode: str) -> None:
         path.write_text(
             f"""
 mode: {mode}
 opacity:
   provider:
-    kind: fortran_createprops
     path: {provider.name}
 """
         )
@@ -317,30 +285,7 @@ solar:
         np.testing.assert_allclose(bundle["albedo"], expected_albedo)
         np.testing.assert_allclose(bundle["flux_factor"], expected_flux)
 
-    def test_scene_builder_accepts_fortran_createprops_provider(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            profile_path = root / "profile.dat"
-            provider_path = root / "provider"
-            scene_path = root / "scene.yaml"
-            self._write_profile(profile_path)
-            self._write_provider(provider_path, mode="solar")
-            self._write_provider_scene(scene_path, provider_path, mode="solar")
-
-            bundle = build_benchmark_scene_inputs(
-                profile_path=profile_path,
-                scene_path=scene_path,
-                kind="uv",
-            )
-
-        for forbidden in ("tau", "omega", "asymm", "scaling", "fo_exact_scatter"):
-            self.assertNotIn(forbidden, bundle)
-        self.assertEqual(bundle["absorption_tau"].shape, (2, 2))
-        self.assertEqual(bundle["rayleigh_scattering_tau"].shape, (2, 2))
-        self.assertEqual(bundle["aerosol_scattering_tau"].shape, (2, 2, 0))
-        np.testing.assert_allclose(bundle["user_obsgeom"], [30.0, 20.0, 0.0])
-
-    def test_strict_scene_rejects_fortran_provider_and_direct_hitran(self) -> None:
+    def test_strict_scene_rejects_opacity_provider_and_direct_hitran(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             profile_path = root / "profile.dat"
@@ -348,7 +293,6 @@ solar:
             provider_scene = root / "provider.yaml"
             hitran_scene = root / "hitran.yaml"
             self._write_profile(profile_path)
-            self._write_provider(provider_path, mode="solar")
             self._write_provider_scene(provider_scene, provider_path, mode="solar")
             hitran_scene.write_text(
                 """
@@ -380,93 +324,6 @@ opacity:
                     kind="uv",
                     strict_runtime_inputs=True,
                 )
-
-    def test_createprops_dump_parser_writes_provider_arrays(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            dump_path = root / "uv_dump.dat"
-            provider_path = root / "provider"
-            dump_path.write_text(
-                "\n".join(
-                    [
-                        "2 2 2 30.0 20.0 0.0",
-                        "2.0",
-                        "1.0",
-                        "0.0",
-                        "0 0 0 0 0 0 0 0 0 0 0",
-                        "1 0 0 0 0 0 0 0 0 0 0",
-                        "2 0 0 0 0 0 0 0 0 0 0",
-                        "1 500.0 20000.0 0.1 0.03 1.0",
-                        "1 0.07 0.4 0.75 1.0 0 0 0 0 0",
-                        "2 0.08 0.2 0.50 1.0 0 0 0 0 0",
-                        "2 600.0 16666.7 0.2 0.03 1.5",
-                        "1 0.02 0.5 0.80 1.0 0 0 0 0 0",
-                        "2 0.12 0.3 0.25 1.0 0 0 0 0 0",
-                        "",
-                    ]
-                )
-            )
-
-            arrays = parse_createprops_dump(dump_path, kind="uv")
-            write_createprops_provider(arrays, provider_path, kind="uv")
-            loaded = load_createprops_provider(provider_path, kind="uv")
-
-        np.testing.assert_allclose(loaded["wavelengths"], [500.0, 600.0])
-        np.testing.assert_allclose(loaded["gas_absorption_tau"], [[0.07, 0.08], [0.02, 0.12]])
-        np.testing.assert_allclose(loaded["absorption_tau"], [[0.1, 0.1], [0.1, 0.225]])
-        np.testing.assert_allclose(
-            loaded["rayleigh_scattering_tau"],
-            [[0.3, 0.1], [0.4, 0.075]],
-        )
-        self.assertEqual(loaded["aerosol_scattering_tau"].shape, (2, 2, 5))
-        np.testing.assert_allclose(loaded["user_obsgeom"], [30.0, 20.0, 0.0])
-
-    def test_tir_createprops_dump_parser_adds_temperature_inputs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            dump_path = root / "Dump_1_26_0000.dat_25"
-            profile_path = root / "profile.dat"
-            dump_path.write_text(
-                "\n".join(
-                    [
-                        "2 2 1 49.0 0.0 2",
-                        "2.0 0.0",
-                        "1.0 0.0",
-                        "0.0 0.0",
-                        "0 1 1 1 1 1 1 1 1 1 1",
-                        "1 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0",
-                        "1 14285.0 500.0 0.1 0.03 0.2 0.01",
-                        "1 0.01 0.02 0.5 0.4 0.1 0.2 0.3 0.4 0.0 0.01",
-                        "2 0.01 0.03 0.6 0.5 0.2 0.3 0.4 0.5 0.0 0.02",
-                        "2 14280.0 501.0 0.1 0.03 0.2 0.01",
-                        "1 0.01 0.02 0.5 0.4 0.1 0.2 0.3 0.4 0.0 0.01",
-                        "2 0.01 0.03 0.6 0.5 0.2 0.3 0.4 0.5 0.0 0.02",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            profile_path.write_text(
-                "\n".join(
-                    [
-                        "surfaceTemperature(K) = 299.0",
-                        "1 1000.0 300.0",
-                        "2 500.0 250.0",
-                        "3 1.0 200.0",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            parsed = parse_createprops_dump(dump_path, kind="tir", profile_file=profile_path)
-
-        np.testing.assert_allclose(parsed["wavenumber_cm_inv"], [500.0, 501.0])
-        np.testing.assert_allclose(parsed["gas_absorption_tau"], [[0.01, 0.01], [0.01, 0.01]])
-        np.testing.assert_allclose(
-            parsed["wavenumber_band_cm_inv"],
-            [[499.5, 500.5], [500.5, 501.5]],
-        )
-        np.testing.assert_allclose(parsed["level_temperature_k"], [200.0, 250.0, 300.0])
-        np.testing.assert_allclose(parsed["surface_temperature_k"], [299.0])
 
     def test_benchmarks_accept_profile_scenes_strict_mode(self) -> None:
         cases = (
@@ -500,7 +357,7 @@ opacity:
                     self.assertIn(layer_text, output)
                     self.assertIn(setup_text, output)
 
-    def test_benchmarks_reject_createprops_provider_strict_mode(self) -> None:
+    def test_benchmarks_reject_opacity_provider_scene(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             profile_path = root / "profile.dat"
@@ -509,7 +366,6 @@ opacity:
                 with self.subTest(mode=mode):
                     provider_path = root / f"{mode}_provider"
                     scene_path = root / f"{mode}_scene.yaml"
-                    self._write_provider(provider_path, mode=mode)
                     self._write_provider_scene(scene_path, provider_path, mode=mode)
 
                     with self.assertRaisesRegex(ValueError, "opacity.provider"):
@@ -517,7 +373,6 @@ opacity:
                             profile_path=profile_path,
                             scene_path=scene_path,
                             kind="uv" if mode == "solar" else "tir",
-                            strict_runtime_inputs=True,
                         )
 
     @staticmethod

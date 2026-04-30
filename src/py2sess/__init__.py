@@ -42,12 +42,6 @@ if TYPE_CHECKING:  # pragma: no cover
         retrieval_diagnostics,
         solve_optimal_estimation,
     )
-    from .reference_cases import (
-        TirBenchmarkCase,
-        UvBenchmarkCase,
-        load_tir_benchmark_case,
-        load_uv_benchmark_case,
-    )
 
 __all__ = [
     "TwoStreamEss",
@@ -67,10 +61,6 @@ __all__ = [
     "planck_radiance_wavenumber_band",
     "thermal_source_from_temperature_profile",
     "thermal_source_from_temperature_profile_torch",
-    "TirBenchmarkCase",
-    "UvBenchmarkCase",
-    "load_tir_benchmark_case",
-    "load_uv_benchmark_case",
     "SurfaceLeavingCoefficients",
     "morcasiwat_reflectance",
     "seawater_refractive_index",
@@ -130,15 +120,6 @@ def __getattr__(name: str):
         )
 
         value = getattr(module, name)
-    elif name in {
-        "TirBenchmarkCase",
-        "UvBenchmarkCase",
-        "load_tir_benchmark_case",
-        "load_uv_benchmark_case",
-    }:
-        from . import reference_cases
-
-        value = getattr(reference_cases, name)
     elif name in {
         "SurfaceLeavingCoefficients",
         "morcasiwat_reflectance",

@@ -399,7 +399,7 @@ def _air_density_per_km(pressure_hpa: np.ndarray, temperature_k: np.ndarray) -> 
 
 def _interp_aerosol_table(x, xp: np.ndarray, fp: np.ndarray) -> np.ndarray:
     values = np.asarray(x, dtype=float)
-    if np.any(values <= xp[0]) or np.any(values >= xp[-1]):
+    if np.any(values < xp[0]) or np.any(values > xp[-1]):
         raise ValueError("aerosol interpolation wavelength is out of table bounds")
     flat = values.reshape(-1)
     out = np.empty((flat.size, fp.shape[-1]), dtype=float)

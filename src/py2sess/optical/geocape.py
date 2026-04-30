@@ -274,9 +274,14 @@ def _endpoint_moments(
 
 
 def _interp_indices(grid: np.ndarray, value: float) -> tuple[int, int, float, float]:
-    index = int(np.searchsorted(grid, value, side="right"))
-    if index <= 0 or index >= grid.shape[0]:
+    if value < grid[0] or value > grid[-1]:
         raise ValueError("aerosol wavelength is out of SSprops table bounds")
+    if value == grid[0]:
+        return 0, 0, 1.0, 0.0
+    if value == grid[-1]:
+        last = grid.shape[0] - 1
+        return last, last, 1.0, 0.0
+    index = int(np.searchsorted(grid, value, side="right"))
     lower = index - 1
     upper = index
     span = grid[upper] - grid[lower]

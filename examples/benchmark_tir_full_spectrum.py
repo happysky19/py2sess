@@ -12,8 +12,6 @@ from _full_spectrum_benchmark_common import (
     add_common_benchmark_arguments,
     BenchmarkRow,
     benchmark_input_source,
-    load_input_arrays,
-    load_packaged_reference_total,
     looks_like_row_index,
     layer_optical_keys_are_components,
     layer_optical_keys_are_scene,
@@ -30,7 +28,6 @@ from _full_spectrum_benchmark_common import (
     select_phase_optical_keys,
     slice_spectral_rows,
     trim_spectral_rows,
-    validate_scene_input_args,
 )
 from py2sess import (
     thermal_source_from_temperature_profile,
@@ -62,8 +59,6 @@ _TIR_COMPONENT_PHASE_KEYS = (
 
 _TIR_AEROSOL_INTERP_KEY = "aerosol_interp_fraction"
 
-_TIR_DUMPED_OPTICS_KEYS = ("asymm_arr", "d2s_scaling")
-
 _TIR_BASE_KEYS = (
     "wavelengths",
     "heights",
@@ -73,7 +68,6 @@ _TIR_BASE_KEYS = (
 
 _TIR_OPTIONAL_KEYS = ("stream_value", "emissivity")
 
-_TIR_DIRECT_SOURCE_KEYS = ("thermal_bb_input", "surfbb")
 _TIR_TEMPERATURE_SOURCE_KEYS = ("level_temperature_k", "surface_temperature_k")
 _TIR_SOURCE_COORDINATE_KEYS = (
     "wavenumber_band_cm_inv",
@@ -94,9 +88,7 @@ _TIR_CHUNK_KEYS = (
 )
 _TIR_LIMIT_KEYS = (
     _TIR_BASE_KEYS
-    + _TIR_DIRECT_SOURCE_KEYS
     + _TIR_SOURCE_COORDINATE_KEYS
-    + _TIR_DUMPED_OPTICS_KEYS
     + (
         "emissivity",
         "surface_temperature_k",
@@ -146,45 +138,29 @@ def _tir_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndar
 def _select_source_keys(
     available: set[str],
     *,
-    use_dumped_thermal_source: bool,
     require_python_generated_inputs: bool = False,
 ) -> tuple[str, ...]:
     has_temperature = set(_TIR_TEMPERATURE_SOURCE_KEYS).issubset(available)
     coordinate = next((key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available), None)
-    if require_python_generated_inputs and use_dumped_thermal_source:
-        raise ValueError(
-            "TIR strict generated-input mode cannot be combined with --use-dumped-thermal-source"
-        )
-    if not use_dumped_thermal_source and has_temperature and coordinate is not None:
+    if has_temperature and coordinate is not None:
         return _TIR_TEMPERATURE_SOURCE_KEYS + (coordinate,)
-    if require_python_generated_inputs:
-        missing = [key for key in _TIR_TEMPERATURE_SOURCE_KEYS if key not in available]
-        if coordinate is None:
-            missing.append("wavenumber_band_cm_inv, wavenumber_cm_inv, or wavelength_microns")
-        missing_text = ", ".join(missing)
-        raise ValueError(
-            "TIR strict generated-input mode requires temperature-based thermal source inputs"
-            + (f": {missing_text}" if missing_text else "")
-        )
-    return _TIR_DIRECT_SOURCE_KEYS
+    missing = [key for key in _TIR_TEMPERATURE_SOURCE_KEYS if key not in available]
+    if coordinate is None:
+        missing.append("wavenumber_band_cm_inv, wavenumber_cm_inv, or wavelength_microns")
+    missing_text = ", ".join(missing)
+    raise ValueError(
+        "TIR benchmark requires temperature-based thermal source inputs"
+        + (f": {missing_text}" if missing_text else "")
+    )
 
 
 def _prepare_optics(
     bundle: dict[str, np.ndarray],
-    *,
-    use_dumped_derived_optics: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
     has_component_phase = all(key in bundle for key in _TIR_COMPONENT_PHASE_KEYS)
     has_fraction_phase = all(key in bundle for key in _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS)
-    if use_dumped_derived_optics or not (has_component_phase or has_fraction_phase):
-        require_keys(bundle, _TIR_DUMPED_OPTICS_KEYS, label="TIR dumped optical")
-        prepared = dict(bundle)
-        prepared["g"] = bundle["asymm_arr"]
-        prepared["delta_m_truncation_factor"] = bundle["d2s_scaling"]
-        mode = "dumped-derived"
-        if not use_dumped_derived_optics and not (has_component_phase or has_fraction_phase):
-            mode = "dumped-derived (physical optical inputs unavailable)"
-        return prepared, 0.0, mode
+    if not (has_component_phase or has_fraction_phase):
+        raise ValueError("TIR benchmark requires physical phase inputs")
 
     start = time.perf_counter()
     fac, mode = _tir_aerosol_interp_fraction(bundle)
@@ -218,32 +194,24 @@ def _prepare_optics(
 
 def _prepare_thermal_source(
     bundle: dict[str, np.ndarray],
-    *,
-    use_dumped_thermal_source: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
     source_coordinates = [key for key in _TIR_SOURCE_COORDINATE_KEYS if key in bundle]
     has_temperature = all(key in bundle for key in _TIR_TEMPERATURE_SOURCE_KEYS)
-    if not use_dumped_thermal_source and has_temperature and source_coordinates:
-        start = time.perf_counter()
-        coordinate_name = source_coordinates[0]
-        kwargs = {coordinate_name: bundle[coordinate_name]}
-        source = thermal_source_from_temperature_profile(
-            bundle["level_temperature_k"],
-            bundle["surface_temperature_k"],
-            **kwargs,
-        )
-        prepared = dict(bundle)
-        prepared["planck"] = np.asarray(source.planck, dtype=float)
-        prepared["surface_planck"] = np.asarray(source.surface_planck, dtype=float)
-        _validate_thermal_source_shapes(prepared)
-        return prepared, time.perf_counter() - start, f"temperature ({coordinate_name})"
-
-    require_keys(bundle, _TIR_DIRECT_SOURCE_KEYS, label="TIR thermal source")
+    if not (has_temperature and source_coordinates):
+        raise ValueError("TIR benchmark requires temperature-based thermal source inputs")
+    start = time.perf_counter()
+    coordinate_name = source_coordinates[0]
+    kwargs = {coordinate_name: bundle[coordinate_name]}
+    source = thermal_source_from_temperature_profile(
+        bundle["level_temperature_k"],
+        bundle["surface_temperature_k"],
+        **kwargs,
+    )
     prepared = dict(bundle)
-    prepared["planck"] = bundle["thermal_bb_input"]
-    prepared["surface_planck"] = bundle["surfbb"]
+    prepared["planck"] = np.asarray(source.planck, dtype=float)
+    prepared["surface_planck"] = np.asarray(source.surface_planck, dtype=float)
     _validate_thermal_source_shapes(prepared)
-    return prepared, 0.0, "bundle"
+    return prepared, time.perf_counter() - start, f"temperature ({coordinate_name})"
 
 
 def _validate_thermal_source_shapes(bundle: dict[str, np.ndarray]) -> None:
@@ -628,31 +596,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     add_common_benchmark_arguments(
         parser,
-        input_help="Path to a TIR runtime array directory, or a legacy full-spectrum .npz bundle.",
         torch_bvp_choices=("auto", "block", "pentadiagonal"),
-    )
-    parser.add_argument(
-        "--use-dumped-thermal-source",
-        action="store_true",
-        help="Use stored thermal_bb_input/surfbb instead of temperature-based source generation.",
     )
     args = parser.parse_args()
 
     load_start = time.perf_counter()
-    scene_mode = validate_scene_input_args(
-        parser,
-        args,
-        forbidden_scene_flags=(
-            ("use_dumped_derived_optics", "--use-dumped-derived-optics"),
-            ("use_dumped_thermal_source", "--use-dumped-thermal-source"),
-        ),
-    )
-
     bundle, available, input_path, input_kind = benchmark_input_source(
         args,
         kind="tir",
-        label="TIR",
-        scene_mode=scene_mode,
     )
 
     layer_optical_keys = select_layer_optical_keys(
@@ -673,25 +624,17 @@ def main() -> None:
     optical_keys = select_phase_optical_keys(
         available,
         label="TIR",
-        use_dumped_derived_optics=args.use_dumped_derived_optics,
         layer_optical_generates_fractions=layer_from_scene or layer_from_components,
         layer_optical_from_scene=layer_from_scene,
         require_python_generated_inputs=args.require_python_generated_inputs,
         required_fraction_keys=_TIR_REQUIRED_PHYSICAL_OPTICS_KEYS,
-        dumped_keys=_TIR_DUMPED_OPTICS_KEYS,
         aerosol_interp_key=_TIR_AEROSOL_INTERP_KEY,
         aerosol_coordinate_keys=_TIR_AEROSOL_COORDINATE_KEYS,
     )
     source_keys = _select_source_keys(
         available,
-        use_dumped_thermal_source=args.use_dumped_thermal_source,
         require_python_generated_inputs=args.require_python_generated_inputs,
     )
-    if not scene_mode:
-        bundle = load_input_arrays(
-            args.input,
-            keys=base_keys + _TIR_OPTIONAL_KEYS + layer_optical_keys + optical_keys + source_keys,
-        )
     require_keys(
         bundle,
         base_keys + layer_optical_keys + optical_keys + source_keys,
@@ -711,10 +654,6 @@ def main() -> None:
         total_rows,
         wavelengths,
     )
-    if not scene_mode and args.input.name == "tir_benchmark_fixture.npz":
-        bundle["ref_total"] = load_packaged_reference_total("tir_reference_outputs.npz")[
-            :wavelengths
-        ]
     load_seconds = time.perf_counter() - load_start
 
     bundle, layer_optical_seconds, layer_optical_mode = prepare_layer_optical_properties(
@@ -726,14 +665,8 @@ def main() -> None:
     bundle["tau"] = bundle["tau_arr"]
     bundle["ssa"] = bundle["omega_arr"]
     bundle, geometry_seconds = _prepare_geometry(bundle)
-    bundle, optical_seconds, optical_mode = _prepare_optics(
-        bundle,
-        use_dumped_derived_optics=args.use_dumped_derived_optics,
-    )
-    bundle, source_seconds, source_mode = _prepare_thermal_source(
-        bundle,
-        use_dumped_thermal_source=args.use_dumped_thermal_source,
-    )
+    bundle, optical_seconds, optical_mode = _prepare_optics(bundle)
+    bundle, source_seconds, source_mode = _prepare_thermal_source(bundle)
     bundle, emissivity_mode = _prepare_surface(bundle)
 
     print_problem_header(

@@ -1,7 +1,7 @@
 # Public API Argument Reference
 
-`py2sess` exposes one public solver API: `TwoStreamEss.forward(...)`. Use the
-public names below; Fortran-style names are listed only to aid code comparison.
+`py2sess` exposes one public solver API: `TwoStreamEss.forward(...)`. The last
+column gives the closest Fortran or internal name for code comparison.
 
 `2S` is the two-stream multiple-scattering/emission solve. `FO` is the
 first-order solar single-scatter/direct-beam or thermal source-transmission
@@ -23,7 +23,7 @@ are needed; profile arrays use the final axis for TOA-to-BOA levels.
 | Public name | Meaning | Shape | Default | Fortran/internal name |
 |---|---|---:|---|---|
 | `nlyr` | Number of atmospheric layers | scalar | required | `NLAYERS` |
-| `mode` | Source mode: `solar`, `solar_lattice`, or `thermal` | scalar | `solar` | source-mode branch in the master drivers |
+| `mode` | Source mode: `solar`, `solar_lattice`, or `thermal` | scalar | `solar` | source-mode branch |
 | `output_levels` | Return level-by-level radiance profiles | scalar | `False` | `DO_LEVEL_OUTPUT` |
 | `upwelling` | Compute upwelling outputs | scalar | `True` | `DO_UPWELLING` |
 | `downwelling` | Compute downwelling outputs | scalar | `False` | `DO_DNWELLING` |
@@ -34,23 +34,22 @@ are needed; profile arrays use the final axis for TOA-to-BOA levels.
 | `ssa` | Single-scattering albedo | `(..., nlyr)` | required | `OMEGA_INPUT` |
 | `g` | Asymmetry factor | `(..., nlyr)` | required | `ASYMM_INPUT` |
 | `z` | Level height grid, top to bottom, km | `(nlyr+1,)` | required for solar and spherical FO paths | `HEIGHT_GRID` |
-| `angles` | Solar `[sza, vza, raz]`, degrees | `(3,)` or `(ngeom, 3)` | required for `mode="solar"` | `USER_OBSGEOMS` |
-| `angles` | Thermal viewing zenith angle(s), degrees | scalar or `(ngeom,)` | required for `mode="thermal"` | `USER_ANGLES`, converted to `USER_STREAMS` |
+| `angles` | Solar `[sza, vza, raz]`, degrees, or thermal viewing zenith angle(s), degrees | `(3,)`, `(ngeom, 3)`, scalar, or `(ngeom,)` | required | `USER_OBSGEOMS` / `USER_ANGLES` |
 | `view_angles` | Advanced lattice/thermal view-angle override, degrees | `(nview,)` | `None` | `USER_ANGLES` / `USER_VZANGLES` |
 | `beam_szas` | Advanced solar-lattice solar zenith angles, degrees | `(nbeam,)` | required for `mode="solar_lattice"` | `BEAM_SZAS` |
 | `relazms` | Advanced solar-lattice relative azimuth angles, degrees | `(nazm,)` | required for `mode="solar_lattice"` | `USER_RELAZMS` |
 | `stream` | Two-stream quadrature cosine | scalar | `1/sqrt(3)` | `STREAM_VALUE` |
 | `fbeam` | Direct solar beam/source normalization | scalar or `(...)` | `1.0` | `FLUX_FACTOR` / `FLUXFAC` |
 | `albedo` | Lambertian surface albedo | scalar or `(...)` | `0.0` | `LAMBERTIAN_ALBEDO` |
-| `delta_m_truncation_factor` | Delta-M truncation factor `f`; use explicit values for mixed phase functions or fixture parity | `(..., nlyr)` | `None` -> `g**2` | `D2S_SCALING`; FO optical path uses `FO_TRUNCFAC` |
+| `delta_m_truncation_factor` | Delta-M truncation factor `f` | `(..., nlyr)` | `None` -> `g**2` | `D2S_SCALING` / `TRUNCFAC` |
 | `planck` | Thermal Planck/source value at level boundaries | `(..., nlyr+1)` | required for `mode="thermal"` | `THERMAL_BB_INPUT` |
 | `surface_planck` | Surface Planck radiance | scalar or `(...)` | `0.0` | `SURFBB` / `FO_SURFBB` |
 | `emissivity` | Surface emissivity | scalar or `(...)` | `0.0` | `EMISSIVITY` / `FO_USER_EMISSIVITY` |
-| `geometry` | FO geometry method: `pseudo_spherical` or `regular_pseudo_spherical` | scalar | `pseudo_spherical` | EPS/RPS FO geometry selector |
+| `geometry` | FO geometry method: `pseudo_spherical` or `regular_pseudo_spherical` | scalar | `pseudo_spherical` | EPS/RPS selector |
 | `earth_radius` | Planet radius for spherical paths, km | scalar | `6371.0` | `EARTH_RADIUS` |
 | `include_fo` | Attach first-order outputs to a main 2S run | scalar | `False` | FO master-call branch |
 | `fo_scatter_term` | Solar FO phase/source term: phase function times single-scattering and delta-M source scaling | `(..., nlyr)` or `(..., nlyr, ngeom)` | HG term from `ssa`, `g`, `f` | `FO_EXACTSCAT` |
-| `n_moments` / `fo_n_moments` | Advanced solar FO phase control; `0` is isotropic and positive values use the closed-form HG fallback unless explicit phase data are supplied | scalar | `5000` | `NMOMENTS_INPUT`-style FO moment controls |
+| `n_moments` / `fo_n_moments` | Advanced solar FO phase control; positive values use the closed-form HG fallback unless explicit phase data are supplied | scalar | `5000` | `NMOMENTS_INPUT` |
 | `nfine` / `fo_nfine` | Number of fine sub-layers used by EPS FO spherical-path integration | scalar | `3` | `NFINEDIVS` |
 
 ## Notes

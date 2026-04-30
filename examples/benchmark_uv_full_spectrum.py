@@ -12,8 +12,6 @@ from _full_spectrum_benchmark_common import (
     add_common_benchmark_arguments,
     BenchmarkRow,
     benchmark_input_source,
-    load_input_arrays,
-    load_packaged_reference_total,
     looks_like_row_index,
     layer_optical_keys_are_components,
     layer_optical_keys_are_scene,
@@ -30,7 +28,6 @@ from _full_spectrum_benchmark_common import (
     select_phase_optical_keys,
     slice_spectral_rows,
     trim_spectral_rows,
-    validate_scene_input_args,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
 from py2sess.optical.phase import (
@@ -63,8 +60,6 @@ _UV_COMPONENT_PHASE_KEYS = (
 
 _UV_AEROSOL_INTERP_KEY = "aerosol_interp_fraction"
 
-_UV_DUMPED_OPTICS_KEYS = ("asymm", "scaling", "fo_exact_scatter")
-
 _UV_BASE_KEYS = (
     "wavelengths",
     "user_obsgeom",
@@ -84,15 +79,11 @@ _UV_CHUNK_KEYS = (
     "flux_factor",
     "fo_scatter_term",
 )
-_UV_LIMIT_KEYS = (
-    _UV_BASE_KEYS
-    + _UV_DUMPED_OPTICS_KEYS
-    + (
-        "depol",
-        "rayleigh_fraction",
-        "aerosol_fraction",
-        "aerosol_interp_fraction",
-    )
+_UV_LIMIT_KEYS = _UV_BASE_KEYS + (
+    "depol",
+    "rayleigh_fraction",
+    "aerosol_fraction",
+    "aerosol_interp_fraction",
 )
 
 
@@ -159,21 +150,11 @@ def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarr
 
 def _prepare_optics(
     bundle: dict[str, np.ndarray],
-    *,
-    use_dumped_derived_optics: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
     has_component_phase = all(key in bundle for key in _UV_COMPONENT_PHASE_KEYS)
     has_fraction_phase = all(key in bundle for key in _UV_REQUIRED_PHYSICAL_OPTICS_KEYS)
-    if use_dumped_derived_optics or not (has_component_phase or has_fraction_phase):
-        require_keys(bundle, _UV_DUMPED_OPTICS_KEYS, label="UV dumped optical")
-        prepared = dict(bundle)
-        prepared["g"] = bundle["asymm"]
-        prepared["delta_m_truncation_factor"] = bundle["scaling"]
-        prepared["fo_scatter_term"] = bundle["fo_exact_scatter"]
-        mode = "dumped-derived"
-        if not use_dumped_derived_optics and not (has_component_phase or has_fraction_phase):
-            mode = "dumped-derived (physical optical inputs unavailable)"
-        return prepared, 0.0, mode
+    if not (has_component_phase or has_fraction_phase):
+        raise ValueError("UV benchmark requires physical phase inputs")
 
     start = time.perf_counter()
     if "aerosol_interp_fraction" in bundle:
@@ -567,24 +548,13 @@ def benchmark_torch_forward(
 def main() -> None:
     """Runs the full-spectrum UV benchmark example."""
     parser = argparse.ArgumentParser()
-    add_common_benchmark_arguments(
-        parser,
-        input_help="Path to a UV runtime array directory, or a legacy full-spectrum .npz bundle.",
-    )
+    add_common_benchmark_arguments(parser)
     args = parser.parse_args()
 
     load_start = time.perf_counter()
-    scene_mode = validate_scene_input_args(
-        parser,
-        args,
-        forbidden_scene_flags=(("use_dumped_derived_optics", "--use-dumped-derived-optics"),),
-    )
-
     bundle, available, input_path, input_kind = benchmark_input_source(
         args,
         kind="uv",
-        label="UV",
-        scene_mode=scene_mode,
     )
 
     layer_optical_keys = select_layer_optical_keys(
@@ -605,19 +575,12 @@ def main() -> None:
     optical_keys = select_phase_optical_keys(
         available,
         label="UV",
-        use_dumped_derived_optics=args.use_dumped_derived_optics,
         layer_optical_generates_fractions=layer_from_scene or layer_from_components,
         layer_optical_from_scene=layer_from_scene,
         require_python_generated_inputs=args.require_python_generated_inputs,
         required_fraction_keys=_UV_REQUIRED_PHYSICAL_OPTICS_KEYS,
-        dumped_keys=_UV_DUMPED_OPTICS_KEYS,
         aerosol_interp_key=_UV_AEROSOL_INTERP_KEY,
     )
-    if not scene_mode:
-        bundle = load_input_arrays(
-            args.input,
-            keys=base_keys + _UV_OPTIONAL_KEYS + layer_optical_keys + optical_keys,
-        )
     require_keys(
         bundle,
         base_keys + layer_optical_keys + optical_keys,
@@ -637,10 +600,6 @@ def main() -> None:
         total_rows,
         wavelengths,
     )
-    if not scene_mode and args.input.name == "uv_benchmark_fixture.npz":
-        bundle["ref_total"] = load_packaged_reference_total("uv_reference_outputs.npz")[
-            :wavelengths
-        ]
     if "stream_value" not in bundle:
         bundle["stream_value"] = np.array([1.0 / np.sqrt(3.0)], dtype=float)
     load_seconds = time.perf_counter() - load_start
@@ -653,10 +612,7 @@ def main() -> None:
     )
     bundle["ssa"] = bundle["omega"]
     bundle, geometry_seconds = _prepare_geometry(bundle)
-    bundle, optical_seconds, optical_mode = _prepare_optics(
-        bundle,
-        use_dumped_derived_optics=args.use_dumped_derived_optics,
-    )
+    bundle, optical_seconds, optical_mode = _prepare_optics(bundle)
 
     print_problem_header(
         title="UV full-spectrum benchmark",

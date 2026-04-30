@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 
-from .createprops import load_createprops_provider
 from .geocape import (
     gas_cross_sections_from_tables,
     geocape_select_wavelength_microns,
@@ -90,8 +89,8 @@ def build_benchmark_scene_inputs(
     if strict_runtime_inputs:
         _validate_strict_runtime_scene(scene)
     mode = _scene_mode(scene, kind)
-    provider = _load_opacity_provider(scene, scene_file.parent, kind=kind)
-    spectral = _spectral_arrays(scene, provider, scene_file.parent)
+    _reject_opacity_provider(scene)
+    spectral = _spectral_arrays(scene, scene_file.parent)
     aerosol_moment_wavelengths = spectral["wavelengths"]
     full_row_count = spectral["wavelengths"].shape[0]
     if spectral_limit is not None:
@@ -99,7 +98,6 @@ def build_benchmark_scene_inputs(
             raise ValueError("spectral_limit must be positive")
         stop = min(int(spectral_limit), full_row_count)
         spectral = _slice_matching_rows(spectral, full_row_count, stop)
-        provider = _slice_matching_rows(provider, full_row_count, stop)
     gases = _scene_gases(scene)
     gas_defaults = _scene_gas_vmr_defaults(scene, scene_file.parent)
     profile_gases = tuple(gas for gas in gases if gas.upper() not in gas_defaults)
@@ -121,12 +119,6 @@ def build_benchmark_scene_inputs(
         heights_km=profile.heights_km,
         surface_altitude_m=surface_altitude,
     )
-    provider_has_components = {
-        "absorption_tau",
-        "rayleigh_scattering_tau",
-        "aerosol_scattering_tau",
-    }.issubset(provider)
-
     bundle: dict[str, np.ndarray] = {
         "wavelengths": spectral["wavelengths"],
         "pressure_hpa": profile.pressure_hpa,
@@ -135,13 +127,12 @@ def build_benchmark_scene_inputs(
         "heights": opacity_profile.heights_km,
         "surface_altitude_m": np.array(surface_altitude, dtype=float),
     }
-    if not provider_has_components:
-        bundle["gas_absorption_tau"] = _gas_absorption_tau(
-            scene,
-            scene_file.parent,
-            spectral,
-            opacity_profile,
-        )
+    bundle["gas_absorption_tau"] = _gas_absorption_tau(
+        scene,
+        scene_file.parent,
+        spectral,
+        opacity_profile,
+    )
     for key in (
         "wavenumber_cm_inv",
         "wavenumber_band_cm_inv",
@@ -152,7 +143,6 @@ def build_benchmark_scene_inputs(
         if key in spectral:
             bundle[key] = spectral[key]
 
-    _add_provider_arrays(bundle, provider)
     _add_surface_arrays(
         bundle,
         scene,
@@ -320,11 +310,7 @@ def _scene_gases(scene: dict[str, Any]) -> tuple[str, ...]:
 
 def _validate_strict_runtime_scene(scene: dict[str, Any]) -> None:
     opacity = _section(scene, "opacity")
-    if opacity.get("provider") is not None:
-        raise ValueError(
-            "strict scene mode must not use opacity.provider; use profile, "
-            "opacity.gas_cross_sections.table3d, and aerosol table specs"
-        )
+    _reject_opacity_provider(scene)
     gas_cfg = opacity.get("gas_cross_sections")
     if isinstance(gas_cfg, dict) and "hitran" in gas_cfg:
         raise ValueError(
@@ -333,6 +319,14 @@ def _validate_strict_runtime_scene(scene: dict[str, Any]) -> None:
         )
     if _scene_gases(scene) and not (isinstance(gas_cfg, dict) and "table3d" in gas_cfg):
         raise ValueError("strict scene mode requires opacity.gas_cross_sections.table3d")
+
+
+def _reject_opacity_provider(scene: dict[str, Any]) -> None:
+    if _section(scene, "opacity").get("provider") is not None:
+        raise ValueError(
+            "opacity.provider is no longer supported; use profile, "
+            "opacity.gas_cross_sections.table3d, and aerosol table specs"
+        )
 
 
 def _scene_gas_vmr_defaults(scene: dict[str, Any], base_dir: Path) -> dict[str, np.ndarray]:
@@ -390,7 +384,6 @@ def _gas_default_column(value: np.ndarray, nlevel: int, gas: str) -> np.ndarray:
 
 def _spectral_arrays(
     scene: dict[str, Any],
-    provider: dict[str, np.ndarray],
     base_dir: Path,
 ) -> dict[str, np.ndarray]:
     spectral = _section(scene, "spectral")
@@ -440,12 +433,6 @@ def _spectral_arrays(
             "wavenumber_band_cm_inv": bands,
             "wavenumber_cm_inv": center,
         }
-    if "wavelengths" in provider:
-        arrays = {"wavelengths": np.asarray(provider["wavelengths"], dtype=float)}
-        for key in ("wavenumber_cm_inv", "wavenumber_band_cm_inv", "wavelength_microns"):
-            if key in provider:
-                arrays[key] = np.asarray(provider[key], dtype=float)
-        return arrays
     raise ValueError("scene spectral section must define wavelengths or wavenumbers")
 
 
@@ -641,35 +628,6 @@ def _solar_flux_factor(
     return _broadcast_spectral(value, nspec, "flux_factor", base_dir, source_nspec=source_nspec)
 
 
-def _load_opacity_provider(
-    scene: dict[str, Any],
-    base_dir: Path,
-    *,
-    kind: str,
-) -> dict[str, np.ndarray]:
-    provider = _section(scene, "opacity").get("provider")
-    if provider is None:
-        return {}
-    if not isinstance(provider, dict):
-        raise ValueError("opacity.provider must be a mapping")
-    if str(provider.get("kind", "fortran_createprops")).lower() != "fortran_createprops":
-        raise ValueError("opacity.provider.kind must be fortran_createprops")
-    if "path" not in provider:
-        raise ValueError("opacity.provider requires path")
-    return load_createprops_provider(_resolve_path(provider["path"], base_dir), kind=kind)
-
-
-def _add_provider_arrays(
-    bundle: dict[str, np.ndarray],
-    provider: dict[str, np.ndarray],
-) -> None:
-    for key, value in provider.items():
-        if key in {"wavelengths", "wavenumber_cm_inv", "wavenumber_band_cm_inv"} and key in bundle:
-            _assert_matching_array(key, bundle[key], value)
-            continue
-        bundle[key] = value
-
-
 def _add_aerosol_arrays(
     bundle: dict[str, np.ndarray],
     scene: dict[str, Any],
@@ -849,13 +807,6 @@ def _resolve_path(path: str | Path, base_dir: Path) -> Path:
     return candidate if candidate.is_absolute() else base_dir / candidate
 
 
-def _assert_matching_array(name: str, left: np.ndarray, right: np.ndarray) -> None:
-    left_arr = np.asarray(left, dtype=float)
-    right_arr = np.asarray(right, dtype=float)
-    if left_arr.shape != right_arr.shape or not np.allclose(left_arr, right_arr):
-        raise ValueError(f"scene {name} does not match opacity.provider {name}")
-
-
 def _spectral_1d(value: Any, base_dir: Path, name: str) -> np.ndarray:
     if isinstance(value, dict) and {"start", "step", "count"}.issubset(value):
         count = int(value["count"])
@@ -899,11 +850,14 @@ def _top_to_bottom(
     gas_vmr: np.ndarray,
     heights: np.ndarray | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
-    if np.all(np.diff(pressure) < 0.0):
+    pressure_step = np.diff(pressure)
+    if np.all(pressure_step < 0.0):
         pressure = pressure[::-1]
         temperature = temperature[::-1]
         gas_vmr = gas_vmr[::-1]
         heights = None if heights is None else heights[::-1]
+    elif not np.all(pressure_step > 0.0):
+        raise ValueError("profile pressure must be strictly monotonic")
     return pressure, temperature, gas_vmr, heights
 
 

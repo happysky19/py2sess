@@ -7,11 +7,13 @@ import unittest
 import numpy as np
 
 from py2sess.optical.geocape import (
+    _interp_indices,
     gas_cross_section_from_table,
     load_geocape_aerosol_loadings,
     load_geocape_aerosol_tables,
 )
-from py2sess.optical.scene_io import build_benchmark_scene_inputs
+from py2sess.optical.scene import _interp_aerosol_table
+from py2sess.optical.scene_io import _top_to_bottom, build_benchmark_scene_inputs
 
 
 class GeocapeInputTests(unittest.TestCase):
@@ -60,6 +62,25 @@ class GeocapeInputTests(unittest.TestCase):
         np.testing.assert_allclose(tables.bulk_iops[:, 1, 0], [0.30, 0.03])
         np.testing.assert_allclose(tables.moments[0, :, 0], [1.0, 0.3, 0.03])
         np.testing.assert_allclose(tables.moments[1, :, 0], [1.0, 0.4, 0.04])
+
+    def test_aerosol_interpolation_accepts_table_endpoints(self) -> None:
+        grid = np.array([0.3, 0.4, 0.5], dtype=float)
+        values = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]], dtype=float)
+
+        np.testing.assert_allclose(
+            _interp_aerosol_table(np.array([0.3, 0.5]), grid, values),
+            np.array([[1.0, 10.0], [3.0, 30.0]], dtype=float),
+        )
+        self.assertEqual(_interp_indices(grid, 0.3), (0, 0, 1.0, 0.0))
+        self.assertEqual(_interp_indices(grid, 0.5), (2, 2, 1.0, 0.0))
+
+    def test_profile_pressure_order_must_be_strictly_monotonic(self) -> None:
+        pressure = np.array([1000.0, 900.0, 900.0], dtype=float)
+        temperature = np.array([290.0, 280.0, 270.0], dtype=float)
+        gas = np.ones((3, 1), dtype=float)
+
+        with self.assertRaisesRegex(ValueError, "strictly monotonic"):
+            _top_to_bottom(pressure=pressure, temperature=temperature, gas_vmr=gas, heights=None)
 
     def test_scene_builder_accepts_raw_geocape_table_specs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

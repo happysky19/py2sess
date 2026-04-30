@@ -31,6 +31,8 @@ def rayleigh_bodhaine(
         raise ValueError("wavelengths_nm must be finite")
     if np.any(wavelengths <= 0.0):
         raise ValueError("wavelengths_nm must be positive")
+    if np.any(wavelengths <= 160.0):
+        raise ValueError("wavelengths_nm must be greater than 160 nm for Bodhaine Rayleigh")
     if not np.isfinite(co2_ppmv) or co2_ppmv < 0.0:
         raise ValueError("co2_ppmv must be finite and nonnegative")
 
@@ -52,7 +54,8 @@ def rayleigh_bodhaine(
 
     nmol = 2.546899e19
     cons = 24.0 * np.pi**3
-    co2 = 1.0e-6 * co2_ppmv
+    co2_fraction = 1.0e-6 * co2_ppmv
+    co2_percent = 1.0e-4 * co2_ppmv
 
     wav_angstrom = wavelengths * 10.0
     lambda_microns = 1.0e-4 * wav_angstrom
@@ -61,7 +64,7 @@ def rayleigh_bodhaine(
 
     n300m1 = s1_a + s1_b / (s1_c - inv_lambda_um2) + s1_d / (s1_e - inv_lambda_um2)
     n300m1 = n300m1 * 1.0e-8
-    nco2m1 = n300m1 * (1.0 + s2_a * (co2 - 0.0003))
+    nco2m1 = n300m1 * (1.0 + s2_a * (co2_fraction - 0.0003))
     nco2 = nco2m1 + 1.0
     nco2sq = nco2 * nco2
 
@@ -70,8 +73,8 @@ def rayleigh_bodhaine(
 
     farg = 1.0
     fco2 = 1.15
-    mair = mn2 + mo2 + marg + co2
-    fair = (mn2 * fn2 + mo2 * fo2 + marg * farg + co2 * fco2) / mair
+    mair = mn2 + mo2 + marg + co2_percent
+    fair = (mn2 * fn2 + mo2 * fo2 + marg * farg + co2_percent * fco2) / mair
     depol = 6.0 * (fair - 1.0) / (3.0 + 7.0 * fair)
 
     nsqm1 = nco2sq - 1.0

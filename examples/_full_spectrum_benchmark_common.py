@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from collections.abc import Collection
 from dataclasses import dataclass
-from importlib.resources import as_file, files
 from pathlib import Path
 import time
 
@@ -64,62 +63,15 @@ class BenchmarkRow:
         return self.wavelengths / self.rt_seconds
 
 
-def input_store_kind(path: Path) -> str:
-    if path.is_dir():
-        return "array-directory"
-    return "npz"
-
-
-def input_keys(path: Path) -> set[str]:
-    if path.is_dir():
-        return {entry.stem for entry in path.glob("*.npy") if entry.is_file()}
-    with np.load(path) as data:
-        return set(data.files)
-
-
-def load_input_arrays(path: Path, keys: tuple[str, ...] | None = None) -> dict[str, np.ndarray]:
-    """Loads selected benchmark input arrays.
-
-    Directory inputs store one ``.npy`` file per array and are opened with
-    memory mapping. Legacy ``.npz`` inputs are still read into memory.
-    """
-    if path.is_dir():
-        names = (
-            sorted(input_keys(path))
-            if keys is None
-            else [key for key in keys if (path / f"{key}.npy").is_file()]
-        )
-        return {key: np.load(path / f"{key}.npy", mmap_mode="r") for key in names}
-    with np.load(path) as data:
-        names = data.files if keys is None else [key for key in keys if key in data.files]
-        return {key: np.array(data[key]) for key in names}
-
-
-def load_packaged_reference_total(name: str) -> np.ndarray:
-    resource = files("py2sess.data.benchmark").joinpath(name)
-    with as_file(resource) as path, np.load(path) as data:
-        if set(data.files) != {"ref_2s", "ref_fo", "ref_total"}:
-            raise ValueError(f"{name} must contain only reference outputs")
-        return np.asarray(data["ref_total"], dtype=float)
-
-
-def require_directory_input_store(path: Path, *, label: str) -> None:
-    if not path.is_dir():
-        raise ValueError(
-            f"{label} strict generated-input mode requires an array-directory input store, "
-            "not a legacy .npz bundle"
-        )
-
-
 def add_common_benchmark_arguments(
     parser: argparse.ArgumentParser,
     *,
-    input_help: str,
     torch_bvp_choices: tuple[str, ...] = ("auto", "block"),
 ) -> None:
-    parser.add_argument("input", type=Path, nargs="?", help=input_help)
-    parser.add_argument("--profile", type=Path, help="Atmospheric profile text file.")
-    parser.add_argument("--scene", type=Path, help="Benchmark scene YAML file.")
+    parser.add_argument(
+        "--profile", type=Path, required=True, help="Atmospheric profile text file."
+    )
+    parser.add_argument("--scene", type=Path, required=True, help="Benchmark scene YAML file.")
     parser.add_argument("--backend", choices=["numpy", "torch", "both"], default="both")
     parser.add_argument("--limit", type=int, default=None, help="Optional spectral-row limit.")
     parser.add_argument(
@@ -136,56 +88,25 @@ def add_common_benchmark_arguments(
         help="Benchmark the public forward profile path instead of endpoint-only output.",
     )
     parser.add_argument(
-        "--use-dumped-derived-optics",
-        action="store_true",
-        help="Use stored optical preprocessing outputs instead of Python preprocessing.",
-    )
-    parser.add_argument(
         "--require-python-generated-inputs",
         action="store_true",
-        help="Fail instead of falling back to direct or dumped derived RT inputs.",
+        help="Fail if the scene would use direct HITRAN instead of a saved gas table.",
     )
-
-
-def validate_scene_input_args(
-    parser: argparse.ArgumentParser,
-    args: argparse.Namespace,
-    *,
-    forbidden_scene_flags: tuple[tuple[str, str], ...] = (),
-) -> bool:
-    scene_mode = args.profile is not None or args.scene is not None
-    if scene_mode and (args.profile is None or args.scene is None):
-        parser.error("--profile and --scene must be passed together")
-    if scene_mode and args.input is not None:
-        parser.error("pass either a runtime input store or --profile/--scene, not both")
-    if not scene_mode and args.input is None:
-        parser.error("input store or --profile/--scene is required")
-    for attr, flag in forbidden_scene_flags:
-        if scene_mode and getattr(args, attr):
-            parser.error(f"{flag} is not valid with --profile/--scene")
-    return scene_mode
 
 
 def benchmark_input_source(
     args: argparse.Namespace,
     *,
     kind: str,
-    label: str,
-    scene_mode: bool,
 ) -> tuple[dict[str, np.ndarray] | None, set[str], Path, str]:
-    if scene_mode:
-        bundle = build_benchmark_scene_inputs(
-            kind=kind,
-            profile_path=args.profile,
-            scene_path=args.scene,
-            spectral_limit=args.limit,
-            strict_runtime_inputs=args.require_python_generated_inputs,
-        )
-        return bundle, set(bundle), args.scene, "profile+scene"
-
-    if args.require_python_generated_inputs:
-        require_directory_input_store(args.input, label=label)
-    return None, input_keys(args.input), args.input, input_store_kind(args.input)
+    bundle = build_benchmark_scene_inputs(
+        kind=kind,
+        profile_path=args.profile,
+        scene_path=args.scene,
+        spectral_limit=args.limit,
+        strict_runtime_inputs=args.require_python_generated_inputs,
+    )
+    return bundle, set(bundle), args.scene, "profile+scene"
 
 
 def select_layer_optical_keys(
@@ -253,20 +174,13 @@ def select_phase_optical_keys(
     available: set[str],
     *,
     label: str,
-    use_dumped_derived_optics: bool,
     layer_optical_generates_fractions: bool,
     layer_optical_from_scene: bool,
     require_python_generated_inputs: bool,
     required_fraction_keys: tuple[str, ...],
-    dumped_keys: tuple[str, ...],
     aerosol_interp_key: str,
     aerosol_coordinate_keys: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
-    if require_python_generated_inputs and use_dumped_derived_optics:
-        raise ValueError(
-            f"{label} strict generated-input mode cannot be combined with "
-            "--use-dumped-derived-optics"
-        )
     if layer_optical_from_scene:
         required_physical = ("aerosol_moments",)
     elif layer_optical_generates_fractions:
@@ -274,20 +188,17 @@ def select_phase_optical_keys(
     else:
         required_physical = required_fraction_keys
 
-    if not use_dumped_derived_optics and set(required_physical).issubset(available):
+    if set(required_physical).issubset(available):
         keys = list(required_physical)
         if aerosol_interp_key in available:
             keys.append(aerosol_interp_key)
         else:
             keys.extend(key for key in aerosol_coordinate_keys if key in available)
         return tuple(keys)
-    if require_python_generated_inputs:
-        missing = ", ".join(key for key in required_physical if key not in available)
-        raise ValueError(
-            f"{label} strict generated-input mode requires physical phase inputs"
-            + (f": {missing}" if missing else "")
-        )
-    return dumped_keys
+    missing = ", ".join(key for key in required_physical if key not in available)
+    raise ValueError(
+        f"{label} benchmark requires physical phase inputs" + (f": {missing}" if missing else "")
+    )
 
 
 def prepare_layer_optical_properties(
@@ -401,7 +312,7 @@ def require_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...], *, label:
     missing = [key for key in keys if key not in bundle]
     if missing:
         missing_text = ", ".join(missing)
-        raise KeyError(f"{label} input store is missing required arrays: {missing_text}")
+        raise KeyError(f"{label} scene is missing required arrays: {missing_text}")
 
 
 def public_bvp_solver(engine: str) -> str:
