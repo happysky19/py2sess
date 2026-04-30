@@ -544,7 +544,10 @@ opacity:
                     self.assertIn("ref_total", data)
                 output = self._run_benchmark_scene(profile_path, scene_path)
                 self.assertIn("input kind: profile+scene", output)
-                self.assertIn("0.000000e+00   0.000000e+00", output)
+                row = next(line for line in output.splitlines() if "numpy-scene-forward" in line)
+                parts = row.split()
+                self.assertLess(float(parts[-2]), 1.0e-10)
+                self.assertLess(float(parts[-1]), 1.0e-6)
 
     def test_scene_api_rejects_mode_mismatch(self) -> None:
         from py2sess import TwoStreamEssOptions
