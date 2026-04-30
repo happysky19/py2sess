@@ -43,6 +43,6 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
           PYTHONPATH: src
         run: |
-          python examples/run_uv_reference_case.py
-          python examples/run_tir_reference_case.py
+          python examples/benchmark_scene_full_spectrum.py --profile benchmarks/uv_profile1/profile.csv --scene benchmarks/uv_profile1/scene.yaml --backend numpy --require-python-generated-inputs
+          python examples/benchmark_scene_full_spectrum.py --profile benchmarks/tir_profile1/profile.csv --scene benchmarks/tir_profile1/scene.yaml --backend numpy --require-python-generated-inputs
           python examples/build_thermal_source_from_temperature.py
