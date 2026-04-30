@@ -87,10 +87,10 @@ def build_benchmark_scene_inputs(
     """Build benchmark runtime inputs from profile text and scene YAML."""
     scene_file = Path(scene_path)
     scene = load_scene_yaml(scene_file)
+    _reject_opacity_provider(scene)
     if strict_runtime_inputs:
         _validate_strict_runtime_scene(scene)
     mode = _scene_mode(scene, kind)
-    _reject_opacity_provider(scene)
     spectral = _spectral_arrays(scene, scene_file.parent)
     aerosol_moment_wavelengths = spectral["wavelengths"]
     full_row_count = spectral["wavelengths"].shape[0]
@@ -317,7 +317,6 @@ def _scene_gases(scene: dict[str, Any]) -> tuple[str, ...]:
 
 def _validate_strict_runtime_scene(scene: dict[str, Any]) -> None:
     opacity = _section(scene, "opacity")
-    _reject_opacity_provider(scene)
     gas_cfg = opacity.get("gas_cross_sections")
     if isinstance(gas_cfg, dict) and "hitran" in gas_cfg:
         raise ValueError(

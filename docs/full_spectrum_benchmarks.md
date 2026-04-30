@@ -50,23 +50,17 @@ NumPy FO/2S split timing. The default benchmark reports the public
 
 ## Inputs
 
-Strict scene mode rejects precomputed RT arrays. Gas absorption should come from
-NetCDF tables:
+Strict scene mode uses profile/scene inputs and rejects direct HITRAN runtime
+opacity. Gas absorption should come from a saved NetCDF table:
 
 ```yaml
 opacity:
   gas_cross_sections:
     table3d: {path: gas_xsec.nc}
-  aerosol:
-    loadings:
-      kind: geocape_files
-      paths: [...]
-    ssprops:
-      path: SSprops
 ```
 
-Public benchmark aerosol inputs can keep profile-dependent loading in the
-profile CSV and reusable aerosol optics in one NetCDF:
+Aerosol inputs keep profile-dependent loading in the profile CSV and reusable
+optical properties in one NetCDF:
 
 ```csv
 pressure_hpa,temperature_k,height_km,O3,dust_loading,smoke_loading
@@ -82,23 +76,12 @@ opacity:
       smoke_loading: smoke
 ```
 
-`aerosol_loading` is dimensionless in these benchmark files. The NetCDF
+`*_loading` columns are dimensionless in these benchmark files. The NetCDF
 `bulk_extinction` and `bulk_scattering` variables use units
 `optical_depth_per_unit_loading`, so py2sess computes
 `aerosol_tau[wave, layer] = sum_type loading[layer, type] * bulk[wave, type]`.
 If loading is supplied on profile levels, py2sess averages adjacent levels to
 layers.
-
-GEOCAPE UV scenes can also point to raw source tables:
-
-```yaml
-surface:
-  albedo:
-    geocape_emissivity: {path: Surface_Data/Emissivity_1.asc}
-solar:
-  flux_factor:
-    geocape_solar_spectrum: {path: newkur.dat, scale: 1.0e4}
-```
 
 Create an exact local table for one profile:
 
