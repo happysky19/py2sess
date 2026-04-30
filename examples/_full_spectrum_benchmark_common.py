@@ -43,7 +43,9 @@ def add_common_benchmark_arguments(
     parser.add_argument(
         "--chunk-size", type=int, default=None, help="Optional chunk size override."
     )
-    parser.add_argument("--numpy-bvp-engine", choices=["auto", "block"], default="auto")
+    parser.add_argument(
+        "--numpy-bvp-engine", choices=["auto", "block", "pentadiagonal"], default="auto"
+    )
     parser.add_argument("--torch-bvp-engine", choices=torch_bvp_choices, default="auto")
     parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
     parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
@@ -61,11 +63,13 @@ def add_common_benchmark_arguments(
 
 
 def public_bvp_solver(engine: str) -> str:
+    if engine == "auto":
+        return "auto"
     if engine == "block":
         return "banded"
     if engine == "pentadiagonal":
         return "pentadiag"
-    return "scipy"
+    return engine
 
 
 def slice_spectral_rows(

@@ -177,6 +177,24 @@ class ThermalSourceTests(unittest.TestCase):
         self.assertTrue(bool(torch.all(level_temperature.grad > 0.0)))
         self.assertGreater(float(surface_temperature.grad), 0.0)
 
+    def test_torch_profile_builder_validate_uses_tensor_context(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        from py2sess import thermal_source_from_temperature_profile_torch
+
+        wavenumber = torch.tensor([700.0, 800.0], dtype=torch.float64)
+        source = thermal_source_from_temperature_profile_torch(
+            [220.0, 230.0, 240.0],
+            280.0,
+            wavenumber_cm_inv=wavenumber,
+            validate=True,
+        )
+
+        self.assertEqual(source.planck.dtype, torch.float64)
+        self.assertEqual(source.surface_planck.dtype, torch.float64)
+
 
 if __name__ == "__main__":
     unittest.main()

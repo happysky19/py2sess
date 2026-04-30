@@ -439,6 +439,7 @@ def _hydrostatic_heights_km(
 ) -> np.ndarray:
     heights = np.empty_like(pressure_hpa, dtype=float)
     heights[-1] = surface_altitude_m / 1000.0
+    # Hydrostatic trapezoid constant: g * dry-air molar mass / R, with km conversion.
     ccon = -9.81 * 28.9 / 8314.0 * 500.0
     for n in range(pressure_hpa.size - 1, 0, -1):
         avit = 1.0 / temperature_k[n - 1] + 1.0 / temperature_k[n]

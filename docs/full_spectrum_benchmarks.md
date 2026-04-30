@@ -90,6 +90,11 @@ PYTHONPATH=src python3 scripts/create_hitran_opacity_table.py gas_xsec.nc \
   --profile profile.txt --scene scene.yaml
 ```
 
+HITRAN table generation currently supports `fwhm=0` only. Gaussian
+convolution is not implemented. Saved gas tables use linear interpolation in
+wavelength/wavenumber, pressure, and temperature, so the table grid must be
+dense enough for the intended accuracy.
+
 ## Current Convergence
 
 Local 1-thread clean scene-input runs against the packaged reference outputs:

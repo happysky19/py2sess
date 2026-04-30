@@ -30,6 +30,7 @@ are needed; profile arrays use the final axis for TOA-to-BOA levels.
 | `plane_parallel` | Use plane-parallel geometry instead of spherical geometry | scalar | `False` | `DO_PLANE_PARALLEL` |
 | `delta_scaling` | Apply delta-M scaling in the 2S core | scalar | `True` | `DO_D2S_SCALING` |
 | `brdf_surface` | Enable explicit BRDF coefficients | scalar | `False` | `DO_BRDF_SURFACE` |
+| `bvp_solver` | Thermal 2S boundary-value solver: `auto`, `scipy`, `banded`, or `pentadiag` | scalar | `auto` | BVP solver selector |
 | `tau` | Layer optical thickness | `(..., nlyr)` | required | `DELTAU_INPUT` |
 | `ssa` | Single-scattering albedo | `(..., nlyr)` | required | `OMEGA_INPUT` |
 | `g` | Asymmetry factor | `(..., nlyr)` | required | `ASYMM_INPUT` |
@@ -61,8 +62,13 @@ are needed; profile arrays use the final axis for TOA-to-BOA levels.
   is passed explicitly.
 - Solar and thermal source handling are mode-exclusive. A single `TwoStreamEss`
   call does not combine direct solar and Planck thermal sources.
+- `bvp_solver="auto"` uses the optimized batch dispatch for batched thermal
+  runs and the banded scalar path for scalar thermal runs. Use explicit values
+  only for debugging or parity checks.
 - Direct HITRAN line-by-line opacity is for limited validation/offline table
   generation. Full-spectrum runtime should use saved gas cross-section tables.
+- The high-level scene entry point is `load_scene(profile=..., config=...)`;
+  it builds the same public `forward()` inputs listed above.
 
 ## Result Names
 
