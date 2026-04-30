@@ -13,7 +13,6 @@ from .bvp_batch_torch import (
     solve_solar_observation_bvp_batch_torch,
     solve_solar_observation_block_bvp_batch_torch,
     solve_solar_observation_dense_bvp_batch_torch,
-    solve_solar_observation_numpy_bvp_batch_torch,
 )
 from ..optical.delta_m_torch import delta_m_scale_optical_properties_torch
 from .taylor_torch import taylor_series_1_torch
@@ -46,17 +45,6 @@ def _as_tensor(value, *, dtype, device):
 def _needs_autograd_safe_bvp(*values) -> bool:
     """Returns true when the 2S BVP solve must preserve optical-property gradients."""
     return bool(torch.is_grad_enabled() and any(value.requires_grad for value in values))
-
-
-def _can_use_numpy_bvp_bridge(
-    *, bvp_engine: str, device, dtype, tau, omega, asymm, scaling, albedo, flux
-) -> bool:
-    return (
-        bvp_engine == "auto"
-        and device.type == "cpu"
-        and dtype == torch.float64
-        and not _needs_autograd_safe_bvp(tau, omega, asymm, scaling, albedo, flux)
-    )
 
 
 def _taylor_series_2_vectorized_torch(
@@ -627,19 +615,7 @@ def solve_solar_obs_batch_torch(
         else:
             direct_beam = torch.zeros_like(albedo_t)
             bvp_albedo = torch.zeros_like(albedo_t)
-        if _can_use_numpy_bvp_bridge(
-            bvp_engine=bvp_engine_for_call,
-            device=device,
-            dtype=dtype,
-            tau=tau_t,
-            omega=omega_t,
-            asymm=asymm_t,
-            scaling=scaling_t,
-            albedo=albedo_t,
-            flux=flux_t,
-        ):
-            solve_bvp = solve_solar_observation_numpy_bvp_batch_torch
-        elif bvp_engine_for_call == "pentadiagonal":
+        if bvp_engine_for_call == "pentadiagonal":
             solve_bvp = solve_solar_observation_bvp_batch_torch
         elif bvp_engine_for_call == "block":
             solve_bvp = solve_solar_observation_block_bvp_batch_torch
