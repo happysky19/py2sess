@@ -524,6 +524,28 @@ opacity:
         self.assertIn("numpy-components", output)
         self.assertNotIn("numpy-components", output.split("numpy-scene-forward", maxsplit=1)[0])
 
+    def test_public_benchmark_scenes_run_in_strict_mode(self) -> None:
+        cases = (
+            (
+                ROOT / "benchmarks" / "uv_profile1" / "profile.csv",
+                ROOT / "benchmarks" / "uv_profile1" / "scene.yaml",
+                ROOT / "benchmarks" / "uv_profile1" / "reference_outputs.npz",
+            ),
+            (
+                ROOT / "benchmarks" / "tir_profile1" / "profile.csv",
+                ROOT / "benchmarks" / "tir_profile1" / "scene.yaml",
+                ROOT / "benchmarks" / "tir_profile1" / "reference_outputs.npz",
+            ),
+        )
+        for profile_path, scene_path, reference_path in cases:
+            with self.subTest(scene=scene_path.parent.name):
+                with np.load(reference_path) as data:
+                    self.assertIn("wavelength_nm", data)
+                    self.assertIn("ref_total", data)
+                output = self._run_benchmark_scene(profile_path, scene_path)
+                self.assertIn("input kind: profile+scene", output)
+                self.assertIn("0.000000e+00   0.000000e+00", output)
+
     def test_scene_api_rejects_mode_mismatch(self) -> None:
         from py2sess import TwoStreamEssOptions
 

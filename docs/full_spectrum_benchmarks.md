@@ -12,16 +12,26 @@ checks.
 
 ## Run
 
+Checked-in compact benchmark cases:
+
 ```bash
 PYTHONPATH=src python3 examples/benchmark_scene_full_spectrum.py \
-  --profile profile_uv.txt --scene uv_scene.yaml --require-python-generated-inputs
+  --profile benchmarks/uv_profile1/profile.csv \
+  --scene benchmarks/uv_profile1/scene.yaml \
+  --backend numpy \
+  --require-python-generated-inputs
 
 PYTHONPATH=src python3 examples/benchmark_scene_full_spectrum.py \
-  --profile profile_tir.txt --scene tir_scene.yaml --require-python-generated-inputs
+  --profile benchmarks/tir_profile1/profile.csv \
+  --scene benchmarks/tir_profile1/scene.yaml \
+  --backend numpy \
+  --require-python-generated-inputs
 ```
 
 The command reads `mode: solar` or `mode: thermal` from the scene YAML, so UV
-and TIR use the same API.
+and TIR use the same API. These compact public cases are meant for GitHub
+tests and examples. Local full-spectrum GEOCAPE runs can use the same command
+with the larger ignored profile/scene/table files under `benchmark_bundles/`.
 
 Thread sweep:
 
