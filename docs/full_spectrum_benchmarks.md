@@ -1,18 +1,17 @@
 # Full-Spectrum Benchmarks
 
-Preferred runtime path:
+Runtime path:
 
 ```text
 profile text + scene YAML -> Python preprocessing -> py2sess RT inputs -> RT solve
 ```
 
-Full runs use saved gas cross-section NetCDF tables and aerosol table specs.
-Direct HITRAN line processing is only for offline table generation or small
-checks.
+Use saved gas cross-section NetCDF tables for full runs. Direct HITRAN line
+processing is for offline table generation or small checks.
 
 ## Run
 
-Checked-in compact benchmark cases:
+Compact checked-in cases:
 
 ```bash
 PYTHONPATH=src python3 examples/benchmark_scene_full_spectrum.py \
@@ -28,30 +27,28 @@ PYTHONPATH=src python3 examples/benchmark_scene_full_spectrum.py \
   --require-python-generated-inputs
 ```
 
-The command reads `mode: solar` or `mode: thermal` from the scene YAML, so UV
-and TIR use the same API. These compact public cases are meant for GitHub
-tests and examples. Local full-spectrum GEOCAPE runs can use the same command
-with the larger ignored profile/scene/table files under `benchmark_bundles/`.
+The command reads `mode: solar` or `mode: thermal` from the scene YAML. UV and
+TIR use the same API.
 
-Thread sweep:
+Local full-spectrum thread sweep:
 
 ```bash
 UV_PROFILE=profile_uv.txt UV_SCENE=uv_scene.yaml \
 TIR_PROFILE=profile_tir.txt TIR_SCENE=tir_scene.yaml \
+BACKEND=numpy THREADS="1 2 4" \
 scripts/run_full_benchmark_threads.sh
 ```
 
-Useful environment variables: `BACKEND=numpy|torch|both`, `THREADS="1 2 4"`,
-`LIMIT=1000`, `CHUNK_SIZE=...`, `OUTPUT_LEVELS=1`.
+Useful environment variables: `BACKEND=numpy|torch|both`, `THREADS`,
+`LIMIT`, `CHUNK_SIZE`, and `OUTPUT_LEVELS=1`.
 
-Add `--component-timing` to the benchmark command when you need diagnostic
-NumPy FO/2S split timing. The default benchmark reports the public
-`scene.forward()` RT time.
+Add `--component-timing` only when you need diagnostic NumPy FO/2S split
+timing. The default benchmark reports public `scene.forward()` RT time.
 
 ## Inputs
 
-Strict scene mode uses profile/scene inputs and rejects direct HITRAN runtime
-opacity. Gas absorption should come from a saved NetCDF table:
+Strict mode uses profile/scene inputs and rejects direct HITRAN runtime
+opacity:
 
 ```yaml
 opacity:
@@ -59,8 +56,8 @@ opacity:
     table3d: {path: gas_xsec.nc}
 ```
 
-Aerosol inputs keep profile-dependent loading in the profile CSV and reusable
-optical properties in one NetCDF:
+Profile-dependent aerosol loading belongs in the profile CSV. Reusable aerosol
+optical properties belong in one NetCDF:
 
 ```csv
 pressure_hpa,temperature_k,height_km,O3,dust_loading,smoke_loading
@@ -80,8 +77,7 @@ opacity:
 `bulk_extinction` and `bulk_scattering` variables use units
 `optical_depth_per_unit_loading`, so py2sess computes
 `aerosol_tau[wave, layer] = sum_type loading[layer, type] * bulk[wave, type]`.
-If loading is supplied on profile levels, py2sess averages adjacent levels to
-layers.
+Profile-level loading is averaged to layers.
 
 Create an exact local table for one profile:
 
@@ -94,6 +90,11 @@ HITRAN table generation currently supports `fwhm=0` only. Gaussian
 convolution is not implemented. Saved gas tables use linear interpolation in
 wavelength/wavenumber, pressure, and temperature, so the table grid must be
 dense enough for the intended accuracy.
+
+Reference output files are validation only. They must carry the spectral grid
+used for comparison. UV references should include `wavelength_nm`; TIR
+references should include `wavelength_nm` and may also include
+`wavenumber_cm_inv` or `wavenumber_band_cm_inv`.
 
 ## Current Convergence
 
@@ -108,13 +109,8 @@ The UV comparison includes the corrected Python Rayleigh CO2 unit handling.
 The original Fortran benchmark has a small Rayleigh optical-depth bug there, so
 the remaining UV difference is expected and minor.
 
-Reference output files must carry the spectral grid used for comparison. UV
-references should include `wavelength_nm`; TIR references should include
-`wavelength_nm` and may also include `wavenumber_cm_inv` or
-`wavenumber_band_cm_inv`. The scene loader checks the reference spectral grid
-before comparing radiances.
-
-## Timing
+Timing is machine-dependent. For speed changes, compare `rt (s)` before and
+after on the same inputs, backend, dtype, chunk size, and thread count.
 
 Use `rt (s)` for solver speed claims. `load (s)`, `layer optical properties`,
 `optical preprocessing`, `thermal source`, and any geometry setup are
