@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .backend import _load_torch
+from .bvp_batch import _solve_bvp_batch
 
 torch = _load_torch()
 
@@ -54,6 +55,14 @@ def _move_value_for_solve(value, *, solve_device, solve_dtype):
             for item in value
         )
     return _move_tensor_for_solve(value, solve_device=solve_device, solve_dtype=solve_dtype)
+
+
+def _numpy_value(value):
+    if isinstance(value, tuple):
+        return tuple(_numpy_value(item) for item in value)
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
+    return value
 
 
 def _slice_bvp_batch_value(value, bad):
@@ -437,6 +446,42 @@ def solve_solar_observation_bvp_batch_torch(
         eigentrans=eigentrans,
         wupper=wupper,
         wlower=wlower,
+    )
+
+
+def solve_solar_observation_numpy_bvp_batch_torch(
+    *,
+    albedo,
+    direct_beam,
+    surface_factor,
+    stream_value,
+    xpos1,
+    xpos2,
+    eigentrans,
+    wupper,
+    wlower,
+    solve_device=None,
+    solve_dtype=None,
+):
+    """Use the NumPy/Numba BVP solver for torch CPU inference."""
+    del solve_device, solve_dtype
+    output_device = xpos1.device
+    output_dtype = xpos1.dtype
+    lcon, mcon = _solve_bvp_batch(
+        albedo=_numpy_value(albedo),
+        bottom_source=_numpy_value(direct_beam),
+        surface_factor=surface_factor,
+        stream_value=stream_value,
+        xpos1=_numpy_value(xpos1),
+        xpos2=_numpy_value(xpos2),
+        eigentrans=_numpy_value(eigentrans),
+        wupper=_numpy_value(wupper),
+        wlower=_numpy_value(wlower),
+        bvp_engine="auto",
+    )
+    return (
+        torch.as_tensor(lcon, dtype=output_dtype, device=output_device),
+        torch.as_tensor(mcon, dtype=output_dtype, device=output_device),
     )
 
 
