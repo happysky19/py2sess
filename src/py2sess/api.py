@@ -2456,7 +2456,9 @@ class TwoStreamEss:
         torch = _load_torch()
         if torch is None:  # pragma: no cover
             raise RuntimeError("backend='torch' requires torch to be installed")
-        return torch.set_grad_enabled(self.options.torch_enable_grad)
+        if self.options.torch_enable_grad:
+            return torch.set_grad_enabled(True)
+        return torch.inference_mode()
 
     def _fo_result_kwargs(self, fo_result) -> dict[str, Any]:
         """Builds result fields derived from the FO solver output.

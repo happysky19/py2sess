@@ -451,7 +451,7 @@ def benchmark_torch(
     device = torch.device(torch_device_name)
     dtype = {"float64": torch.float64, "float32": torch.float32}[torch_dtype_name]
     torch.set_num_threads(torch_threads)
-    with torch.no_grad():
+    with torch.inference_mode():
         probe = torch.ones(16, dtype=dtype, device=device)
         _ = (probe + 1.0).sum().item()
 
@@ -467,7 +467,7 @@ def benchmark_torch(
     for start in range(0, wavelengths, chunk_size):
         stop = min(start + chunk_size, wavelengths)
         chunk = slice_spectral_rows(bundle, _TIR_CHUNK_KEYS, start, stop)
-        with torch.no_grad():
+        with torch.inference_mode():
             tau_t = _as_tensor(chunk["tau"], dtype=dtype, device=device)
             omega_t = _as_tensor(chunk["ssa"], dtype=dtype, device=device)
             asymm_t = _as_tensor(chunk["g"], dtype=dtype, device=device)
@@ -562,35 +562,36 @@ def benchmark_torch_forward(
     wall_start = time.perf_counter()
     dtype = {"float64": torch.float64, "float32": torch.float32}[torch_dtype_name]
     device = torch.device(torch_device_name)
-    with torch.no_grad():
+    with torch.inference_mode():
         probe = torch.ones(16, dtype=dtype, device=device)
         _ = (probe + 1.0).sum().item()
-    solver = TwoStreamEss(
-        TwoStreamEssOptions(
-            nlyr=int(bundle["tau"].shape[1]),
-            mode="thermal",
-            backend="torch",
-            bvp_solver=public_bvp_solver(torch_bvp_engine),
-            torch_device=torch_device_name,
-            torch_dtype=torch_dtype_name,
-            torch_enable_grad=False,
-            output_levels=output_levels,
+    with torch.inference_mode():
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=int(bundle["tau"].shape[1]),
+                mode="thermal",
+                backend="torch",
+                bvp_solver=public_bvp_solver(torch_bvp_engine),
+                torch_device=torch_device_name,
+                torch_dtype=torch_dtype_name,
+                torch_enable_grad=False,
+                output_levels=output_levels,
+            )
         )
-    )
-    result = solver.forward(
-        tau=bundle["tau"],
-        ssa=bundle["ssa"],
-        g=bundle["g"],
-        z=bundle["heights"],
-        angles=scalar_value(bundle["user_angle"]),
-        stream=0.5,
-        albedo=bundle["albedo"],
-        delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
-        planck=bundle["planck"],
-        surface_planck=bundle["surface_planck"],
-        emissivity=bundle["emissivity"],
-        include_fo=True,
-    )
+        result = solver.forward(
+            tau=bundle["tau"],
+            ssa=bundle["ssa"],
+            g=bundle["g"],
+            z=bundle["heights"],
+            angles=scalar_value(bundle["user_angle"]),
+            stream=0.5,
+            albedo=bundle["albedo"],
+            delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
+            planck=bundle["planck"],
+            surface_planck=bundle["surface_planck"],
+            emissivity=bundle["emissivity"],
+            include_fo=True,
+        )
     total = result.radiance_total.detach().cpu().numpy()
     checksum = float(np.sum(total))
     wall_seconds = time.perf_counter() - wall_start
