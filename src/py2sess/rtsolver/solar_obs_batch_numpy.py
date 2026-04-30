@@ -19,6 +19,9 @@ MAX_TAU_PATH = 88.0
 MAX_TAU_QPATH = 88.0
 TAYLOR_SMALL = 1.0e-3
 TAYLOR_ORDER = 3
+_NUMBA_QSPREP_MIN_BATCH = 4096
+_QSPREP_KERNEL = None
+_QSPREP_IMPORT_FAILED = False
 
 
 class _QsPrepBatch(TypedDict):
@@ -41,15 +44,6 @@ def _layer_cutoff_mask(nlayers: int, layer_pis_cutoff: np.ndarray) -> np.ndarray
     return np.arange(1, nlayers + 1, dtype=int)[np.newaxis, :] <= layer_pis_cutoff[:, np.newaxis]
 
 
-def _exp_cutoff(values: np.ndarray, cutoff: float) -> np.ndarray:
-    """Returns ``exp(-values)`` with the Fortran optical-depth cutoff."""
-    if values.size == 0 or float(np.max(values)) <= cutoff:
-        return np.exp(-values)
-    result = np.exp(-values)
-    result[values > cutoff] = 0.0
-    return result
-
-
 def _exp_cutoff_owned(values: np.ndarray, cutoff: float) -> np.ndarray:
     """Applies the cutoff exponential in place."""
     if values.size == 0 or float(np.max(values)) <= cutoff:
@@ -61,10 +55,134 @@ def _exp_cutoff_owned(values: np.ndarray, cutoff: float) -> np.ndarray:
     return values
 
 
+def _get_qsprep_kernel():
+    global _QSPREP_KERNEL, _QSPREP_IMPORT_FAILED
+    if _QSPREP_KERNEL is not None:
+        return _QSPREP_KERNEL
+    if _QSPREP_IMPORT_FAILED:
+        return None
+    try:  # pragma: no cover - optional acceleration dependency
+        from numba import njit, prange
+
+        @njit(parallel=True, cache=True)
+        def _kernel(delta_tau, chapman, user_secant):
+            batch, nlayers = delta_tau.shape
+            layer_pis_cutoff = np.empty(batch, np.int64)
+            initial_trans = np.empty((batch, nlayers), np.float64)
+            average_secant = np.empty((batch, nlayers), np.float64)
+            trans_solar_beam = np.empty(batch, np.float64)
+            t_delt_mubar = np.empty((batch, nlayers), np.float64)
+            itrans_userm = np.empty((batch, nlayers), np.float64)
+            t_delt_userm = np.empty((batch, nlayers), np.float64)
+            sigma_p = np.empty((batch, nlayers), np.float64)
+            emult_up = np.empty((batch, nlayers), np.float64)
+
+            for row in prange(batch):
+                previous_tauslant = 0.0
+                cutoff = nlayers
+                for layer in range(nlayers):
+                    tauslant = 0.0
+                    for k in range(layer + 1):
+                        tauslant += delta_tau[row, k] * chapman[k, layer]
+                    delta_tauslant = tauslant - previous_tauslant
+                    user_path = delta_tau[row, layer] * user_secant
+                    t_user = 0.0 if user_path > MAX_TAU_PATH else np.exp(-user_path)
+                    if layer + 1 <= cutoff:
+                        average = delta_tauslant / delta_tau[row, layer]
+                        initial = 1.0 if layer == 0 else np.exp(-previous_tauslant)
+                        t_mubar = 0.0 if delta_tauslant > MAX_TAU_PATH else np.exp(-delta_tauslant)
+                        sigma = average + user_secant
+                        itrans = initial * user_secant
+
+                        initial_trans[row, layer] = initial
+                        average_secant[row, layer] = average
+                        t_delt_mubar[row, layer] = t_mubar
+                        itrans_userm[row, layer] = itrans
+                        t_delt_userm[row, layer] = t_user
+                        sigma_p[row, layer] = sigma
+                        emult_up[row, layer] = itrans * (1.0 - t_mubar * t_user) / sigma
+
+                        if tauslant > MAX_TAU_PATH:
+                            cutoff = layer + 1
+                    else:
+                        initial_trans[row, layer] = 0.0
+                        average_secant[row, layer] = 0.0
+                        t_delt_mubar[row, layer] = 0.0
+                        itrans_userm[row, layer] = 0.0
+                        t_delt_userm[row, layer] = t_user
+                        sigma_p[row, layer] = 0.0
+                        emult_up[row, layer] = 0.0
+                    previous_tauslant = tauslant
+                trans_solar_beam[row] = (
+                    0.0 if previous_tauslant > MAX_TAU_PATH else np.exp(-previous_tauslant)
+                )
+                layer_pis_cutoff[row] = cutoff
+
+            return (
+                layer_pis_cutoff,
+                initial_trans,
+                average_secant,
+                trans_solar_beam,
+                t_delt_mubar,
+                itrans_userm,
+                t_delt_userm,
+                sigma_p,
+                emult_up,
+            )
+
+        _QSPREP_KERNEL = _kernel
+        return _QSPREP_KERNEL
+    except Exception:  # pragma: no cover - optional acceleration dependency
+        _QSPREP_IMPORT_FAILED = True
+        return None
+
+
+def _qsprep_obs_batch_numba(
+    delta_tau: np.ndarray, chapman: np.ndarray, user_secant: float
+) -> _QsPrepBatch | None:
+    if delta_tau.shape[0] < _NUMBA_QSPREP_MIN_BATCH:
+        return None
+    kernel = _get_qsprep_kernel()
+    if kernel is None:
+        return None
+    (
+        layer_pis_cutoff,
+        initial_trans,
+        average_secant,
+        trans_solar_beam,
+        t_delt_mubar,
+        itrans_userm,
+        t_delt_userm,
+        sigma_p,
+        emult_up,
+    ) = kernel(
+        np.ascontiguousarray(delta_tau, dtype=np.float64),
+        np.ascontiguousarray(chapman, dtype=np.float64),
+        float(user_secant),
+    )
+    batch, nlayers = delta_tau.shape
+    all_active = bool(np.all(layer_pis_cutoff == nlayers))
+    return {
+        "layer_pis_cutoff": layer_pis_cutoff,
+        "initial_trans": initial_trans,
+        "average_secant": average_secant,
+        "trans_solar_beam": trans_solar_beam,
+        "t_delt_mubar": t_delt_mubar,
+        "itrans_userm": itrans_userm,
+        "t_delt_userm": t_delt_userm,
+        "sigma_p": sigma_p,
+        "emult_up": emult_up,
+        "all_active": all_active,
+    }
+
+
 def _qsprep_obs_batch(
     delta_tau: np.ndarray, chapman: np.ndarray, user_secant: float
 ) -> _QsPrepBatch:
     """Builds spherical solar transmittance and multiplier inputs in batch."""
+    accelerated = _qsprep_obs_batch_numba(delta_tau, chapman, user_secant)
+    if accelerated is not None:
+        return accelerated
     batch, nlayers = delta_tau.shape
     tauslant_all = delta_tau @ chapman
     delta_tauslant = np.empty_like(tauslant_all)
@@ -288,9 +406,8 @@ def _gbeam_solution_batch(
         return gamma_m, gamma_p, aterm, bterm, (wupper0, wupper1), (wlower0, wlower1)
 
     active = np.arange(1, nlayers + 1, dtype=int)[np.newaxis, :] <= layer_pis_cutoff[:, np.newaxis]
-    zero = np.zeros((batch, nlayers), dtype=float)
-    gamma_p = np.where(active, gamma_p_raw, zero)
-    gamma_m = np.where(active, gamma_m_raw, zero)
+    gamma_p = np.where(active, gamma_p_raw, 0.0)
+    gamma_m = np.where(active, gamma_m_raw, 0.0)
 
     zdel = eigentrans
     wdel = t_delt_mubar
@@ -307,8 +424,8 @@ def _gbeam_solution_batch(
             wdel[near],
             1.0,
         )
-    cfunc = np.where(active, cfunc, zero)
-    dfunc = np.where(active, (1.0 - zwdel) / gamma_p_raw, zero)
+    cfunc = np.where(active, cfunc, 0.0)
+    dfunc = np.where(active, (1.0 - zwdel) / gamma_p_raw, 0.0)
 
     scaled_flux = f1[:, np.newaxis]
     if fourier == 0:
@@ -320,8 +437,8 @@ def _gbeam_solution_batch(
     else:
         aterm_raw = (px0x * omega_asymm_3) * scaled_flux / norm_saved
         bterm_raw = aterm_raw
-    aterm = np.where(active, aterm_raw, zero)
-    bterm = np.where(active, bterm_raw, zero)
+    aterm = np.where(active, aterm_raw, 0.0)
+    bterm = np.where(active, bterm_raw, 0.0)
 
     gfunc_dn = cfunc * aterm * initial_trans
     gfunc_up = dfunc * bterm * initial_trans
@@ -421,7 +538,6 @@ def _upuser_intensity_batch(
         )
 
     active = _layer_cutoff_mask(nlay, layer_pis_cutoff)
-    zero = np.zeros_like(gamma_m)
     with np.errstate(divide="ignore", invalid="ignore"):
         sd = initial_trans * hmult_2
         sd -= emult_up
@@ -448,7 +564,9 @@ def _upuser_intensity_batch(
     sd *= u_xpos
     su *= bterm
     su *= u_xneg
-    layersource += np.where(active, sd + su, zero)
+    sd += su
+    sd[~active] = 0.0
+    layersource += sd
     if return_profile:
         return fluxmult * accumulate_upwelling_profile_numpy(
             layer_source=layersource,

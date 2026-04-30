@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from ..rtsolver.backend import _load_torch
@@ -144,6 +145,15 @@ class RetrievalDiagnostics:
     hessian_condition: Any
 
 
+class OptimalEstimationStatus(str, Enum):
+    """Reason an optimal-estimation solve stopped."""
+
+    STEP_TOLERANCE = "step_tolerance"
+    COST_TOLERANCE = "cost_tolerance"
+    MAX_ITER = "max_iter"
+    LINE_SEARCH_FAILED = "line_search_failed"
+
+
 @dataclass(frozen=True)
 class OptimalEstimationResult:
     """Result from ``solve_optimal_estimation``."""
@@ -158,6 +168,7 @@ class OptimalEstimationResult:
     dfs: Any
     singular_values: Any
     hessian_condition: Any
+    status: OptimalEstimationStatus
     converged: bool
     n_iterations: int
     state_names: tuple[str, ...] = ()
@@ -274,7 +285,7 @@ def solve_optimal_estimation(
     )
     cost = float(_oe_cost(problem.forward_model, state, observation, prior, se, sa).detach().cpu())
     cost_history = [cost]
-    converged = False
+    status = OptimalEstimationStatus.MAX_ITER
     accepted_iterations = 0
     eye_state = torch.eye(prior.numel(), dtype=prior.dtype, device=prior.device)
 
@@ -292,7 +303,7 @@ def solve_optimal_estimation(
         if float(torch.linalg.norm(step).detach().cpu()) <= step_tolerance * (
             1.0 + float(torch.linalg.norm(state).detach().cpu())
         ):
-            converged = True
+            status = OptimalEstimationStatus.STEP_TOLERANCE
             break
 
         accepted = False
@@ -311,14 +322,21 @@ def solve_optimal_estimation(
                 cost = candidate_cost
                 cost_history.append(cost)
                 if cost_drop <= cost_tolerance * (1.0 + abs(cost_history[-2])):
-                    converged = True
+                    status = OptimalEstimationStatus.COST_TOLERANCE
                 break
-        if not accepted or converged:
+        if not accepted:
+            status = OptimalEstimationStatus.LINE_SEARCH_FAILED
+            break
+        if status == OptimalEstimationStatus.COST_TOLERANCE:
             break
 
     final_radiance, final_jacobian = evaluate_jacobian(problem.forward_model, state)
     diagnostics = retrieval_diagnostics(final_jacobian, se, sa)
     residual = observation - final_radiance
+    converged = status in {
+        OptimalEstimationStatus.STEP_TOLERANCE,
+        OptimalEstimationStatus.COST_TOLERANCE,
+    }
     return OptimalEstimationResult(
         state=state.detach(),
         radiance=final_radiance.detach(),
@@ -330,6 +348,7 @@ def solve_optimal_estimation(
         dfs=diagnostics.dfs,
         singular_values=diagnostics.singular_values,
         hessian_condition=diagnostics.hessian_condition,
+        status=status,
         converged=converged,
         n_iterations=accepted_iterations,
         state_names=problem.state_names,

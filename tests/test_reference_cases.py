@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from importlib.resources import as_file, files
+import os
 import unittest
 
 import numpy as np
 
 from py2sess import (
+    thermal_source_from_temperature_profile,
     TwoStreamEss,
     TwoStreamEssOptions,
     load_tir_benchmark_case,
@@ -44,6 +47,15 @@ def _generated_tir_phase(case):
     )
 
 
+def _generated_tir_source(case):
+    source = thermal_source_from_temperature_profile(
+        case.level_temperature_k,
+        case.surface_temperature_k,
+        wavenumber_band_cm_inv=case.wavenumber_band_cm_inv,
+    )
+    return np.asarray(source.planck, dtype=float), np.asarray(source.surface_planck, dtype=float)
+
+
 def _generated_uv_phase(case):
     phase = build_two_stream_phase_inputs(
         ssa=case.omega,
@@ -67,6 +79,24 @@ def _generated_uv_phase(case):
 
 
 class ReferenceCaseTests(unittest.TestCase):
+    def test_packaged_reference_outputs_are_separate_files(self) -> None:
+        for input_name, reference_name in (
+            ("uv_benchmark_fixture.npz", "uv_reference_outputs.npz"),
+            ("tir_benchmark_fixture.npz", "tir_reference_outputs.npz"),
+        ):
+            with self.subTest(reference=reference_name):
+                with (
+                    as_file(files("py2sess.data.benchmark").joinpath(input_name)) as input_path,
+                    as_file(
+                        files("py2sess.data.benchmark").joinpath(reference_name)
+                    ) as reference_path,
+                    np.load(input_path) as input_data,
+                    np.load(reference_path) as reference_data,
+                ):
+                    self.assertEqual(set(reference_data.files), {"ref_2s", "ref_fo", "ref_total"})
+                    for key in reference_data.files:
+                        np.testing.assert_array_equal(reference_data[key], input_data[key])
+
     def test_tir_fixture_matches_saved_components_and_total(self) -> None:
         case = load_tir_benchmark_case()
         result = solve_thermal_batch_numpy(
@@ -87,16 +117,23 @@ class ReferenceCaseTests(unittest.TestCase):
         _assert_max_rel(self, result.fo_total_up_toa, case.ref_fo, 1.0e-5)
         _assert_max_rel(self, total, case.ref_total, 5.0e-4)
 
+    def test_generated_tir_source_matches_fixture(self) -> None:
+        case = load_tir_benchmark_case()
+        planck, surface_planck = _generated_tir_source(case)
+        np.testing.assert_allclose(planck, case.thermal_bb_input, rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(surface_planck, case.surfbb, rtol=1.0e-12, atol=1.0e-12)
+
     def test_public_forward_tir_fixture_matches_batch_kernel(self) -> None:
         case = load_tir_benchmark_case()
         phase = _generated_tir_phase(case)
+        planck, surface_planck = _generated_tir_source(case)
         kernel = solve_thermal_batch_numpy(
             tau_arr=case.tau_arr,
             omega_arr=case.omega_arr,
             asymm_arr=case.asymm_arr,
             d2s_scaling=case.d2s_scaling,
-            thermal_bb_input=case.thermal_bb_input,
-            surfbb=case.surfbb,
+            thermal_bb_input=planck,
+            surfbb=surface_planck,
             albedo=case.albedo,
             emissivity=case.emissivity,
             heights=case.heights,
@@ -113,8 +150,8 @@ class ReferenceCaseTests(unittest.TestCase):
             stream=case.stream_value,
             albedo=case.albedo,
             delta_m_truncation_factor=phase.delta_m_truncation_factor,
-            planck=case.thermal_bb_input,
-            surface_planck=case.surfbb,
+            planck=planck,
+            surface_planck=surface_planck,
             emissivity=case.emissivity,
             include_fo=True,
         )
@@ -129,13 +166,14 @@ class ReferenceCaseTests(unittest.TestCase):
 
         case = load_tir_benchmark_case()
         phase = _generated_tir_phase(case)
+        planck, surface_planck = _generated_tir_source(case)
         kernel = solve_thermal_batch_torch(
             tau_arr=case.tau_arr,
             omega_arr=case.omega_arr,
             asymm_arr=case.asymm_arr,
             d2s_scaling=case.d2s_scaling,
-            thermal_bb_input=case.thermal_bb_input,
-            surfbb=case.surfbb,
+            thermal_bb_input=planck,
+            surfbb=surface_planck,
             albedo=case.albedo,
             emissivity=case.emissivity,
             heights=case.heights,
@@ -160,8 +198,8 @@ class ReferenceCaseTests(unittest.TestCase):
             stream=case.stream_value,
             albedo=case.albedo,
             delta_m_truncation_factor=phase.delta_m_truncation_factor,
-            planck=case.thermal_bb_input,
-            surface_planck=case.surfbb,
+            planck=planck,
+            surface_planck=surface_planck,
             emissivity=case.emissivity,
             include_fo=True,
         )
@@ -459,6 +497,52 @@ class ReferenceCaseTests(unittest.TestCase):
             )
         )
         np.testing.assert_allclose(torch_fo, numpy_fo, rtol=1.0e-12, atol=1.0e-12)
+
+    def test_uv_fo_numba_path_matches_vectorized_path(self) -> None:
+        case = load_uv_benchmark_case()
+        repeats = 4096
+        fo_precomputed = fo_solar_obs_batch_precompute(
+            user_obsgeom=case.user_obsgeom,
+            heights=case.heights,
+            earth_radius=6371.0,
+            nfine=3,
+        )
+
+        def tiled(value):
+            arr = np.asarray(value)
+            if arr.ndim == 1:
+                return np.tile(arr, repeats)
+            return np.tile(arr, (repeats, 1))
+
+        previous = os.environ.get("PY2SESS_NUMBA_FO")
+        try:
+            os.environ["PY2SESS_NUMBA_FO"] = "off"
+            vectorized = solve_fo_solar_obs_eps_batch_numpy(
+                tau=tiled(case.tau),
+                omega=tiled(case.omega),
+                scaling=tiled(case.scaling),
+                albedo=tiled(case.albedo),
+                flux_factor=tiled(case.flux_factor),
+                exact_scatter=tiled(case.fo_exact_scatter),
+                precomputed=fo_precomputed,
+            )
+            os.environ["PY2SESS_NUMBA_FO"] = "on"
+            accelerated = solve_fo_solar_obs_eps_batch_numpy(
+                tau=tiled(case.tau),
+                omega=tiled(case.omega),
+                scaling=tiled(case.scaling),
+                albedo=tiled(case.albedo),
+                flux_factor=tiled(case.flux_factor),
+                exact_scatter=tiled(case.fo_exact_scatter),
+                precomputed=fo_precomputed,
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("PY2SESS_NUMBA_FO", None)
+            else:
+                os.environ["PY2SESS_NUMBA_FO"] = previous
+
+        np.testing.assert_allclose(accelerated, vectorized, rtol=1.0e-12, atol=1.0e-14)
 
     def test_uv_torch_fo_batch_supports_autograd(self) -> None:
         if not has_torch():

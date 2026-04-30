@@ -252,6 +252,9 @@ class TwoStreamEssResult:
     fo_thermal_surface_boa: np.ndarray | None = None
     fo_thermal_total_up_boa: np.ndarray | None = None
     fo_thermal_atmos_dn_boa: np.ndarray | None = None
+    fo_intensity_total_profile: np.ndarray | None = None
+    fo_thermal_total_up_profile: np.ndarray | None = None
+    output_levels: bool = False
     lattice_counts: tuple[int, int, int] | None = None
     lattice_axes: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
@@ -280,6 +283,38 @@ class TwoStreamEssResult:
         if self.fo_thermal_total_up_toa is not None:
             return self.intensity_toa + self.fo_thermal_total_up_toa
         return self.intensity_toa
+
+    @property
+    def radiance_profile_2s(self) -> np.ndarray | None:
+        """Two-stream upwelling level radiance profile when requested."""
+        return self.radlevel_up if self.output_levels else None
+
+    @property
+    def radiance_profile_fo(self) -> np.ndarray | None:
+        """First-order upwelling level radiance profile when available."""
+        if not self.output_levels:
+            return None
+        if self.fo_intensity_total_profile is not None:
+            return self.fo_intensity_total_profile
+        return self.fo_thermal_total_up_profile
+
+    @property
+    def radiance_profile_total(self) -> np.ndarray | None:
+        """Best available total upwelling level radiance profile."""
+        profile_2s = self.radiance_profile_2s
+        if profile_2s is None:
+            return None
+        profile_fo = self.radiance_profile_fo
+        if profile_fo is None and (
+            self.fo_intensity_total is not None or self.fo_thermal_total_up_toa is not None
+        ):
+            return None
+        return profile_2s if profile_fo is None else profile_2s + profile_fo
+
+    @property
+    def radiance_profile(self) -> np.ndarray | None:
+        """Preferred public level radiance profile when available."""
+        return self.radiance_profile_total
 
     def _lattice_shape(self) -> tuple[int, int, int]:
         """Returns the expected lattice shape for reshape helpers."""
@@ -592,6 +627,10 @@ class TwoStreamEss:
         """Raises a public error when a batched input contains non-finite values."""
         if not np.all(np.isfinite(value)):
             raise ValueError(f"{name} must be finite")
+        if name == "tau" and np.any(value < 0.0):
+            raise ValueError("tau must be nonnegative")
+        if name == "g" and np.any((value <= -1.0) | (value >= 1.0)):
+            raise ValueError("g must satisfy -1 < g < 1")
 
     @staticmethod
     def _broadcast_batch_layers(
@@ -639,6 +678,15 @@ class TwoStreamEss:
         return np.ascontiguousarray(broadcast.reshape(-1), dtype=float)
 
     @staticmethod
+    def _thermal_angles(value: Any) -> np.ndarray:
+        angles = np.asarray(to_numpy(value), dtype=float).reshape(-1)
+        if angles.size == 0:
+            raise ValueError("angles are required for mode='thermal'")
+        if np.any((angles < 0.0) | (angles >= 90.0)):
+            raise ValueError("thermal angles must satisfy 0 <= vza < 90")
+        return angles
+
+    @staticmethod
     def _require_finite_torch(name: str, value: Any) -> None:
         """Raises a public error when a torch batch input contains non-finite values."""
         from .rtsolver.backend import _load_torch
@@ -648,6 +696,10 @@ class TwoStreamEss:
             raise RuntimeError("backend='torch' requires torch to be installed")
         if not bool(torch.all(torch.isfinite(value)).item()):
             raise ValueError(f"{name} must be finite")
+        if name == "tau" and bool(torch.any(value < 0.0).item()):
+            raise ValueError("tau must be nonnegative")
+        if name == "g" and not bool(torch.all((value > -1.0) & (value < 1.0)).item()):
+            raise ValueError("g must satisfy -1 < g < 1")
 
     @staticmethod
     def _broadcast_batch_layers_torch(
@@ -792,10 +844,17 @@ class TwoStreamEss:
         return engine
 
     @staticmethod
-    def _solar_batch_chunk_size(n_rows: int, n_layers: int) -> int:
-        """Returns a memory-friendly chunk size for large solar endpoint batches."""
-        _ = n_layers
-        return min(n_rows, 30_000)
+    def _solar_batch_chunk_size(n_rows: int, n_layers: int, *, backend: str) -> int:
+        """Returns the same memory-friendly solar chunk size used by benchmarks."""
+        if n_rows <= 0:
+            return 1
+        row_floats = (48 if backend == "torch" else 40) * max(int(n_layers), 1) + 64
+        target_mib = 512 if backend == "torch" else 1400
+        target_bytes = target_mib * 1024 * 1024
+        granularity = 2000 if backend == "torch" else 1000
+        chunk = max(granularity, int(target_bytes // (8 * row_floats)))
+        chunk = min(n_rows, ((chunk + granularity - 1) // granularity) * granularity)
+        return max(1, chunk)
 
     @staticmethod
     def _thermal_batch_chunk_size(n_rows: int, n_layers: int, *, backend: str) -> int:
@@ -1012,7 +1071,7 @@ class TwoStreamEss:
         cosscat_by_geometry: list[np.ndarray] = []
         do_nadir_by_geometry: list[np.ndarray] = []
         n_rows = tau.shape[0]
-        chunk_size = self._solar_batch_chunk_size(n_rows, n_layers)
+        chunk_size = self._solar_batch_chunk_size(n_rows, n_layers, backend="numpy")
         scatter_input = fo_scatter_term
         if scatter_input is None:
             scatter_input = fo_scatter_term_henyey_greenstein(
@@ -1217,7 +1276,7 @@ class TwoStreamEss:
         cosscat_by_geometry = []
         do_nadir_by_geometry = []
         n_rows = int(tau.shape[0])
-        chunk_size = self._solar_batch_chunk_size(n_rows, n_layers)
+        chunk_size = self._solar_batch_chunk_size(n_rows, n_layers, backend="torch")
         with self._torch_grad_context():
             scatter_input = fo_scatter_term
             if scatter_input is None:
@@ -1512,7 +1571,7 @@ class TwoStreamEss:
             else:
                 chapman = geometry.chapman_factors[:, :, geom_index]
             n_rows = tau.shape[0]
-            chunk_size = self._solar_batch_chunk_size(n_rows, n_layers)
+            chunk_size = self._solar_batch_chunk_size(n_rows, n_layers, backend="numpy")
             two_stream_rows = np.empty(n_rows, dtype=float)
             fo_rows = np.empty(n_rows, dtype=float) if include_fo else None
             two_stream_profile_rows = (
@@ -1737,7 +1796,7 @@ class TwoStreamEss:
                 else:
                     chapman = geometry.chapman_factors[:, :, geom_index]
                 n_rows = int(tau.shape[0])
-                chunk_size = self._solar_batch_chunk_size(n_rows, n_layers)
+                chunk_size = self._solar_batch_chunk_size(n_rows, n_layers, backend="torch")
                 two_chunks = []
                 fo_chunks = []
                 two_profile_chunks = []
@@ -1904,11 +1963,7 @@ class TwoStreamEss:
             "emissivity", emissivity, batch_shape=batch_shape
         )
         self._require_finite("tau", tau)
-        angles = np.asarray(to_numpy(mapped["user_angles"]), dtype=float).reshape(-1)
-        if angles.size == 0:
-            raise ValueError("angles are required for mode='thermal'")
-        if np.any((angles < 0.0) | (angles > 90.0)):
-            raise ValueError("thermal angles must satisfy 0 <= vza <= 90")
+        angles = self._thermal_angles(mapped["user_angles"])
         want_profiles = self.options.output_levels
         two_stream_by_geometry: list[np.ndarray] = []
         fo_by_geometry: list[np.ndarray] = []
@@ -2123,11 +2178,7 @@ class TwoStreamEss:
             batch_shape=batch_shape,
         )
         self._require_finite_torch("tau", tau)
-        angles = np.asarray(to_numpy(mapped["user_angles"]), dtype=float).reshape(-1)
-        if angles.size == 0:
-            raise ValueError("angles are required for mode='thermal'")
-        if np.any((angles < 0.0) | (angles > 90.0)):
-            raise ValueError("thermal angles must satisfy 0 <= vza <= 90")
+        angles = self._thermal_angles(mapped["user_angles"])
         if include_fo and mapped["height_grid"] is None:
             raise ValueError("z is required for batched thermal include_fo=True")
         height_grid = (
@@ -2346,9 +2397,7 @@ class TwoStreamEss:
         if device.type == "mps" and not torch.backends.mps.is_available():
             raise ValueError(
                 "torch_device='mps' requested but MPS is not available in this process. "
-                "On macOS this can happen inside the Codex sandbox even when the same "
-                "Python interpreter sees MPS outside the sandbox; rerun the command outside "
-                "the sandbox/escalated environment, or use torch_device='cpu'."
+                "Use torch_device='cpu' or run in an environment where PyTorch exposes MPS."
             )
         return device
 
@@ -2407,7 +2456,9 @@ class TwoStreamEss:
         torch = _load_torch()
         if torch is None:  # pragma: no cover
             raise RuntimeError("backend='torch' requires torch to be installed")
-        return torch.set_grad_enabled(self.options.torch_enable_grad)
+        if self.options.torch_enable_grad:
+            return torch.set_grad_enabled(True)
+        return torch.inference_mode()
 
     def _fo_result_kwargs(self, fo_result) -> dict[str, Any]:
         """Builds result fields derived from the FO solver output.
@@ -2433,6 +2484,11 @@ class TwoStreamEss:
             "fo_intensity_db": None
             if not isinstance(fo_result, FoSolarObsResult)
             else fo_result.intensity_db,
+            "fo_intensity_total_profile": (
+                None
+                if not isinstance(fo_result, FoSolarObsResult)
+                else fo_result.intensity_total_profile
+            ),
             "fo_mu0": None if not isinstance(fo_result, FoSolarObsResult) else fo_result.mu0,
             "fo_mu1": None if fo_result is None else fo_result.mu1,
             "fo_cosscat": None
@@ -2475,6 +2531,11 @@ class TwoStreamEss:
                 None
                 if not isinstance(fo_result, FoThermalResult)
                 else fo_result.intensity_total_up_boa
+            ),
+            "fo_thermal_total_up_profile": (
+                None
+                if not isinstance(fo_result, FoThermalResult)
+                else fo_result.intensity_total_up_profile
             ),
             "fo_thermal_atmos_dn_boa": (
                 None
@@ -2815,6 +2876,7 @@ class TwoStreamEss:
             fluxes_boa=solved["fluxes_boa"],
             radlevel_up=solved["radlevel_up"],
             radlevel_dn=solved["radlevel_dn"],
+            output_levels=self.options.output_levels,
             lattice_counts=prepared.lattice_counts,
             lattice_axes=prepared.lattice_axes,
             **self._fo_result_kwargs(fo_result),

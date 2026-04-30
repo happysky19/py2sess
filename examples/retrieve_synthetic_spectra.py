@@ -235,7 +235,10 @@ def main() -> None:
     result = solve_optimal_estimation(problem, max_iter=10)
 
     print(f"case: {case.name}")
-    print(f"converged: {result.converged} iterations: {result.n_iterations}")
+    print(
+        f"status: {result.status.value} "
+        f"converged: {result.converged} iterations: {result.n_iterations}"
+    )
     print(f"cost: {result.cost_history[0]:.6e} -> {result.cost_history[-1]:.6e}")
     print(f"residual_norm: {float(torch.linalg.norm(result.residual)):.6e}")
     for name, truth_value, prior_value, fit_value in zip(

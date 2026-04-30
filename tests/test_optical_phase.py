@@ -8,7 +8,9 @@ from py2sess import load_tir_benchmark_case, load_uv_benchmark_case
 from py2sess.optical.phase import (
     aerosol_interp_fraction,
     build_solar_fo_scatter_term,
+    build_solar_phase_inputs_from_scattering_tau,
     build_two_stream_phase_inputs,
+    build_two_stream_phase_inputs_from_scattering_tau,
     ssa_from_optical_depth,
 )
 from py2sess.rtsolver.backend import has_torch
@@ -130,6 +132,72 @@ class OpticalPhaseFormulaTests(unittest.TestCase):
         )
         expected = phase_total * ssa[0] / (1.0 - phase.delta_m_truncation_factor[0] * ssa[0])
         np.testing.assert_allclose(scatter, expected[None, :])
+
+    def test_scattering_tau_phase_paths_match_fraction_path(self) -> None:
+        ssa = np.array([[0.5, 0.7]])
+        depol = np.array([0.2])
+        rayleigh_fraction = np.array([[0.25, 0.5]])
+        aerosol_fraction = np.array([[[0.5, 0.25], [0.2, 0.3]]])
+        scattering_tau = np.array([[0.4, 0.8]])
+        rayleigh_tau = rayleigh_fraction * scattering_tau
+        aerosol_tau = aerosol_fraction * scattering_tau[..., None]
+        aerosol_moments = np.zeros((2, 3, 2))
+        aerosol_moments[:, 0, :] = 1.0
+        aerosol_moments[0, 1, :] = [0.3, 0.6]
+        aerosol_moments[1, 1, :] = [0.5, 0.8]
+        aerosol_moments[0, 2, :] = [0.7, 0.2]
+        aerosol_moments[1, 2, :] = [0.9, 0.4]
+        fac = np.array([0.25])
+        angles = np.array([40.0, 10.0, 30.0])
+        fraction_phase = build_two_stream_phase_inputs(
+            ssa=ssa,
+            depol=depol,
+            rayleigh_fraction=rayleigh_fraction,
+            aerosol_fraction=aerosol_fraction,
+            aerosol_moments=aerosol_moments,
+            aerosol_interp_fraction=fac,
+        )
+        fraction_scatter = build_solar_fo_scatter_term(
+            ssa=ssa,
+            depol=depol,
+            rayleigh_fraction=rayleigh_fraction,
+            aerosol_fraction=aerosol_fraction,
+            aerosol_moments=aerosol_moments,
+            aerosol_interp_fraction=fac,
+            angles=angles,
+            delta_m_truncation_factor=fraction_phase.delta_m_truncation_factor,
+        )
+        scattering_phase = build_two_stream_phase_inputs_from_scattering_tau(
+            ssa=ssa,
+            depol=depol,
+            rayleigh_scattering_tau=rayleigh_tau,
+            aerosol_scattering_tau=aerosol_tau,
+            aerosol_moments=aerosol_moments,
+            aerosol_interp_fraction=fac,
+            scattering_tau=scattering_tau,
+        )
+        solar_phase = build_solar_phase_inputs_from_scattering_tau(
+            ssa=ssa,
+            depol=depol,
+            rayleigh_scattering_tau=rayleigh_tau,
+            aerosol_scattering_tau=aerosol_tau,
+            aerosol_moments=aerosol_moments,
+            aerosol_interp_fraction=fac,
+            angles=angles,
+            scattering_tau=scattering_tau,
+        )
+
+        np.testing.assert_allclose(scattering_phase.g, fraction_phase.g)
+        np.testing.assert_allclose(
+            scattering_phase.delta_m_truncation_factor,
+            fraction_phase.delta_m_truncation_factor,
+        )
+        np.testing.assert_allclose(solar_phase.g, fraction_phase.g)
+        np.testing.assert_allclose(
+            solar_phase.delta_m_truncation_factor,
+            fraction_phase.delta_m_truncation_factor,
+        )
+        np.testing.assert_allclose(solar_phase.fo_scatter_term, fraction_scatter)
 
     def test_phase_inputs_reject_nonphysical_fractions(self) -> None:
         ssa = np.array([[0.5, 0.7]])

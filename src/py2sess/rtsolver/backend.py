@@ -83,21 +83,6 @@ def _copy_if_readonly_numpy(value: Any) -> Any:
     return value
 
 
-def arrays_to_torch(solved: dict[str, np.ndarray], context: TorchContext | None) -> dict[str, Any]:
-    """Converts a dictionary of NumPy arrays to torch tensors."""
-    torch_module = _load_torch()
-    if torch_module is None:
-        raise RuntimeError("PyTorch backend requested but torch is not installed")
-    if context is None:
-        context = TorchContext(dtype=torch_module.float64, device=torch_module.device("cpu"))
-    return {
-        key: torch_module.as_tensor(
-            _copy_if_readonly_numpy(value), dtype=context.dtype, device=context.device
-        )
-        for key, value in solved.items()
-    }
-
-
 def value_to_torch(value: Any, context: TorchContext | None) -> Any:
     """Converts a single value to a torch tensor using ``context``."""
     torch_module = _load_torch()

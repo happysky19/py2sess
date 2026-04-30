@@ -1,52 +1,62 @@
-"""Benchmark a full-spectrum TIR bundle with NumPy and optional PyTorch."""
+"""Benchmark full-spectrum TIR input arrays with NumPy and optional PyTorch."""
 
 from __future__ import annotations
 
 import argparse
 import time
-from pathlib import Path
 
 import numpy as np
 
 from _full_spectrum_benchmark_common import (
     accuracy_summary,
+    add_common_benchmark_arguments,
     BenchmarkRow,
-    bundle_keys,
-    load_bundle,
+    benchmark_input_source,
+    load_input_arrays,
+    load_packaged_reference_total,
     looks_like_row_index,
     layer_optical_keys_are_components,
+    layer_optical_keys_are_scene,
+    print_preprocessing_summary,
     print_problem_header,
     prepare_layer_optical_properties,
     print_rows,
+    public_bvp_solver,
     recommended_chunk_size,
+    require_python_generated_layer_optical_inputs,
     require_keys,
     scalar_value,
     select_layer_optical_keys,
+    select_phase_optical_keys,
+    slice_spectral_rows,
+    trim_spectral_rows,
+    validate_scene_input_args,
 )
 from py2sess import (
     thermal_source_from_temperature_profile,
     TwoStreamEss,
     TwoStreamEssOptions,
 )
-from py2sess.optical.phase import aerosol_interp_fraction, build_two_stream_phase_inputs
+from py2sess.optical.phase import (
+    aerosol_interp_fraction,
+    build_two_stream_phase_inputs,
+    build_two_stream_phase_inputs_from_scattering_tau,
+)
 from py2sess.rtsolver import precompute_fo_thermal_geometry_numpy
 from py2sess.rtsolver.backend import has_torch
 from py2sess.rtsolver.thermal_batch_numpy import _fo_thermal_toa, _two_stream_thermal_toa
-
-
-def _public_bvp_solver(engine: str) -> str:
-    """Maps low-level benchmark BVP names to public option names."""
-    if engine == "block":
-        return "banded"
-    if engine == "pentadiagonal":
-        return "pentadiag"
-    return "scipy"
 
 
 _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS = (
     "depol",
     "rayleigh_fraction",
     "aerosol_fraction",
+    "aerosol_moments",
+)
+_TIR_COMPONENT_PHASE_KEYS = (
+    "depol",
+    "rayleigh_scattering_tau",
+    "aerosol_scattering_tau",
     "aerosol_moments",
 )
 
@@ -61,37 +71,41 @@ _TIR_BASE_KEYS = (
     "albedo",
 )
 
-_TIR_OPTIONAL_KEYS = ("stream_value", "ref_total", "emissivity")
+_TIR_OPTIONAL_KEYS = ("stream_value", "emissivity")
 
 _TIR_DIRECT_SOURCE_KEYS = ("thermal_bb_input", "surfbb")
 _TIR_TEMPERATURE_SOURCE_KEYS = ("level_temperature_k", "surface_temperature_k")
-_TIR_SOURCE_COORDINATE_KEYS = ("wavenumber_cm_inv", "wavelength_microns")
+_TIR_SOURCE_COORDINATE_KEYS = (
+    "wavenumber_band_cm_inv",
+    "wavenumber_cm_inv",
+    "wavelength_microns",
+)
+_TIR_AEROSOL_COORDINATE_KEYS = ("wavenumber_cm_inv", "wavelength_microns")
 
-
-def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
-    return all(key in bundle for key in keys)
-
-
-def _select_optical_keys(
-    available: set[str],
-    *,
-    use_dumped_derived_optics: bool,
-    layer_optical_from_components: bool,
-) -> tuple[str, ...]:
-    required_physical = (
-        ("depol", "aerosol_moments")
-        if layer_optical_from_components
-        else _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS
+_TIR_CHUNK_KEYS = (
+    "tau",
+    "ssa",
+    "g",
+    "delta_m_truncation_factor",
+    "planck",
+    "surface_planck",
+    "albedo",
+    "emissivity",
+)
+_TIR_LIMIT_KEYS = (
+    _TIR_BASE_KEYS
+    + _TIR_DIRECT_SOURCE_KEYS
+    + _TIR_SOURCE_COORDINATE_KEYS
+    + _TIR_DUMPED_OPTICS_KEYS
+    + (
+        "emissivity",
+        "surface_temperature_k",
+        "depol",
+        "rayleigh_fraction",
+        "aerosol_fraction",
+        "aerosol_interp_fraction",
     )
-    has_physical_optics = set(required_physical).issubset(available)
-    if not use_dumped_derived_optics and has_physical_optics:
-        keys = list(required_physical)
-        if _TIR_AEROSOL_INTERP_KEY in available:
-            keys.append(_TIR_AEROSOL_INTERP_KEY)
-        else:
-            keys.extend(key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available)
-        return tuple(keys)
-    return _TIR_DUMPED_OPTICS_KEYS
+)
 
 
 def _positive_coordinate(name: str, values: np.ndarray) -> np.ndarray:
@@ -133,19 +147,26 @@ def _select_source_keys(
     available: set[str],
     *,
     use_dumped_thermal_source: bool,
+    require_python_generated_inputs: bool = False,
 ) -> tuple[str, ...]:
     has_temperature = set(_TIR_TEMPERATURE_SOURCE_KEYS).issubset(available)
-    coordinates = tuple(key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available)
-    if not use_dumped_thermal_source and has_temperature and len(coordinates) >= 1:
-        return _TIR_TEMPERATURE_SOURCE_KEYS + coordinates
+    coordinate = next((key for key in _TIR_SOURCE_COORDINATE_KEYS if key in available), None)
+    if require_python_generated_inputs and use_dumped_thermal_source:
+        raise ValueError(
+            "TIR strict generated-input mode cannot be combined with --use-dumped-thermal-source"
+        )
+    if not use_dumped_thermal_source and has_temperature and coordinate is not None:
+        return _TIR_TEMPERATURE_SOURCE_KEYS + (coordinate,)
+    if require_python_generated_inputs:
+        missing = [key for key in _TIR_TEMPERATURE_SOURCE_KEYS if key not in available]
+        if coordinate is None:
+            missing.append("wavenumber_band_cm_inv, wavenumber_cm_inv, or wavelength_microns")
+        missing_text = ", ".join(missing)
+        raise ValueError(
+            "TIR strict generated-input mode requires temperature-based thermal source inputs"
+            + (f": {missing_text}" if missing_text else "")
+        )
     return _TIR_DIRECT_SOURCE_KEYS
-
-
-def _normalize_layer_inputs(bundle: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    prepared = dict(bundle)
-    prepared["tau"] = bundle["tau_arr"]
-    prepared["ssa"] = bundle["omega_arr"]
-    return prepared
 
 
 def _prepare_optics(
@@ -153,28 +174,41 @@ def _prepare_optics(
     *,
     use_dumped_derived_optics: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
-    if use_dumped_derived_optics or not _has_keys(bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS):
+    has_component_phase = all(key in bundle for key in _TIR_COMPONENT_PHASE_KEYS)
+    has_fraction_phase = all(key in bundle for key in _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS)
+    if use_dumped_derived_optics or not (has_component_phase or has_fraction_phase):
         require_keys(bundle, _TIR_DUMPED_OPTICS_KEYS, label="TIR dumped optical")
         prepared = dict(bundle)
         prepared["g"] = bundle["asymm_arr"]
         prepared["delta_m_truncation_factor"] = bundle["d2s_scaling"]
         mode = "dumped-derived"
-        if not use_dumped_derived_optics and not _has_keys(
-            bundle, _TIR_REQUIRED_PHYSICAL_OPTICS_KEYS
-        ):
+        if not use_dumped_derived_optics and not (has_component_phase or has_fraction_phase):
             mode = "dumped-derived (physical optical inputs unavailable)"
         return prepared, 0.0, mode
 
     start = time.perf_counter()
     fac, mode = _tir_aerosol_interp_fraction(bundle)
-    optics = build_two_stream_phase_inputs(
-        ssa=bundle["ssa"],
-        depol=bundle["depol"],
-        rayleigh_fraction=bundle["rayleigh_fraction"],
-        aerosol_fraction=bundle["aerosol_fraction"],
-        aerosol_moments=bundle["aerosol_moments"],
-        aerosol_interp_fraction=fac,
-    )
+    if has_component_phase:
+        optics = build_two_stream_phase_inputs_from_scattering_tau(
+            ssa=bundle["ssa"],
+            depol=bundle["depol"],
+            rayleigh_scattering_tau=bundle["rayleigh_scattering_tau"],
+            aerosol_scattering_tau=bundle["aerosol_scattering_tau"],
+            aerosol_moments=bundle["aerosol_moments"],
+            aerosol_interp_fraction=fac,
+            scattering_tau=bundle.get("_scattering_tau"),
+            validate_inputs=False,
+        )
+    else:
+        optics = build_two_stream_phase_inputs(
+            ssa=bundle["ssa"],
+            depol=bundle["depol"],
+            rayleigh_fraction=bundle["rayleigh_fraction"],
+            aerosol_fraction=bundle["aerosol_fraction"],
+            aerosol_moments=bundle["aerosol_moments"],
+            aerosol_interp_fraction=fac,
+            validate_inputs=False,
+        )
     prepared = dict(bundle)
     prepared[_TIR_AEROSOL_INTERP_KEY] = fac
     prepared["g"] = optics.g
@@ -188,13 +222,8 @@ def _prepare_thermal_source(
     use_dumped_thermal_source: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
     source_coordinates = [key for key in _TIR_SOURCE_COORDINATE_KEYS if key in bundle]
-    has_temperature = _has_keys(bundle, _TIR_TEMPERATURE_SOURCE_KEYS)
+    has_temperature = all(key in bundle for key in _TIR_TEMPERATURE_SOURCE_KEYS)
     if not use_dumped_thermal_source and has_temperature and source_coordinates:
-        if len(source_coordinates) != 1:
-            raise ValueError(
-                "temperature-based thermal source requires exactly one of "
-                "wavenumber_cm_inv or wavelength_microns"
-            )
         start = time.perf_counter()
         coordinate_name = source_coordinates[0]
         kwargs = {coordinate_name: bundle[coordinate_name]}
@@ -234,7 +263,7 @@ def _validate_thermal_source_shapes(bundle: dict[str, np.ndarray]) -> None:
 
 def _prepare_surface(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], str]:
     if "emissivity" in bundle:
-        return bundle, "bundle"
+        return bundle, "direct input"
     prepared = dict(bundle)
     prepared["emissivity"] = 1.0 - np.asarray(bundle["albedo"], dtype=float)
     return prepared, "1 - albedo"
@@ -244,6 +273,8 @@ def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarr
     start = time.perf_counter()
     heights = np.asarray(bundle["heights"], dtype=float)
     user_angle = scalar_value(bundle["user_angle"])
+    if not (0.0 <= user_angle < 90.0):
+        raise ValueError("thermal viewing zenith angle must satisfy 0 <= vza < 90")
     prepared = dict(bundle)
     prepared["fo_geometry"] = precompute_fo_thermal_geometry_numpy(
         heights=heights,
@@ -253,23 +284,6 @@ def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarr
     )
     prepared["user_stream"] = np.array([np.cos(np.deg2rad(user_angle))], dtype=float)
     return prepared, time.perf_counter() - start
-
-
-def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
-    """Returns one spectral chunk from a TIR benchmark bundle."""
-    chunk = {
-        "tau": bundle["tau"][start:stop],
-        "ssa": bundle["ssa"][start:stop],
-        "g": bundle["g"][start:stop],
-        "delta_m_truncation_factor": bundle["delta_m_truncation_factor"][start:stop],
-        "planck": bundle["planck"][start:stop],
-        "surface_planck": bundle["surface_planck"][start:stop],
-        "albedo": bundle["albedo"][start:stop],
-        "emissivity": bundle["emissivity"][start:stop],
-    }
-    if "ref_total" in bundle:
-        chunk["ref_total"] = bundle["ref_total"][start:stop]
-    return chunk
 
 
 def benchmark_numpy(
@@ -292,7 +306,7 @@ def benchmark_numpy(
     max_rel_diff_pct = None
     for start in range(0, wavelengths, chunk_size):
         stop = min(start + chunk_size, wavelengths)
-        chunk = _slice_rows(bundle, start, stop)
+        chunk = slice_spectral_rows(bundle, _TIR_CHUNK_KEYS, start, stop)
         t0 = time.perf_counter()
         two_stream = _two_stream_thermal_toa(
             tau=chunk["tau"],
@@ -367,7 +381,7 @@ def benchmark_numpy_forward(
         TwoStreamEssOptions(
             nlyr=int(bundle["tau"].shape[1]),
             mode="thermal",
-            bvp_solver=_public_bvp_solver(numpy_bvp_engine),
+            bvp_solver=public_bvp_solver(numpy_bvp_engine),
             output_levels=output_levels,
         )
     )
@@ -437,7 +451,7 @@ def benchmark_torch(
     device = torch.device(torch_device_name)
     dtype = {"float64": torch.float64, "float32": torch.float32}[torch_dtype_name]
     torch.set_num_threads(torch_threads)
-    with torch.no_grad():
+    with torch.inference_mode():
         probe = torch.ones(16, dtype=dtype, device=device)
         _ = (probe + 1.0).sum().item()
 
@@ -452,8 +466,8 @@ def benchmark_torch(
     max_rel_diff_pct = None
     for start in range(0, wavelengths, chunk_size):
         stop = min(start + chunk_size, wavelengths)
-        chunk = _slice_rows(bundle, start, stop)
-        with torch.no_grad():
+        chunk = slice_spectral_rows(bundle, _TIR_CHUNK_KEYS, start, stop)
+        with torch.inference_mode():
             tau_t = _as_tensor(chunk["tau"], dtype=dtype, device=device)
             omega_t = _as_tensor(chunk["ssa"], dtype=dtype, device=device)
             asymm_t = _as_tensor(chunk["g"], dtype=dtype, device=device)
@@ -548,35 +562,36 @@ def benchmark_torch_forward(
     wall_start = time.perf_counter()
     dtype = {"float64": torch.float64, "float32": torch.float32}[torch_dtype_name]
     device = torch.device(torch_device_name)
-    with torch.no_grad():
+    with torch.inference_mode():
         probe = torch.ones(16, dtype=dtype, device=device)
         _ = (probe + 1.0).sum().item()
-    solver = TwoStreamEss(
-        TwoStreamEssOptions(
-            nlyr=int(bundle["tau"].shape[1]),
-            mode="thermal",
-            backend="torch",
-            bvp_solver=_public_bvp_solver(torch_bvp_engine),
-            torch_device=torch_device_name,
-            torch_dtype=torch_dtype_name,
-            torch_enable_grad=False,
-            output_levels=output_levels,
+    with torch.inference_mode():
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=int(bundle["tau"].shape[1]),
+                mode="thermal",
+                backend="torch",
+                bvp_solver=public_bvp_solver(torch_bvp_engine),
+                torch_device=torch_device_name,
+                torch_dtype=torch_dtype_name,
+                torch_enable_grad=False,
+                output_levels=output_levels,
+            )
         )
-    )
-    result = solver.forward(
-        tau=bundle["tau"],
-        ssa=bundle["ssa"],
-        g=bundle["g"],
-        z=bundle["heights"],
-        angles=scalar_value(bundle["user_angle"]),
-        stream=0.5,
-        albedo=bundle["albedo"],
-        delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
-        planck=bundle["planck"],
-        surface_planck=bundle["surface_planck"],
-        emissivity=bundle["emissivity"],
-        include_fo=True,
-    )
+        result = solver.forward(
+            tau=bundle["tau"],
+            ssa=bundle["ssa"],
+            g=bundle["g"],
+            z=bundle["heights"],
+            angles=scalar_value(bundle["user_angle"]),
+            stream=0.5,
+            albedo=bundle["albedo"],
+            delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
+            planck=bundle["planck"],
+            surface_planck=bundle["surface_planck"],
+            emissivity=bundle["emissivity"],
+            include_fo=True,
+        )
     total = result.radiance_total.detach().cpu().numpy()
     checksum = float(np.sum(total))
     wall_seconds = time.perf_counter() - wall_start
@@ -611,30 +626,10 @@ def benchmark_torch_forward(
 def main() -> None:
     """Runs the full-spectrum TIR benchmark example."""
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "bundle", type=Path, help="Path to a full-spectrum TIR benchmark bundle (.npz)."
-    )
-    parser.add_argument("--backend", choices=["numpy", "torch", "both"], default="both")
-    parser.add_argument("--limit", type=int, default=None, help="Optional spectral-row limit.")
-    parser.add_argument(
-        "--chunk-size", type=int, default=None, help="Optional chunk size override."
-    )
-    parser.add_argument("--numpy-bvp-engine", choices=["auto", "block"], default="auto")
-    parser.add_argument(
-        "--torch-bvp-engine", choices=["auto", "block", "pentadiagonal"], default="auto"
-    )
-    parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
-    parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
-    parser.add_argument("--torch-threads", type=int, default=1)
-    parser.add_argument(
-        "--output-levels",
-        action="store_true",
-        help="Benchmark the public forward profile path instead of endpoint-only output.",
-    )
-    parser.add_argument(
-        "--use-dumped-derived-optics",
-        action="store_true",
-        help="Use stored g and delta-M factor instead of Python preprocessing.",
+    add_common_benchmark_arguments(
+        parser,
+        input_help="Path to a TIR runtime array directory, or a legacy full-spectrum .npz bundle.",
+        torch_bvp_choices=("auto", "block", "pentadiagonal"),
     )
     parser.add_argument(
         "--use-dumped-thermal-source",
@@ -644,64 +639,92 @@ def main() -> None:
     args = parser.parse_args()
 
     load_start = time.perf_counter()
-    available = bundle_keys(args.bundle)
+    scene_mode = validate_scene_input_args(
+        parser,
+        args,
+        forbidden_scene_flags=(
+            ("use_dumped_derived_optics", "--use-dumped-derived-optics"),
+            ("use_dumped_thermal_source", "--use-dumped-thermal-source"),
+        ),
+    )
+
+    bundle, available, input_path, input_kind = benchmark_input_source(
+        args,
+        kind="tir",
+        label="TIR",
+        scene_mode=scene_mode,
+    )
+
     layer_optical_keys = select_layer_optical_keys(
         available,
         total_key="tau_arr",
         ssa_key="omega_arr",
     )
-    optical_keys = _select_optical_keys(
+    layer_from_scene = layer_optical_keys_are_scene(layer_optical_keys)
+    layer_from_components = layer_optical_keys_are_components(layer_optical_keys)
+    base_keys = tuple(key for key in _TIR_BASE_KEYS if key != "heights" or not layer_from_scene)
+    if args.require_python_generated_inputs:
+        require_python_generated_layer_optical_inputs(
+            layer_optical_keys,
+            total_key="tau_arr",
+            ssa_key="omega_arr",
+            label="TIR",
+        )
+    optical_keys = select_phase_optical_keys(
         available,
+        label="TIR",
         use_dumped_derived_optics=args.use_dumped_derived_optics,
-        layer_optical_from_components=layer_optical_keys_are_components(layer_optical_keys),
+        layer_optical_generates_fractions=layer_from_scene or layer_from_components,
+        layer_optical_from_scene=layer_from_scene,
+        require_python_generated_inputs=args.require_python_generated_inputs,
+        required_fraction_keys=_TIR_REQUIRED_PHYSICAL_OPTICS_KEYS,
+        dumped_keys=_TIR_DUMPED_OPTICS_KEYS,
+        aerosol_interp_key=_TIR_AEROSOL_INTERP_KEY,
+        aerosol_coordinate_keys=_TIR_AEROSOL_COORDINATE_KEYS,
     )
     source_keys = _select_source_keys(
         available,
         use_dumped_thermal_source=args.use_dumped_thermal_source,
+        require_python_generated_inputs=args.require_python_generated_inputs,
     )
-    bundle = load_bundle(
-        args.bundle,
-        keys=_TIR_BASE_KEYS + _TIR_OPTIONAL_KEYS + layer_optical_keys + optical_keys + source_keys,
-    )
+    if not scene_mode:
+        bundle = load_input_arrays(
+            args.input,
+            keys=base_keys + _TIR_OPTIONAL_KEYS + layer_optical_keys + optical_keys + source_keys,
+        )
     require_keys(
         bundle,
-        _TIR_BASE_KEYS + layer_optical_keys + optical_keys + source_keys,
+        base_keys + layer_optical_keys + optical_keys + source_keys,
         label="TIR",
     )
-    row_count_key = (
-        layer_optical_keys[0]
-        if layer_optical_keys_are_components(layer_optical_keys)
-        else "tau_arr"
-    )
+    if layer_from_scene:
+        row_count_key = "wavelengths"
+    elif layer_from_components:
+        row_count_key = layer_optical_keys[0]
+    else:
+        row_count_key = "tau_arr"
     total_rows = int(bundle[row_count_key].shape[0])
     wavelengths = total_rows if args.limit is None else min(int(args.limit), total_rows)
-    bundle = dict(bundle)
-    bundle["wavelengths"] = bundle["wavelengths"][:wavelengths]
-    bundle["albedo"] = bundle["albedo"][:wavelengths]
-    if "emissivity" in bundle:
-        bundle["emissivity"] = bundle["emissivity"][:wavelengths]
-    for key in layer_optical_keys:
-        if key in bundle and np.asarray(bundle[key]).shape[:1] == (total_rows,):
-            bundle[key] = bundle[key][:wavelengths]
-    for key in _TIR_DIRECT_SOURCE_KEYS + ("surface_temperature_k",) + _TIR_SOURCE_COORDINATE_KEYS:
-        if key in bundle and np.asarray(bundle[key]).shape[:1] == (total_rows,):
-            bundle[key] = bundle[key][:wavelengths]
-    for key in _TIR_DUMPED_OPTICS_KEYS:
-        if key in bundle:
-            bundle[key] = bundle[key][:wavelengths]
-    for key in ("depol", "rayleigh_fraction", "aerosol_fraction", "aerosol_interp_fraction"):
-        if key in bundle:
-            bundle[key] = bundle[key][:wavelengths]
-    if "ref_total" in bundle:
-        bundle["ref_total"] = bundle["ref_total"][:wavelengths]
+    bundle = trim_spectral_rows(
+        bundle,
+        _TIR_LIMIT_KEYS + layer_optical_keys,
+        total_rows,
+        wavelengths,
+    )
+    if not scene_mode and args.input.name == "tir_benchmark_fixture.npz":
+        bundle["ref_total"] = load_packaged_reference_total("tir_reference_outputs.npz")[
+            :wavelengths
+        ]
     load_seconds = time.perf_counter() - load_start
 
     bundle, layer_optical_seconds, layer_optical_mode = prepare_layer_optical_properties(
         bundle,
         total_key="tau_arr",
         ssa_key="omega_arr",
+        validate_inputs=not args.require_python_generated_inputs,
     )
-    bundle = _normalize_layer_inputs(bundle)
+    bundle["tau"] = bundle["tau_arr"]
+    bundle["ssa"] = bundle["omega_arr"]
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
@@ -715,24 +738,20 @@ def main() -> None:
 
     print_problem_header(
         title="TIR full-spectrum benchmark",
-        bundle_path=args.bundle,
+        input_path=input_path,
+        input_kind=input_kind,
         wavelengths=wavelengths,
         layers=int(bundle["tau"].shape[1]),
         load_seconds=load_seconds,
-        note=(
-            "RT time is FO + 2S. wall time (s) excludes bundle load and printed "
-            "preprocessing, but includes backend-local overhead such as tensor "
-            "conversion, PyTorch warmup, and checksum reduction."
-        ),
+        note="RT time is FO + 2S. wall time excludes load/preprocessing.",
     )
-    print(f"  layer optical properties: {layer_optical_mode}, {layer_optical_seconds:.3f} s")
-    print(f"  geometry preprocessing: python-generated, {geometry_seconds:.3f} s")
-    print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
-    print(f"  thermal source: {source_mode}, {source_seconds:.3f} s")
-    print(
-        "  preprocessing total: "
-        f"{layer_optical_seconds + geometry_seconds + optical_seconds + source_seconds:.3f} s "
-        "(layer optical + geometry + phase + thermal source)"
+    print_preprocessing_summary(
+        (
+            ("layer optical properties", layer_optical_mode, layer_optical_seconds),
+            ("geometry preprocessing", "python-generated", geometry_seconds),
+            ("optical preprocessing", optical_mode, optical_seconds),
+            ("thermal source", source_mode, source_seconds),
+        )
     )
     print(f"  emissivity: {emissivity_mode}")
 

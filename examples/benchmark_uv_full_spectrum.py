@@ -1,31 +1,41 @@
-"""Benchmark a full-spectrum UV bundle with NumPy and optional PyTorch."""
+"""Benchmark full-spectrum UV input arrays with NumPy and optional PyTorch."""
 
 from __future__ import annotations
 
 import argparse
 import time
-from pathlib import Path
 
 import numpy as np
 
 from _full_spectrum_benchmark_common import (
     accuracy_summary,
+    add_common_benchmark_arguments,
     BenchmarkRow,
-    bundle_keys,
-    load_bundle,
+    benchmark_input_source,
+    load_input_arrays,
+    load_packaged_reference_total,
     looks_like_row_index,
     layer_optical_keys_are_components,
+    layer_optical_keys_are_scene,
+    print_preprocessing_summary,
     print_problem_header,
     prepare_layer_optical_properties,
     print_rows,
+    public_bvp_solver,
     recommended_chunk_size,
+    require_python_generated_layer_optical_inputs,
     require_keys,
     scalar_value,
     select_layer_optical_keys,
+    select_phase_optical_keys,
+    slice_spectral_rows,
+    trim_spectral_rows,
+    validate_scene_input_args,
 )
 from py2sess import TwoStreamEss, TwoStreamEssOptions
 from py2sess.optical.phase import (
     aerosol_interp_fraction,
+    build_solar_phase_inputs_from_scattering_tau,
     build_solar_fo_scatter_term,
     build_two_stream_phase_inputs,
 )
@@ -38,15 +48,16 @@ from py2sess.rtsolver.geometry import auxgeom_solar_obs, chapman_factors
 from py2sess.rtsolver.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
 
 
-def _public_bvp_solver(engine: str) -> str:
-    """Maps low-level benchmark BVP names to public option names."""
-    return "banded" if engine == "block" else "scipy"
-
-
 _UV_REQUIRED_PHYSICAL_OPTICS_KEYS = (
     "depol",
     "rayleigh_fraction",
     "aerosol_fraction",
+    "aerosol_moments",
+)
+_UV_COMPONENT_PHASE_KEYS = (
+    "depol",
+    "rayleigh_scattering_tau",
+    "aerosol_scattering_tau",
     "aerosol_moments",
 )
 
@@ -62,31 +73,27 @@ _UV_BASE_KEYS = (
     "flux_factor",
 )
 
-_UV_OPTIONAL_KEYS = ("stream_value", "ref_total")
+_UV_OPTIONAL_KEYS = ("stream_value",)
 
-
-def _has_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...]) -> bool:
-    return all(key in bundle for key in keys)
-
-
-def _select_optical_keys(
-    available: set[str],
-    *,
-    use_dumped_derived_optics: bool,
-    layer_optical_from_components: bool,
-) -> tuple[str, ...]:
-    required_physical = (
-        ("depol", "aerosol_moments")
-        if layer_optical_from_components
-        else _UV_REQUIRED_PHYSICAL_OPTICS_KEYS
+_UV_CHUNK_KEYS = (
+    "tau",
+    "ssa",
+    "g",
+    "delta_m_truncation_factor",
+    "albedo",
+    "flux_factor",
+    "fo_scatter_term",
+)
+_UV_LIMIT_KEYS = (
+    _UV_BASE_KEYS
+    + _UV_DUMPED_OPTICS_KEYS
+    + (
+        "depol",
+        "rayleigh_fraction",
+        "aerosol_fraction",
+        "aerosol_interp_fraction",
     )
-    has_physical_optics = set(required_physical).issubset(available)
-    if not use_dumped_derived_optics and has_physical_optics:
-        keys = list(required_physical)
-        if _UV_AEROSOL_INTERP_KEY in available:
-            keys.append(_UV_AEROSOL_INTERP_KEY)
-        return tuple(keys)
-    return _UV_DUMPED_OPTICS_KEYS
+)
 
 
 def _uv_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndarray, str]:
@@ -102,12 +109,6 @@ def _uv_aerosol_interp_fraction(bundle: dict[str, np.ndarray]) -> tuple[np.ndarr
     )
 
 
-def _normalize_layer_inputs(bundle: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    prepared = dict(bundle)
-    prepared["ssa"] = bundle["omega"]
-    return prepared
-
-
 def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], float]:
     start = time.perf_counter()
     geoms = np.asarray(bundle["user_obsgeom"], dtype=float)
@@ -119,6 +120,12 @@ def _prepare_geometry(bundle: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarr
         raise ValueError("the low-level UV benchmark path supports exactly one geometry")
 
     sza, vza, raz = geoms[0]
+    if not (0.0 <= sza < 90.0):
+        raise ValueError("solar zenith angle must satisfy 0 <= sza < 90")
+    if not (0.0 <= vza < 90.0):
+        raise ValueError("viewing zenith angle must satisfy 0 <= vza < 90")
+    if not (0.0 <= raz <= 360.0):
+        raise ValueError("relative azimuth angle must satisfy 0 <= raz <= 360")
     deg_to_rad = np.pi / 180.0
     x0 = np.array([np.cos(sza * deg_to_rad)], dtype=float)
     user_stream = np.array([np.cos(vza * deg_to_rad)], dtype=float)
@@ -155,16 +162,16 @@ def _prepare_optics(
     *,
     use_dumped_derived_optics: bool,
 ) -> tuple[dict[str, np.ndarray], float, str]:
-    if use_dumped_derived_optics or not _has_keys(bundle, _UV_REQUIRED_PHYSICAL_OPTICS_KEYS):
+    has_component_phase = all(key in bundle for key in _UV_COMPONENT_PHASE_KEYS)
+    has_fraction_phase = all(key in bundle for key in _UV_REQUIRED_PHYSICAL_OPTICS_KEYS)
+    if use_dumped_derived_optics or not (has_component_phase or has_fraction_phase):
         require_keys(bundle, _UV_DUMPED_OPTICS_KEYS, label="UV dumped optical")
         prepared = dict(bundle)
         prepared["g"] = bundle["asymm"]
         prepared["delta_m_truncation_factor"] = bundle["scaling"]
         prepared["fo_scatter_term"] = bundle["fo_exact_scatter"]
         mode = "dumped-derived"
-        if not use_dumped_derived_optics and not _has_keys(
-            bundle, _UV_REQUIRED_PHYSICAL_OPTICS_KEYS
-        ):
+        if not use_dumped_derived_optics and not (has_component_phase or has_fraction_phase):
             mode = "dumped-derived (physical optical inputs unavailable)"
         return prepared, 0.0, mode
 
@@ -175,46 +182,46 @@ def _prepare_optics(
     else:
         fac, mode = _uv_aerosol_interp_fraction(bundle)
 
-    optics = build_two_stream_phase_inputs(
-        ssa=bundle["ssa"],
-        depol=bundle["depol"],
-        rayleigh_fraction=bundle["rayleigh_fraction"],
-        aerosol_fraction=bundle["aerosol_fraction"],
-        aerosol_moments=bundle["aerosol_moments"],
-        aerosol_interp_fraction=fac,
-    )
-    fo_scatter = build_solar_fo_scatter_term(
-        ssa=bundle["ssa"],
-        depol=bundle["depol"],
-        rayleigh_fraction=bundle["rayleigh_fraction"],
-        aerosol_fraction=bundle["aerosol_fraction"],
-        aerosol_moments=bundle["aerosol_moments"],
-        aerosol_interp_fraction=fac,
-        angles=bundle["user_obsgeom"],
-        delta_m_truncation_factor=optics.delta_m_truncation_factor,
-    )
+    if has_component_phase:
+        optics = build_solar_phase_inputs_from_scattering_tau(
+            ssa=bundle["ssa"],
+            depol=bundle["depol"],
+            rayleigh_scattering_tau=bundle["rayleigh_scattering_tau"],
+            aerosol_scattering_tau=bundle["aerosol_scattering_tau"],
+            aerosol_moments=bundle["aerosol_moments"],
+            aerosol_interp_fraction=fac,
+            angles=bundle["user_obsgeom"],
+            scattering_tau=bundle.get("_scattering_tau"),
+            validate_inputs=False,
+        )
+        fo_scatter = optics.fo_scatter_term
+    else:
+        optics = build_two_stream_phase_inputs(
+            ssa=bundle["ssa"],
+            depol=bundle["depol"],
+            rayleigh_fraction=bundle["rayleigh_fraction"],
+            aerosol_fraction=bundle["aerosol_fraction"],
+            aerosol_moments=bundle["aerosol_moments"],
+            aerosol_interp_fraction=fac,
+            validate_inputs=False,
+        )
+        fo_scatter = build_solar_fo_scatter_term(
+            ssa=bundle["ssa"],
+            depol=bundle["depol"],
+            rayleigh_fraction=bundle["rayleigh_fraction"],
+            aerosol_fraction=bundle["aerosol_fraction"],
+            aerosol_moments=bundle["aerosol_moments"],
+            aerosol_interp_fraction=fac,
+            angles=bundle["user_obsgeom"],
+            delta_m_truncation_factor=optics.delta_m_truncation_factor,
+            validate_inputs=False,
+        )
     prepared = dict(bundle)
     prepared["aerosol_interp_fraction"] = fac
     prepared["g"] = optics.g
     prepared["delta_m_truncation_factor"] = optics.delta_m_truncation_factor
     prepared["fo_scatter_term"] = fo_scatter
     return prepared, time.perf_counter() - start, mode
-
-
-def _slice_rows(bundle: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
-    """Returns one spectral chunk from a UV benchmark bundle."""
-    chunk = {
-        "tau": bundle["tau"][start:stop],
-        "ssa": bundle["ssa"][start:stop],
-        "g": bundle["g"][start:stop],
-        "delta_m_truncation_factor": bundle["delta_m_truncation_factor"][start:stop],
-        "albedo": bundle["albedo"][start:stop],
-        "flux_factor": bundle["flux_factor"][start:stop],
-        "fo_scatter_term": bundle["fo_scatter_term"][start:stop],
-    }
-    if "ref_total" in bundle:
-        chunk["ref_total"] = bundle["ref_total"][start:stop]
-    return chunk
 
 
 def benchmark_numpy(
@@ -239,7 +246,7 @@ def benchmark_numpy(
     max_rel_diff_pct = None
     for start in range(0, wavelengths, chunk_size):
         stop = min(start + chunk_size, wavelengths)
-        chunk = _slice_rows(bundle, start, stop)
+        chunk = slice_spectral_rows(bundle, _UV_CHUNK_KEYS, start, stop)
 
         t0 = time.perf_counter()
         fo_total = solve_fo_solar_obs_eps_batch_numpy(
@@ -318,7 +325,7 @@ def benchmark_numpy_forward(
         TwoStreamEssOptions(
             nlyr=int(bundle["tau"].shape[1]),
             mode="solar",
-            bvp_solver=_public_bvp_solver(numpy_bvp_engine),
+            bvp_solver=public_bvp_solver(numpy_bvp_engine),
             output_levels=output_levels,
         )
     )
@@ -344,7 +351,12 @@ def benchmark_numpy_forward(
         max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
     if not np.isfinite(checksum):
         raise RuntimeError("benchmark output checksum is not finite")
-    chunk_size = min(wavelengths, 30_000)
+    chunk_size = recommended_chunk_size(
+        total_rows=wavelengths,
+        nlayers=int(bundle["tau"].shape[1]),
+        backend="numpy",
+        workload="solar_obs",
+    )
     return BenchmarkRow(
         backend="numpy-forward-levels" if output_levels else "numpy-forward",
         wavelengths=wavelengths,
@@ -379,7 +391,7 @@ def benchmark_torch(
     device = torch.device(torch_device_name)
     dtype = {"float64": torch.float64, "float32": torch.float32}[torch_dtype_name]
     torch.set_num_threads(torch_threads)
-    with torch.no_grad():
+    with torch.inference_mode():
         probe = torch.ones(16, dtype=dtype, device=device)
         _ = (probe + 1.0).sum().item()
 
@@ -396,10 +408,10 @@ def benchmark_torch(
     )
     for start in range(0, wavelengths, chunk_size):
         stop = min(start + chunk_size, wavelengths)
-        chunk = _slice_rows(bundle, start, stop)
+        chunk = slice_spectral_rows(bundle, _UV_CHUNK_KEYS, start, stop)
 
         t0 = time.perf_counter()
-        with torch.no_grad():
+        with torch.inference_mode():
             fo_total = solve_fo_solar_obs_eps_batch_torch(
                 tau=chunk["tau"],
                 omega=chunk["ssa"],
@@ -414,7 +426,7 @@ def benchmark_torch(
         fo_seconds += time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        with torch.no_grad():
+        with torch.inference_mode():
             two_stream = solve_solar_obs_batch_torch(
                 tau=chunk["tau"],
                 omega=chunk["ssa"],
@@ -488,38 +500,39 @@ def benchmark_torch_forward(
     import torch
 
     torch.set_num_threads(torch_threads)
-    bvp_solver = _public_bvp_solver(torch_bvp_engine)
+    bvp_solver = public_bvp_solver(torch_bvp_engine)
     wall_start = time.perf_counter()
     dtype = {"float64": torch.float64, "float32": torch.float32}[torch_dtype_name]
     device = torch.device(torch_device_name)
-    with torch.no_grad():
+    with torch.inference_mode():
         probe = torch.ones(16, dtype=dtype, device=device)
         _ = (probe + 1.0).sum().item()
-    solver = TwoStreamEss(
-        TwoStreamEssOptions(
-            nlyr=int(bundle["tau"].shape[1]),
-            mode="solar",
-            backend="torch",
-            bvp_solver=bvp_solver,
-            torch_device=torch_device_name,
-            torch_dtype=torch_dtype_name,
-            torch_enable_grad=False,
-            output_levels=output_levels,
+    with torch.inference_mode():
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=int(bundle["tau"].shape[1]),
+                mode="solar",
+                backend="torch",
+                bvp_solver=bvp_solver,
+                torch_device=torch_device_name,
+                torch_dtype=torch_dtype_name,
+                torch_enable_grad=False,
+                output_levels=output_levels,
+            )
         )
-    )
-    result = solver.forward(
-        tau=bundle["tau"],
-        ssa=bundle["ssa"],
-        g=bundle["g"],
-        z=bundle["heights"],
-        angles=bundle["user_obsgeom"],
-        stream=scalar_value(bundle["stream_value"]),
-        fbeam=bundle["flux_factor"],
-        albedo=bundle["albedo"],
-        delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
-        include_fo=True,
-        fo_scatter_term=bundle["fo_scatter_term"],
-    )
+        result = solver.forward(
+            tau=bundle["tau"],
+            ssa=bundle["ssa"],
+            g=bundle["g"],
+            z=bundle["heights"],
+            angles=bundle["user_obsgeom"],
+            stream=scalar_value(bundle["stream_value"]),
+            fbeam=bundle["flux_factor"],
+            albedo=bundle["albedo"],
+            delta_m_truncation_factor=bundle["delta_m_truncation_factor"],
+            include_fo=True,
+            fo_scatter_term=bundle["fo_scatter_term"],
+        )
     total = result.radiance_total.detach().cpu().numpy()
     checksum = float(np.sum(total))
     wall_seconds = time.perf_counter() - wall_start
@@ -529,7 +542,12 @@ def benchmark_torch_forward(
         max_abs_diff, max_rel_diff_pct = accuracy_summary(total, bundle["ref_total"])
     if not np.isfinite(checksum):
         raise RuntimeError("benchmark output checksum is not finite")
-    chunk_size = min(wavelengths, 30_000)
+    chunk_size = recommended_chunk_size(
+        total_rows=wavelengths,
+        nlayers=int(bundle["tau"].shape[1]),
+        backend="torch",
+        workload="solar_obs",
+    )
     return BenchmarkRow(
         backend=(
             f"torch-{torch_device_name}-{torch_dtype_name}-forward-levels"
@@ -549,72 +567,80 @@ def benchmark_torch_forward(
 def main() -> None:
     """Runs the full-spectrum UV benchmark example."""
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "bundle", type=Path, help="Path to a full-spectrum UV benchmark bundle (.npz)."
-    )
-    parser.add_argument("--backend", choices=["numpy", "torch", "both"], default="both")
-    parser.add_argument("--limit", type=int, default=None, help="Optional spectral-row limit.")
-    parser.add_argument(
-        "--chunk-size", type=int, default=None, help="Optional chunk size override."
-    )
-    parser.add_argument("--numpy-bvp-engine", choices=["auto", "block"], default="auto")
-    parser.add_argument("--torch-bvp-engine", choices=["auto", "block"], default="auto")
-    parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
-    parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
-    parser.add_argument("--torch-threads", type=int, default=1)
-    parser.add_argument(
-        "--output-levels",
-        action="store_true",
-        help="Benchmark the public forward profile path instead of endpoint-only output.",
-    )
-    parser.add_argument(
-        "--use-dumped-derived-optics",
-        action="store_true",
-        help="Use stored g, delta-M factor, and FO scatter instead of Python preprocessing.",
+    add_common_benchmark_arguments(
+        parser,
+        input_help="Path to a UV runtime array directory, or a legacy full-spectrum .npz bundle.",
     )
     args = parser.parse_args()
 
     load_start = time.perf_counter()
-    available = bundle_keys(args.bundle)
+    scene_mode = validate_scene_input_args(
+        parser,
+        args,
+        forbidden_scene_flags=(("use_dumped_derived_optics", "--use-dumped-derived-optics"),),
+    )
+
+    bundle, available, input_path, input_kind = benchmark_input_source(
+        args,
+        kind="uv",
+        label="UV",
+        scene_mode=scene_mode,
+    )
+
     layer_optical_keys = select_layer_optical_keys(
         available,
         total_key="tau",
         ssa_key="omega",
     )
-    optical_keys = _select_optical_keys(
+    layer_from_scene = layer_optical_keys_are_scene(layer_optical_keys)
+    layer_from_components = layer_optical_keys_are_components(layer_optical_keys)
+    base_keys = tuple(key for key in _UV_BASE_KEYS if key != "heights" or not layer_from_scene)
+    if args.require_python_generated_inputs:
+        require_python_generated_layer_optical_inputs(
+            layer_optical_keys,
+            total_key="tau",
+            ssa_key="omega",
+            label="UV",
+        )
+    optical_keys = select_phase_optical_keys(
         available,
+        label="UV",
         use_dumped_derived_optics=args.use_dumped_derived_optics,
-        layer_optical_from_components=layer_optical_keys_are_components(layer_optical_keys),
+        layer_optical_generates_fractions=layer_from_scene or layer_from_components,
+        layer_optical_from_scene=layer_from_scene,
+        require_python_generated_inputs=args.require_python_generated_inputs,
+        required_fraction_keys=_UV_REQUIRED_PHYSICAL_OPTICS_KEYS,
+        dumped_keys=_UV_DUMPED_OPTICS_KEYS,
+        aerosol_interp_key=_UV_AEROSOL_INTERP_KEY,
     )
-    bundle = load_bundle(
-        args.bundle,
-        keys=_UV_BASE_KEYS + _UV_OPTIONAL_KEYS + layer_optical_keys + optical_keys,
-    )
+    if not scene_mode:
+        bundle = load_input_arrays(
+            args.input,
+            keys=base_keys + _UV_OPTIONAL_KEYS + layer_optical_keys + optical_keys,
+        )
     require_keys(
         bundle,
-        _UV_BASE_KEYS + layer_optical_keys + optical_keys,
+        base_keys + layer_optical_keys + optical_keys,
         label="UV",
     )
-    row_count_key = (
-        layer_optical_keys[0] if layer_optical_keys_are_components(layer_optical_keys) else "tau"
-    )
+    if layer_from_scene:
+        row_count_key = "wavelengths"
+    elif layer_from_components:
+        row_count_key = layer_optical_keys[0]
+    else:
+        row_count_key = "tau"
     total_rows = int(bundle[row_count_key].shape[0])
     wavelengths = total_rows if args.limit is None else min(int(args.limit), total_rows)
-    bundle = dict(bundle)
-    bundle["wavelengths"] = bundle["wavelengths"][:wavelengths]
-    bundle["albedo"] = bundle["albedo"][:wavelengths]
-    bundle["flux_factor"] = bundle["flux_factor"][:wavelengths]
-    for key in layer_optical_keys:
-        if key in bundle and np.asarray(bundle[key]).shape[:1] == (total_rows,):
-            bundle[key] = bundle[key][:wavelengths]
-    for key in _UV_DUMPED_OPTICS_KEYS:
-        if key in bundle:
-            bundle[key] = bundle[key][:wavelengths]
-    for key in ("depol", "rayleigh_fraction", "aerosol_fraction", "aerosol_interp_fraction"):
-        if key in bundle:
-            bundle[key] = bundle[key][:wavelengths]
-    if "ref_total" in bundle:
-        bundle["ref_total"] = bundle["ref_total"][:wavelengths]
+    bundle = trim_spectral_rows(
+        bundle,
+        _UV_LIMIT_KEYS + layer_optical_keys,
+        total_rows,
+        wavelengths,
+    )
+    if not scene_mode and args.input.name == "uv_benchmark_fixture.npz":
+        bundle["ref_total"] = load_packaged_reference_total("uv_reference_outputs.npz")[
+            :wavelengths
+        ]
     if "stream_value" not in bundle:
         bundle["stream_value"] = np.array([1.0 / np.sqrt(3.0)], dtype=float)
     load_seconds = time.perf_counter() - load_start
@@ -623,8 +649,9 @@ def main() -> None:
         bundle,
         total_key="tau",
         ssa_key="omega",
+        validate_inputs=not args.require_python_generated_inputs,
     )
-    bundle = _normalize_layer_inputs(bundle)
+    bundle["ssa"] = bundle["omega"]
     bundle, geometry_seconds = _prepare_geometry(bundle)
     bundle, optical_seconds, optical_mode = _prepare_optics(
         bundle,
@@ -633,24 +660,19 @@ def main() -> None:
 
     print_problem_header(
         title="UV full-spectrum benchmark",
-        bundle_path=args.bundle,
+        input_path=input_path,
+        input_kind=input_kind,
         wavelengths=wavelengths,
         layers=int(bundle["tau"].shape[1]),
         load_seconds=load_seconds,
-        note=(
-            "This example benchmarks the UV FO + 2S full-spectrum path. "
-            "wall time (s) excludes bundle load and printed preprocessing, but includes "
-            "backend-local overhead such as PyTorch warmup, tensor conversion, and "
-            "checksum reduction."
-        ),
+        note="RT time is FO + 2S. wall time excludes load/preprocessing.",
     )
-    print(f"  layer optical properties: {layer_optical_mode}, {layer_optical_seconds:.3f} s")
-    print(f"  geometry preprocessing: python-generated, {geometry_seconds:.3f} s")
-    print(f"  optical preprocessing: {optical_mode}, {optical_seconds:.3f} s")
-    print(
-        "  preprocessing total: "
-        f"{layer_optical_seconds + geometry_seconds + optical_seconds:.3f} s "
-        "(layer optical + geometry + phase)"
+    print_preprocessing_summary(
+        (
+            ("layer optical properties", layer_optical_mode, layer_optical_seconds),
+            ("geometry preprocessing", "python-generated", geometry_seconds),
+            ("optical preprocessing", optical_mode, optical_seconds),
+        )
     )
 
     rows: list[BenchmarkRow] = []

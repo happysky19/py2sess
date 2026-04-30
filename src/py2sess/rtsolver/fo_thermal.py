@@ -15,6 +15,8 @@ import numpy as np
 from .fo_solar_obs import _fo_eps_geometry
 from .preprocess import PreparedInputs
 
+_OPTICAL_THICKNESS_MIN = 1.0e-12
+
 
 @dataclass(frozen=True)
 class FoThermalResult:
@@ -431,6 +433,7 @@ def solve_fo_thermal(
         deltaus = prepared.tau_arr * (1.0 - prepared.omega_arr * prepared.d2s_scaling)
     else:
         deltaus = prepared.tau_arr.copy()
+    np.putmask(deltaus, deltaus <= 0.0, _OPTICAL_THICKNESS_MIN)
     surfbb = prepared.thermal.surfbb
     user_emissivity = np.full(mu1.size, prepared.thermal.emissivity, dtype=float)
     extinction = (

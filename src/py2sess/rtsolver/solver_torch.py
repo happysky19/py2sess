@@ -23,6 +23,7 @@ from .solver_common import (
 from .taylor_torch import taylor_series_1_torch, taylor_series_2_torch
 
 torch = _load_torch()
+_OPTICAL_THICKNESS_MIN = 1.0e-12
 
 
 def _as_reference_tensor(value, reference):
@@ -479,12 +480,20 @@ def apply_delta_scaling_torch(
     asymm_arr = asymm_arr.to(dtype=dtype)
     d2s_scaling = d2s_scaling.to(dtype=dtype)
 
-    return delta_m_scale_optical_properties_torch(
+    delta_tau, omega_total, asymm_total = delta_m_scale_optical_properties_torch(
         tau_arr,
         omega_arr,
         asymm_arr,
         d2s_scaling,
     )
+    if bool(torch.any(delta_tau < 0.0).item()):
+        raise ValueError("tau must be nonnegative")
+    delta_tau = torch.where(
+        delta_tau == 0.0,
+        torch.full_like(delta_tau, _OPTICAL_THICKNESS_MIN),
+        delta_tau,
+    )
+    return delta_tau, omega_total, asymm_total
 
 
 def hom_solution_solar_torch(

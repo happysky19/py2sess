@@ -360,10 +360,7 @@ def _fo_thermal_toa_batch(
     """Computes batched FO thermal upwelling TOA radiance."""
     dtype = tau.dtype
     device = tau.device
-    if do_optical_deltam_scaling:
-        deltaus = tau * (1.0 - omega * scaling)
-    else:
-        deltaus = tau
+    deltaus = tau * (1.0 - omega * scaling) if do_optical_deltam_scaling else tau
     lower_bb = thermal_bb_input[:, :-1]
     upper_bb = thermal_bb_input[:, 1:]
     single_scatter_scale = 1.0 - omega

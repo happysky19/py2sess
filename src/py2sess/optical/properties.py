@@ -26,18 +26,32 @@ def _finite_nonnegative(name: str, value: np.ndarray) -> None:
         raise ValueError(f"{name} must be nonnegative")
 
 
-def _broadcast_to_shape(name: str, value, shape: tuple[int, ...]) -> np.ndarray:
+def _broadcast_to_shape(
+    name: str,
+    value,
+    shape: tuple[int, ...],
+    *,
+    validate_inputs: bool,
+) -> np.ndarray:
     arr = np.asarray(value, dtype=float)
-    _finite_nonnegative(name, arr)
+    if validate_inputs:
+        _finite_nonnegative(name, arr)
     try:
         return np.broadcast_to(arr, shape)
     except ValueError as exc:
         raise ValueError(f"{name} must broadcast to shape {shape}") from exc
 
 
-def _aerosol_array(name: str, value, layer_shape: tuple[int, ...]) -> np.ndarray:
+def _aerosol_array(
+    name: str,
+    value,
+    layer_shape: tuple[int, ...],
+    *,
+    validate_inputs: bool,
+) -> np.ndarray:
     arr = np.asarray(value, dtype=float)
-    _finite_nonnegative(name, arr)
+    if validate_inputs:
+        _finite_nonnegative(name, arr)
     if arr.ndim == 0:
         raise ValueError(f"{name} must include an aerosol axis")
     if arr.shape == layer_shape:
@@ -57,9 +71,12 @@ def _aerosol_property_array(
     value,
     layer_shape: tuple[int, ...],
     naerosol: int,
+    *,
+    validate_inputs: bool,
 ) -> np.ndarray:
     arr = np.asarray(value, dtype=float)
-    _finite_nonnegative(name, arr)
+    if validate_inputs:
+        _finite_nonnegative(name, arr)
     if arr.ndim == 1 and arr.shape[0] == naerosol:
         arr = arr.reshape((1,) * len(layer_shape) + (naerosol,))
     target = layer_shape + (naerosol,)
@@ -84,12 +101,24 @@ def _resolve_layer_shape(*values) -> tuple[int, ...]:
     return layer_shape
 
 
+def sum_component_axis(values: np.ndarray) -> np.ndarray:
+    if values.shape[-1] == 0:
+        return np.zeros(values.shape[:-1], dtype=values.dtype)
+    if values.shape[-1] <= 8:
+        total = values[..., 0].copy()
+        for index in range(1, values.shape[-1]):
+            total += values[..., index]
+        return total
+    return np.sum(values, axis=-1)
+
+
 def _resolve_aerosol_scattering(
     *,
     aerosol_extinction_tau: np.ndarray,
     aerosol_scattering_tau,
     aerosol_single_scattering_albedo,
     layer_shape: tuple[int, ...],
+    validate_inputs: bool,
 ) -> np.ndarray:
     if aerosol_scattering_tau is not None and aerosol_single_scattering_albedo is not None:
         raise ValueError(
@@ -100,6 +129,7 @@ def _resolve_aerosol_scattering(
             "aerosol_scattering_tau",
             aerosol_scattering_tau,
             layer_shape,
+            validate_inputs=validate_inputs,
         )
     elif aerosol_single_scattering_albedo is not None:
         aerosol_ssa = _aerosol_property_array(
@@ -107,8 +137,9 @@ def _resolve_aerosol_scattering(
             aerosol_single_scattering_albedo,
             layer_shape,
             aerosol_extinction_tau.shape[-1],
+            validate_inputs=validate_inputs,
         )
-        if np.any(aerosol_ssa > 1.0):
+        if validate_inputs and np.any(aerosol_ssa > 1.0):
             raise ValueError("aerosol_single_scattering_albedo must be <= 1")
         scattering = aerosol_extinction_tau * aerosol_ssa
     else:
@@ -116,7 +147,7 @@ def _resolve_aerosol_scattering(
             "aerosol_extinction_tau requires aerosol_scattering_tau or "
             "aerosol_single_scattering_albedo"
         )
-    if np.any(scattering > aerosol_extinction_tau + 1.0e-14):
+    if validate_inputs and np.any(scattering > aerosol_extinction_tau + 1.0e-14):
         raise ValueError("aerosol_scattering_tau must not exceed aerosol_extinction_tau")
     return scattering
 
@@ -129,20 +160,9 @@ def build_layer_optical_properties(
     aerosol_extinction_tau=None,
     aerosol_scattering_tau=None,
     aerosol_single_scattering_albedo=None,
+    validate_inputs: bool = True,
 ) -> LayerOpticalProperties:
-    """Builds RT optical inputs from layer optical-depth components.
-
-    The helper does not compute gas cross sections or aerosol microphysics. It
-    combines already integrated component optical depths into the quantities
-    consumed by the RT solver:
-
-    ``tau = absorption_tau + rayleigh_scattering_tau + sum(aerosol_extinction_tau)``
-
-    ``ssa = (rayleigh_scattering_tau + sum(aerosol_scattering_tau)) / tau``
-
-    Fractions are normalized by total scattering optical depth and are zero
-    where the layer has no scattering.
-    """
+    """Build RT optical inputs from layer optical-depth components."""
     if absorption_tau is not None and gas_absorption_tau is not None:
         raise ValueError("pass only one of absorption_tau or gas_absorption_tau")
     if absorption_tau is None:
@@ -170,11 +190,17 @@ def build_layer_optical_properties(
         rayleigh_scattering_tau,
         aerosol_leading,
     )
-    absorption = _broadcast_to_shape("absorption_tau", absorption_tau, layer_shape)
+    absorption = _broadcast_to_shape(
+        "absorption_tau",
+        absorption_tau,
+        layer_shape,
+        validate_inputs=validate_inputs,
+    )
     ray_tau = _broadcast_to_shape(
         "rayleigh_scattering_tau",
         rayleigh_scattering_tau,
         layer_shape,
+        validate_inputs=validate_inputs,
     )
 
     if aerosol_ext is None:
@@ -186,6 +212,7 @@ def build_layer_optical_properties(
                 "aerosol_scattering_tau",
                 aerosol_scattering_tau,
                 layer_shape,
+                validate_inputs=validate_inputs,
             )
             aerosol_ext_b = aerosol_scat_b
     else:
@@ -193,24 +220,34 @@ def build_layer_optical_properties(
             "aerosol_extinction_tau",
             aerosol_ext,
             layer_shape,
+            validate_inputs=validate_inputs,
         )
         aerosol_scat_b = _resolve_aerosol_scattering(
             aerosol_extinction_tau=aerosol_ext_b,
             aerosol_scattering_tau=aerosol_scattering_tau,
             aerosol_single_scattering_albedo=aerosol_single_scattering_albedo,
             layer_shape=layer_shape,
+            validate_inputs=validate_inputs,
         )
 
-    total_tau = absorption + ray_tau + np.sum(aerosol_ext_b, axis=-1)
-    scattering_tau = ray_tau + np.sum(aerosol_scat_b, axis=-1)
+    aerosol_ext_sum = sum_component_axis(aerosol_ext_b)
+    aerosol_scat_sum = (
+        aerosol_ext_sum if aerosol_scat_b is aerosol_ext_b else sum_component_axis(aerosol_scat_b)
+    )
+    total_tau = absorption + ray_tau + aerosol_ext_sum
+    scattering_tau = ray_tau + aerosol_scat_sum
     ssa = ssa_from_optical_depth(total_tau, scattering_tau)
     rayleigh_fraction = ssa_from_optical_depth(scattering_tau, ray_tau)
-    aerosol_fraction = np.divide(
+    scattering_positive = scattering_tau > 0.0
+    aerosol_fraction = np.empty_like(aerosol_scat_b, dtype=float)
+    np.divide(
         aerosol_scat_b,
         scattering_tau[..., None],
-        out=np.zeros_like(aerosol_scat_b),
-        where=scattering_tau[..., None] > 0.0,
+        out=aerosol_fraction,
+        where=scattering_positive[..., None],
     )
+    if not np.all(scattering_positive):
+        aerosol_fraction[~scattering_positive] = 0.0
     return LayerOpticalProperties(
         tau=total_tau,
         ssa=ssa,

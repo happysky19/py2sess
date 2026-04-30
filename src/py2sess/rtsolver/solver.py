@@ -29,6 +29,7 @@ from .taylor import taylor_series_1, taylor_series_2
 
 MAX_TAU_QPATH = 88.0
 MAX_TAU_PATH = 88.0
+_OPTICAL_THICKNESS_MIN = 1.0e-12
 
 
 def _initialize_solution_storage(
@@ -110,6 +111,16 @@ def _check_optical_inputs(delta_tau: np.ndarray, omega: np.ndarray, asymm: np.nd
         raise ValueError("Asymmetry parameter outside (-1, 1) after scaling")
 
 
+def _floor_zero_optical_thickness(delta_tau: np.ndarray) -> np.ndarray:
+    if np.any(delta_tau < 0.0):
+        raise ValueError("tau must be nonnegative")
+    if not np.any(delta_tau == 0.0):
+        return delta_tau
+    floored = np.asarray(delta_tau, dtype=float).copy()
+    np.putmask(floored, floored == 0.0, _OPTICAL_THICKNESS_MIN)
+    return floored
+
+
 def _apply_delta_scaling(
     prepared: PreparedInputs,
     do_delta_scaling: bool,
@@ -129,16 +140,14 @@ def _apply_delta_scaling(
         Scaled optical thickness, single-scattering albedo, and asymmetry
         arrays.
     """
-    if not do_delta_scaling:
-        return prepared.tau_arr.copy(), prepared.omega_arr.copy(), prepared.asymm_arr.copy()
-
     delta_tau, omega_total, asymm_total = delta_m_scale_optical_properties(
         prepared.tau_arr,
         prepared.omega_arr,
         prepared.asymm_arr,
-        prepared.d2s_scaling,
+        prepared.d2s_scaling if do_delta_scaling else np.zeros_like(prepared.tau_arr),
     )
 
+    delta_tau = _floor_zero_optical_thickness(delta_tau)
     _check_optical_inputs(delta_tau, omega_total, asymm_total)
     return delta_tau, omega_total, asymm_total
 

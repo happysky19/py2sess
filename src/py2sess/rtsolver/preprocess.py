@@ -100,11 +100,11 @@ def _as_1d(name: str, value: Any, size: int) -> np.ndarray:
     return arr
 
 
-def _as_optional_1d(name: str, value: Any | None, size: int) -> np.ndarray | None:
-    """Converts an optional value to a fixed-length 1D float array."""
-    if value is None:
-        return None
-    return _as_1d(name, value, size)
+def _validate_asymmetry(asymm_arr: np.ndarray) -> None:
+    if not np.all(np.isfinite(asymm_arr)):
+        raise ValueError("g/asymm_arr must be finite")
+    if np.any((asymm_arr <= -1.0) | (asymm_arr >= 1.0)):
+        raise ValueError("g/asymm_arr must satisfy -1 < g < 1")
 
 
 def _validate_inputs(
@@ -140,8 +140,8 @@ def _validate_inputs(
 
     if not options.do_mvout_only:
         vza = user_obsgeoms[:, 1]
-        if np.any((vza < 0.0) | (vza > 90.0)):
-            raise ValueError("viewing zenith angles must satisfy 0 <= vza <= 90")
+        if np.any((vza < 0.0) | (vza >= 90.0)):
+            raise ValueError("viewing zenith angles must satisfy 0 <= vza < 90")
         azm = user_obsgeoms[:, 2]
         if np.any((azm < 0.0) | (azm > 360.0)):
             raise ValueError("azimuth angles must satisfy 0 <= azimuth <= 360")
@@ -152,11 +152,12 @@ def _validate_inputs(
         raise ValueError("earth_radius must be a positive finite radius in kilometers")
 
     if not np.all(np.isfinite(tau_arr)):
-        raise ValueError("tau_arr must be finite")
+        raise ValueError("tau must be finite")
+    if np.any(tau_arr < 0.0):
+        raise ValueError("tau must be nonnegative")
     if not np.all(np.isfinite(omega_arr)):
         raise ValueError("omega_arr must be finite")
-    if not np.all(np.isfinite(asymm_arr)):
-        raise ValueError("asymm_arr must be finite")
+    _validate_asymmetry(asymm_arr)
     validate_delta_m_truncation_factor(d2s_scaling, omega_arr)
 
     return do_postprocessing, earth_radius
@@ -177,14 +178,15 @@ def _validate_inputs_thermal(
         raise ValueError("At least one of do_upwelling or do_dnwelling must be true")
     if options.do_mvout_only and options.do_additional_mvout:
         raise ValueError("do_mvout_only and do_additional_mvout cannot both be true")
-    if np.any((user_angles < 0.0) | (user_angles > 90.0)):
-        raise ValueError("viewing zenith angles must satisfy 0 <= vza <= 90")
+    if np.any((user_angles < 0.0) | (user_angles >= 90.0)):
+        raise ValueError("viewing zenith angles must satisfy 0 <= vza < 90")
     if not np.all(np.isfinite(tau_arr)):
-        raise ValueError("tau_arr must be finite")
+        raise ValueError("tau must be finite")
+    if np.any(tau_arr < 0.0):
+        raise ValueError("tau must be nonnegative")
     if not np.all(np.isfinite(omega_arr)):
         raise ValueError("omega_arr must be finite")
-    if not np.all(np.isfinite(asymm_arr)):
-        raise ValueError("asymm_arr must be finite")
+    _validate_asymmetry(asymm_arr)
     validate_delta_m_truncation_factor(d2s_scaling, omega_arr)
     if not np.all(np.isfinite(thermal_bb_input)):
         raise ValueError("thermal_bb_input must be finite")
@@ -523,16 +525,18 @@ def prepare_inputs(
             raise ValueError("user_angles must be provided for solar_lat mode")
         if not options.do_mvout_only and relazms.size == 0:
             raise ValueError("user_relazms must be provided for solar_lat mode")
-        obs_rows = []
         if options.do_mvout_only:
-            for sza in beams:
-                obs_rows.append([float(sza), 0.0, 0.0])
+            obsgeoms = np.asarray([[float(sza), 0.0, 0.0] for sza in beams], dtype=float)
         else:
-            for sza in beams:
-                for vza in angles:
-                    for azm in relazms:
-                        obs_rows.append([float(sza), float(vza), float(azm)])
-        obsgeoms = np.asarray(obs_rows, dtype=float)
+            obsgeoms = np.asarray(
+                [
+                    [float(sza), float(vza), float(azm)]
+                    for sza in beams
+                    for vza in angles
+                    for azm in relazms
+                ],
+                dtype=float,
+            )
         do_postprocessing, normalized_earth_radius = _validate_inputs(
             options=options,
             tau_arr=tau,

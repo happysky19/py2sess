@@ -51,6 +51,52 @@ class ThermalSourceTests(unittest.TestCase):
         np.testing.assert_allclose(source.planck, expected_planck)
         np.testing.assert_allclose(source.surface_planck, expected_surface)
 
+    def test_profile_helper_vectorizes_over_wavenumber_bands(self) -> None:
+        level_temperature = np.array([220.0, 230.0, 240.0, 250.0], dtype=float)
+        surface_temperature = 280.0
+        bands = np.array([[899.5, 900.5], [900.5, 901.5], [901.5, 902.5]], dtype=float)
+        source = thermal_source_from_temperature_profile(
+            level_temperature,
+            surface_temperature,
+            wavenumber_band_cm_inv=bands,
+        )
+        expected_planck = np.vstack(
+            [planck_radiance_wavenumber_band(level_temperature, low, high) for low, high in bands]
+        )
+        expected_surface = np.array(
+            [planck_radiance_wavenumber_band(surface_temperature, low, high) for low, high in bands]
+        )
+        self.assertEqual(source.planck.shape, (3, 4))
+        self.assertEqual(source.surface_planck.shape, (3,))
+        np.testing.assert_allclose(source.planck, expected_planck, rtol=1.0e-14)
+        np.testing.assert_allclose(source.surface_planck, expected_surface, rtol=1.0e-14)
+
+    def test_profile_helper_reuses_uniform_sliding_band_grid(self) -> None:
+        level_temperature = np.array([220.0, 230.0, 240.0, 250.0], dtype=float)
+        surface_temperature = 280.0
+        low = 899.5 + 0.001 * np.arange(8, dtype=float)
+        bands = np.column_stack((low, low + 1.0))
+
+        source = thermal_source_from_temperature_profile(
+            level_temperature,
+            surface_temperature,
+            wavenumber_band_cm_inv=bands,
+        )
+        expected_planck = np.vstack(
+            [planck_radiance_wavenumber_band(level_temperature, lo, hi) for lo, hi in bands]
+        )
+        expected_surface = np.array(
+            [planck_radiance_wavenumber_band(surface_temperature, lo, hi) for lo, hi in bands]
+        )
+
+        np.testing.assert_allclose(source.planck, expected_planck, rtol=2.0e-13, atol=1.0e-14)
+        np.testing.assert_allclose(
+            source.surface_planck,
+            expected_surface,
+            rtol=2.0e-13,
+            atol=1.0e-14,
+        )
+
     def test_profile_helper_returns_constant_planck_for_constant_temperature(self) -> None:
         temperature = 250.0
         source = thermal_source_from_temperature_profile(

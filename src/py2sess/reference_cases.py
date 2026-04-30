@@ -10,6 +10,7 @@ import numpy as np
 
 _TIR_STREAM_VALUE = 0.5
 _UV_STREAM_VALUE = 1.0 / np.sqrt(3.0)
+_REFERENCE_KEYS = ("ref_2s", "ref_fo", "ref_total")
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,8 @@ class TirBenchmarkCase:
 
     selected_indices: np.ndarray
     wavelengths: np.ndarray
+    wavenumber_cm_inv: np.ndarray
+    wavenumber_band_cm_inv: np.ndarray
     heights: np.ndarray
     user_angle: float
     tau_arr: np.ndarray
@@ -29,6 +32,8 @@ class TirBenchmarkCase:
     aerosol_fraction: np.ndarray
     aerosol_moments: np.ndarray
     aerosol_interp_fraction: np.ndarray
+    level_temperature_k: np.ndarray
+    surface_temperature_k: np.ndarray
     thermal_bb_input: np.ndarray
     surfbb: np.ndarray
     albedo: np.ndarray
@@ -97,17 +102,27 @@ class UvBenchmarkCase:
 def _load_npz(name: str) -> dict[str, np.ndarray]:
     """Loads one packaged NumPy fixture into memory."""
     resource = files("py2sess.data.benchmark").joinpath(name)
-    with as_file(resource) as path:
-        with np.load(path) as data:
-            return {key: np.array(data[key]) for key in data.files}
+    with as_file(resource) as path, np.load(path) as data:
+        return {key: np.array(data[key]) for key in data.files}
+
+
+def _load_reference_outputs(name: str) -> dict[str, np.ndarray]:
+    """Loads a reference-output-only fixture."""
+    data = _load_npz(name)
+    if set(data) != set(_REFERENCE_KEYS):
+        raise ValueError(f"{name} must contain only {', '.join(_REFERENCE_KEYS)}")
+    return data
 
 
 def load_tir_benchmark_case() -> TirBenchmarkCase:
     """Returns the packaged thermal benchmark case."""
     data = _load_npz("tir_benchmark_fixture.npz")
+    refs = _load_reference_outputs("tir_reference_outputs.npz")
     return TirBenchmarkCase(
         selected_indices=data["selected_indices"],
         wavelengths=data["wavelengths"],
+        wavenumber_cm_inv=data["wavenumber_cm_inv"],
+        wavenumber_band_cm_inv=data["wavenumber_band_cm_inv"],
         heights=data["heights"],
         user_angle=float(data["user_angle"][0]),
         tau_arr=data["tau_arr"],
@@ -119,19 +134,22 @@ def load_tir_benchmark_case() -> TirBenchmarkCase:
         aerosol_fraction=data["aerosol_fraction"],
         aerosol_moments=data["aerosol_moments"],
         aerosol_interp_fraction=data["aerosol_interp_fraction"],
+        level_temperature_k=data["level_temperature_k"],
+        surface_temperature_k=data["surface_temperature_k"],
         thermal_bb_input=data["thermal_bb_input"],
         surfbb=data["surfbb"],
         albedo=data["albedo"],
         emissivity=data["emissivity"],
-        ref_2s=data["ref_2s"],
-        ref_fo=data["ref_fo"],
-        ref_total=data["ref_total"],
+        ref_2s=refs["ref_2s"],
+        ref_fo=refs["ref_fo"],
+        ref_total=refs["ref_total"],
     )
 
 
 def load_uv_benchmark_case() -> UvBenchmarkCase:
     """Returns the packaged solar benchmark case."""
     data = _load_npz("uv_benchmark_fixture.npz")
+    refs = _load_reference_outputs("uv_reference_outputs.npz")
     return UvBenchmarkCase(
         selected_indices=data["selected_indices"],
         wavelengths=data["wavelengths"],
@@ -158,7 +176,7 @@ def load_uv_benchmark_case() -> UvBenchmarkCase:
         pxsq=data["pxsq"],
         px0x=data["px0x"],
         ulp=float(data["ulp"][0]),
-        ref_2s=data["ref_2s"],
-        ref_fo=data["ref_fo"],
-        ref_total=data["ref_total"],
+        ref_2s=refs["ref_2s"],
+        ref_fo=refs["ref_fo"],
+        ref_total=refs["ref_total"],
     )

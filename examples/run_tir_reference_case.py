@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from py2sess import TwoStreamEss, TwoStreamEssOptions
+from py2sess import thermal_source_from_temperature_profile, TwoStreamEss, TwoStreamEssOptions
 from py2sess.optical.phase import build_two_stream_phase_inputs
 from py2sess.reference_cases import load_tir_benchmark_case
 from py2sess.rtsolver.backend import has_torch, to_numpy
@@ -53,6 +53,13 @@ def main() -> None:
         aerosol_moments=case.aerosol_moments,
         aerosol_interp_fraction=case.aerosol_interp_fraction,
     )
+    source = thermal_source_from_temperature_profile(
+        case.level_temperature_k,
+        case.surface_temperature_k,
+        wavenumber_band_cm_inv=case.wavenumber_band_cm_inv,
+    )
+    planck = np.asarray(source.planck, dtype=float)
+    surface_planck = np.asarray(source.surface_planck, dtype=float)
 
     solver = TwoStreamEss(TwoStreamEssOptions(nlyr=case.tau_arr.shape[1], mode="thermal"))
     numpy_result = solver.forward(
@@ -64,8 +71,8 @@ def main() -> None:
         stream=case.stream_value,
         albedo=case.albedo,
         delta_m_truncation_factor=optics.delta_m_truncation_factor,
-        planck=case.thermal_bb_input,
-        surface_planck=case.surfbb,
+        planck=planck,
+        surface_planck=surface_planck,
         emissivity=case.emissivity,
         include_fo=True,
     )
@@ -94,8 +101,8 @@ def main() -> None:
             stream=case.stream_value,
             albedo=case.albedo,
             delta_m_truncation_factor=optics.delta_m_truncation_factor,
-            planck=case.thermal_bb_input,
-            surface_planck=case.surfbb,
+            planck=planck,
+            surface_planck=surface_planck,
             emissivity=case.emissivity,
             include_fo=True,
         )

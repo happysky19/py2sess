@@ -4,7 +4,9 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/run_full_benchmark_threads.sh UV_BUNDLE TIR_BUNDLE
+  UV_PROFILE=profile.txt UV_SCENE=uv.yaml \
+  TIR_PROFILE=profile.txt TIR_SCENE=tir.yaml \
+  scripts/run_full_benchmark_threads.sh
 
 Environment:
   PYTHON=python3          Python executable
@@ -15,10 +17,6 @@ Environment:
   LIMIT=                 Optional spectral-row limit
   CHUNK_SIZE=            Optional chunk-size override
   OUTPUT_LEVELS=0        Set to 1 to benchmark profile output
-  USE_DUMPED_DERIVED_OPTICS=0
-                        Set to 1 to bypass Python optical preprocessing
-  USE_DUMPED_THERMAL_SOURCE=0
-                        Set to 1 to bypass TIR temperature-source generation
 USAGE
 }
 
@@ -27,14 +25,12 @@ die() {
   exit 1
 }
 
-if [[ $# -ne 2 ]]; then
+if [[ $# -ne 0 ]]; then
   usage
   exit 2
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-UV_BUNDLE="$1"
-TIR_BUNDLE="$2"
 
 PYTHON="${PYTHON:-python3}"
 BACKEND="${BACKEND:-both}"
@@ -43,8 +39,12 @@ TORCH_DEVICE="${TORCH_DEVICE:-cpu}"
 TORCH_DTYPE="${TORCH_DTYPE:-float64}"
 OUTPUT_LEVELS="${OUTPUT_LEVELS:-0}"
 
-[[ -f "$UV_BUNDLE" ]] || die "UV bundle not found: $UV_BUNDLE"
-[[ -f "$TIR_BUNDLE" ]] || die "TIR bundle not found: $TIR_BUNDLE"
+[[ -n "${UV_PROFILE:-}" && -n "${UV_SCENE:-}" ]] || die "UV_PROFILE and UV_SCENE are required"
+[[ -n "${TIR_PROFILE:-}" && -n "${TIR_SCENE:-}" ]] || die "TIR_PROFILE and TIR_SCENE are required"
+[[ -f "$UV_PROFILE" ]] || die "UV profile not found: $UV_PROFILE"
+[[ -f "$UV_SCENE" ]] || die "UV scene not found: $UV_SCENE"
+[[ -f "$TIR_PROFILE" ]] || die "TIR profile not found: $TIR_PROFILE"
+[[ -f "$TIR_SCENE" ]] || die "TIR scene not found: $TIR_SCENE"
 
 case "$BACKEND" in
   numpy | torch | both) ;;
@@ -55,6 +55,7 @@ common_args=(
   --backend "$BACKEND"
   --torch-device "$TORCH_DEVICE"
   --torch-dtype "$TORCH_DTYPE"
+  --require-python-generated-inputs
 )
 
 if [[ -n "${LIMIT:-}" ]]; then
@@ -69,20 +70,12 @@ if [[ "$OUTPUT_LEVELS" == "1" ]]; then
   common_args+=(--output-levels)
 fi
 
-if [[ "${USE_DUMPED_DERIVED_OPTICS:-0}" == "1" ]]; then
-  common_args+=(--use-dumped-derived-optics)
-fi
-
 run_case() {
   local name="$1"
   local script="$2"
-  local bundle="$3"
-  local threads="$4"
-  local case_args=("${common_args[@]}")
-
-  if [[ "$name" == "TIR" && "${USE_DUMPED_THERMAL_SOURCE:-0}" == "1" ]]; then
-    case_args+=(--use-dumped-thermal-source)
-  fi
+  local profile="$3"
+  local scene="$4"
+  local threads="$5"
 
   echo
   echo "== $name | threads=$threads | backend=$BACKEND =="
@@ -92,18 +85,23 @@ run_case() {
   MKL_NUM_THREADS="$threads" \
   VECLIB_MAXIMUM_THREADS="$threads" \
   NUMEXPR_NUM_THREADS="$threads" \
+  NUMBA_NUM_THREADS="$threads" \
   PYTHONDONTWRITEBYTECODE=1 \
   PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
-    "$PYTHON" "$ROOT_DIR/examples/$script" "$bundle" \
-      "${case_args[@]}" \
+    "$PYTHON" "$ROOT_DIR/examples/$script" \
+      --profile "$profile" \
+      --scene "$scene" \
+      "${common_args[@]}" \
       --torch-threads "$threads"
 }
 
 echo "py2sess full-spectrum benchmark sweep"
-echo "  UV bundle:  $UV_BUNDLE"
-echo "  TIR bundle: $TIR_BUNDLE"
+echo "  UV profile:  $UV_PROFILE"
+echo "  UV scene:    $UV_SCENE"
+echo "  TIR profile: $TIR_PROFILE"
+echo "  TIR scene:   $TIR_SCENE"
 
 for threads in $THREADS; do
-  run_case "UV" "benchmark_uv_full_spectrum.py" "$UV_BUNDLE" "$threads"
-  run_case "TIR" "benchmark_tir_full_spectrum.py" "$TIR_BUNDLE" "$threads"
+  run_case "UV" "benchmark_uv_full_spectrum.py" "$UV_PROFILE" "$UV_SCENE" "$threads"
+  run_case "TIR" "benchmark_tir_full_spectrum.py" "$TIR_PROFILE" "$TIR_SCENE" "$threads"
 done
