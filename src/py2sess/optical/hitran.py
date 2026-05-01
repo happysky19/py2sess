@@ -406,7 +406,7 @@ def hitran_cross_sections(
     matching the Fortran CreateProps call site.
     """
     if abs(float(fwhm)) > 1.0e-13:
-        raise NotImplementedError("HITRAN Gaussian convolution is not implemented")
+        raise NotImplementedError("HITRAN Gaussian convolution is not implemented; pass fwhm=0.0")
     grid = _as_1d_float(spectral_grid, "spectral_grid")
     pressure = _as_1d_float(pressure_atm, "pressure_atm")
     temperature = _as_1d_float(temperature_k, "temperature_k")

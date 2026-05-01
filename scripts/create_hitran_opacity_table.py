@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import tempfile
@@ -37,6 +38,11 @@ def main() -> None:
     parser.add_argument("--spectral-limit", type=int)
     parser.add_argument("--fwhm", type=float, default=0.0)
     parser.add_argument("--workers", type=int, default=1, help="Parallel gas workers.")
+    parser.add_argument(
+        "--shard-dir",
+        type=Path,
+        help="Optional persistent gas shard directory. Existing valid gas_<index>.npy shards are reused.",
+    )
     args = parser.parse_args()
 
     try:
@@ -48,7 +54,14 @@ def main() -> None:
         parser.error("--workers must be positive")
     with netcdf_file(args.output, "w") as data:
         xsec_var = _create_table_file(data, inputs)
-        _write_cross_sections(args.output, inputs, xsec_var, fwhm=args.fwhm, workers=args.workers)
+        _write_cross_sections(
+            args.output,
+            inputs,
+            xsec_var,
+            fwhm=args.fwhm,
+            workers=args.workers,
+            shard_dir=args.shard_dir,
+        )
     print(f"wrote {args.output} from {inputs['hitran_dir']}")
 
 
@@ -208,34 +221,75 @@ def _write_cross_sections(
     *,
     fwhm: float,
     workers: int,
+    shard_dir: Path | None,
 ) -> None:
     gases = tuple(inputs["gases"])
-    if workers == 1 or len(gases) == 1:
-        partition = load_hitran_partition_functions(inputs["hitran_dir"])
-        for index, gas in enumerate(gases):
-            xsec_var[index] = _compute_gas_cross_section(inputs, gas, fwhm, partition).reshape(
-                xsec_var.shape[1:]
-            )
+    shard_paths = _prepare_shards(shard_dir, len(gases))
+    expected_shape = tuple(int(dim) for dim in xsec_var.shape[1:])
+    missing = []
+    for index, gas in enumerate(gases):
+        shard = shard_paths[index] if shard_paths is not None else None
+        if shard is not None and _valid_shard(shard, expected_shape):
+            xsec_var[index] = np.load(shard, mmap_mode="r").reshape(expected_shape)
+            print(f"  reused gas {index + 1}/{len(gases)}: {gas}", flush=True)
+        else:
+            missing.append((index, gas, shard))
+    if not missing:
         return
 
-    worker_count = min(int(workers), len(gases))
-    with tempfile.TemporaryDirectory(prefix=f"{output.stem}_", dir=output.parent) as tmpdir:
+    if workers == 1 or len(missing) == 1:
+        partition = load_hitran_partition_functions(inputs["hitran_dir"])
+        for index, gas, shard in missing:
+            values = _compute_gas_cross_section(inputs, gas, fwhm, partition)
+            if shard is not None:
+                np.save(shard, values)
+            xsec_var[index] = values.reshape(expected_shape)
+            print(f"  wrote gas {index + 1}/{len(gases)}: {gas}", flush=True)
+        return
+
+    worker_count = min(int(workers), len(missing))
+    with _shard_directory(output, shard_dir) as tmpdir:
+        tasks = [
+            (index, gas, shard if shard is not None else Path(tmpdir) / f"gas_{index}.npy")
+            for index, gas, shard in missing
+        ]
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
             futures = [
-                executor.submit(
-                    _compute_gas_cross_section_file,
-                    inputs,
-                    index,
-                    gas,
-                    fwhm,
-                    Path(tmpdir) / f"gas_{index}.npy",
-                )
-                for index, gas in enumerate(gases)
+                executor.submit(_compute_gas_cross_section_file, inputs, index, gas, fwhm, path)
+                for index, gas, path in tasks
             ]
             for future in as_completed(futures):
                 index, gas, path = future.result()
-                xsec_var[index] = np.load(path, mmap_mode="r").reshape(xsec_var.shape[1:])
+                xsec_var[index] = np.load(path, mmap_mode="r").reshape(expected_shape)
                 print(f"  wrote gas {index + 1}/{len(gases)}: {gas}", flush=True)
+
+
+def _prepare_shards(shard_dir: Path | None, count: int) -> list[Path] | None:
+    if shard_dir is None:
+        return None
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    return [shard_dir / f"gas_{index}.npy" for index in range(count)]
+
+
+def _valid_shard(path: Path, expected_shape: tuple[int, ...]) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        arr = np.load(path, mmap_mode="r")
+    except Exception:
+        return False
+    return tuple(int(dim) for dim in arr.shape) == expected_shape or arr.size == int(
+        np.prod(expected_shape)
+    )
+
+
+@contextmanager
+def _shard_directory(output: Path, shard_dir: Path | None):
+    if shard_dir is not None:
+        yield shard_dir
+        return
+    with tempfile.TemporaryDirectory(prefix=f"{output.stem}_", dir=output.parent) as tmpdir:
+        yield Path(tmpdir)
 
 
 def _compute_gas_cross_section_file(

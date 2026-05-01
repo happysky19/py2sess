@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from py2sess import load_tir_benchmark_case, load_uv_benchmark_case
+from py2sess.reference_cases import load_tir_benchmark_case, load_uv_benchmark_case
 from py2sess.optical.properties import build_layer_optical_properties
 from py2sess.rtsolver.backend import has_torch
 

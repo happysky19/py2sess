@@ -177,36 +177,40 @@ def thermal_source_from_temperature_profile_torch(
         _validate_positive_tensor("surface_temperature_k", surface_temperature)
     if wavelength_microns is not None:
         spectral = _as_tensor(wavelength_microns, dtype=dtype, device=device)
+        if validate:
+            _validate_positive_tensor("wavelength_microns", spectral)
         spectral_grid, level_grid = _profile_spectral_grid(spectral, level_temperature)
         planck = planck_radiance_wavelength_torch(
             level_grid,
             spectral_grid,
             dtype=dtype,
             device=device,
-            validate=validate,
+            validate=False,
         )
         surface_planck = planck_radiance_wavelength_torch(
             surface_temperature,
             spectral,
             dtype=dtype,
             device=device,
-            validate=validate,
+            validate=False,
         )
     else:
         spectral = _as_tensor(wavenumber_cm_inv, dtype=dtype, device=device)
+        if validate:
+            _validate_positive_tensor("wavenumber_cm_inv", spectral)
         spectral_grid, level_grid = _profile_spectral_grid(spectral, level_temperature)
         planck = planck_radiance_wavenumber_torch(
             level_grid,
             spectral_grid,
             dtype=dtype,
             device=device,
-            validate=validate,
+            validate=False,
         )
         surface_planck = planck_radiance_wavenumber_torch(
             surface_temperature,
             spectral,
             dtype=dtype,
             device=device,
-            validate=validate,
+            validate=False,
         )
     return ThermalSourceTorchInputs(planck=planck, surface_planck=surface_planck)

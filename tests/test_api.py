@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 
+from examples._full_spectrum_benchmark_common import public_bvp_solver
 from py2sess import (
     TwoStreamEss,
     TwoStreamEssOptions,
@@ -14,6 +15,36 @@ from py2sess.rtsolver.backend import has_torch, to_numpy
 
 
 class ApiTests(unittest.TestCase):
+    def test_bvp_solver_auto_is_default_and_public_cli_mapping(self) -> None:
+        self.assertEqual(TwoStreamEssOptions(nlyr=3).bvp_solver, "auto")
+        self.assertEqual(TwoStreamEssOptions(nlyr=3, bvp_solver="auto").bvp_solver, "auto")
+        self.assertEqual(public_bvp_solver("auto"), "auto")
+        self.assertEqual(public_bvp_solver("block"), "banded")
+        self.assertEqual(public_bvp_solver("pentadiagonal"), "pentadiag")
+
+    def test_scalar_thermal_auto_bvp_matches_explicit_solvers(self) -> None:
+        kwargs = dict(
+            tau=np.array([0.2, 0.3, 0.4]),
+            ssa=np.array([0.15, 0.10, 0.05]),
+            g=np.array([0.1, 0.2, 0.3]),
+            z=np.array([3.0, 2.0, 1.0, 0.0]),
+            angles=30.0,
+            stream=0.5,
+            planck=np.array([1.0, 1.1, 1.2, 1.3]),
+            surface_planck=1.4,
+            emissivity=0.9,
+            albedo=0.05,
+            include_fo=True,
+        )
+        auto = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="thermal")).forward(**kwargs)
+        for solver_name in ("scipy", "banded", "pentadiag"):
+            with self.subTest(bvp_solver=solver_name):
+                explicit = TwoStreamEss(
+                    TwoStreamEssOptions(nlyr=3, mode="thermal", bvp_solver=solver_name)
+                ).forward(**kwargs)
+                np.testing.assert_allclose(auto.radiance_2s, explicit.radiance_2s)
+                np.testing.assert_allclose(auto.radiance_total, explicit.radiance_total)
+
     def test_scalar_forward_exposes_profile_aliases_when_requested(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True))
         result = solver.forward(
@@ -64,6 +95,55 @@ class ApiTests(unittest.TestCase):
         )
         np.testing.assert_allclose(thermal_result.radiance, np.array([0.9]), atol=1.0e-12)
         np.testing.assert_allclose(thermal_result.radiance_profile, np.full((1, 4), 0.9))
+
+    def test_batched_torch_forward_accepts_transparent_atmosphere(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        z = np.array([3.0, 2.0, 1.0, 0.0])
+        tau = torch.zeros((2, 3), dtype=torch.float64)
+        zeros = torch.zeros_like(tau)
+        solar = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=3, mode="solar", backend="torch", torch_dtype="float64")
+        )
+        solar_result = solar.forward(
+            tau=tau,
+            ssa=zeros,
+            g=zeros,
+            z=z,
+            angles=[30.0, 20.0, 0.0],
+            fbeam=0.0,
+            albedo=torch.zeros(2, dtype=torch.float64),
+            delta_m_truncation_factor=zeros,
+        )
+        self.assertTrue(torch.isfinite(solar_result.radiance).all().item())
+        np.testing.assert_allclose(to_numpy(solar_result.radiance), np.zeros(2), atol=1.0e-12)
+
+        thermal = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=3, mode="thermal", backend="torch", torch_dtype="float64")
+        )
+        surface_planck = torch.tensor([1.0, 2.0], dtype=torch.float64)
+        emissivity = torch.tensor([0.9, 0.8], dtype=torch.float64)
+        thermal_result = thermal.forward(
+            tau=tau,
+            ssa=zeros,
+            g=zeros,
+            z=z,
+            angles=20.0,
+            planck=torch.zeros((2, 4), dtype=torch.float64),
+            surface_planck=surface_planck,
+            emissivity=emissivity,
+            albedo=1.0 - emissivity,
+            delta_m_truncation_factor=zeros,
+            include_fo=True,
+        )
+        self.assertTrue(torch.isfinite(thermal_result.radiance).all().item())
+        np.testing.assert_allclose(
+            to_numpy(thermal_result.radiance),
+            to_numpy(surface_planck * emissivity),
+            atol=1.0e-12,
+        )
 
     def test_fo_scatter_term_helper_matches_scalar_fo_phase_logic(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True))
@@ -594,6 +674,48 @@ class ApiTests(unittest.TestCase):
             np.testing.assert_allclose(batch.radiance[i], scalar.radiance[0])
             np.testing.assert_allclose(batch.radiance_profile[i], scalar.radiance_profile[0])
 
+    def test_batched_thermal_forward_fo_matches_scalar_rows(self) -> None:
+        solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="thermal", output_levels=True))
+        tau = np.array([[0.1, 0.2, 0.3], [0.2, 0.3, 0.4]])
+        ssa = np.full_like(tau, 0.1)
+        g = np.full_like(tau, 0.05)
+        z = np.array([3.0, 2.0, 1.0, 0.0])
+        planck = np.array([[1.0, 1.1, 1.2, 1.3], [1.2, 1.1, 1.0, 0.9]])
+        surface_planck = np.array([2.0, 2.5])
+        angles = np.array([0.0, 30.0])
+
+        batch = solver.forward_fo(
+            tau=tau,
+            ssa=ssa,
+            g=g,
+            z=z,
+            angles=angles,
+            planck=planck,
+            surface_planck=surface_planck,
+            emissivity=0.9,
+            albedo=0.1,
+        )
+
+        self.assertEqual(batch.radiance.shape, (2, 2))
+        self.assertEqual(batch.radiance_up_profile.shape, (2, 2, 4))
+        for row in range(tau.shape[0]):
+            for geom, angle in enumerate(angles):
+                scalar = solver.forward_fo(
+                    tau=tau[row],
+                    ssa=ssa[row],
+                    g=g[row],
+                    z=z,
+                    angles=float(angle),
+                    planck=planck[row],
+                    surface_planck=float(surface_planck[row]),
+                    emissivity=0.9,
+                    albedo=0.1,
+                )
+                np.testing.assert_allclose(batch.radiance[row, geom], scalar.radiance[0])
+                np.testing.assert_allclose(
+                    batch.radiance_up_profile[row, geom], scalar.radiance_up_profile[0]
+                )
+
     def test_batched_forward_default_omits_level_profiles(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar"))
         result = solver.forward(
@@ -838,6 +960,65 @@ class ApiTests(unittest.TestCase):
 
         result.radiance_total.sum().backward()
         for tensor in (tau, ssa, g, scaling, planck, surface_planck, albedo):
+            self.assertIsNotNone(tensor.grad)
+            self.assertTrue(torch.isfinite(tensor.grad).all().item())
+            self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)
+
+    def test_batched_thermal_torch_forward_fo_matches_numpy_and_keeps_gradients(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        tau_np = np.array([[0.2, 0.3, 0.4], [0.25, 0.35, 0.45]], dtype=float)
+        ssa_np = np.array([[0.15, 0.10, 0.05], [0.12, 0.08, 0.04]], dtype=float)
+        g_np = np.array([[0.1, 0.2, 0.3], [0.12, 0.22, 0.32]], dtype=float)
+        planck_np = np.array([[1.0, 1.1, 1.2, 1.3], [0.9, 1.0, 1.1, 1.2]], dtype=float)
+        surface_np = np.array([1.4, 1.3], dtype=float)
+        emissivity_np = np.array([0.9, 0.85], dtype=float)
+        z = np.array([3.0, 2.0, 1.0, 0.0])
+        numpy_result = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="thermal")).forward_fo(
+            tau=tau_np,
+            ssa=ssa_np,
+            g=g_np,
+            z=z,
+            angles=30.0,
+            planck=planck_np,
+            surface_planck=surface_np,
+            emissivity=emissivity_np,
+            albedo=1.0 - emissivity_np,
+        )
+
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="thermal",
+                backend="torch",
+                torch_dtype="float64",
+            )
+        )
+        tau = torch.tensor(tau_np, dtype=torch.float64, requires_grad=True)
+        ssa = torch.tensor(ssa_np, dtype=torch.float64, requires_grad=True)
+        g = torch.tensor(g_np, dtype=torch.float64, requires_grad=True)
+        planck = torch.tensor(planck_np, dtype=torch.float64, requires_grad=True)
+        surface_planck = torch.tensor(surface_np, dtype=torch.float64, requires_grad=True)
+        emissivity = torch.tensor(emissivity_np, dtype=torch.float64, requires_grad=True)
+        result = solver.forward_fo(
+            tau=tau,
+            ssa=ssa,
+            g=g,
+            z=z,
+            angles=30.0,
+            planck=planck,
+            surface_planck=surface_planck,
+            emissivity=emissivity,
+            albedo=1.0 - emissivity,
+        )
+
+        np.testing.assert_allclose(
+            to_numpy(result.radiance), numpy_result.radiance, rtol=1.0e-12, atol=1.0e-12
+        )
+        result.radiance.sum().backward()
+        for tensor in (tau, ssa, g, planck, surface_planck, emissivity):
             self.assertIsNotNone(tensor.grad)
             self.assertTrue(torch.isfinite(tensor.grad).all().item())
             self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)

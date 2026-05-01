@@ -105,6 +105,22 @@ class HitranInputTests(unittest.TestCase):
         self.assertGreater(float(xsec[1, 0]), float(xsec[0, 0]))
         self.assertGreater(float(xsec[1, 0]), float(xsec[2, 0]))
 
+    def test_hitran_fwhm_requires_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_partition_file(root, {(1, 1): np.ones(195)})
+            (root / "01_hit09.par").write_text(_line(1, 1, 1000.0, strength=1.0e-20))
+
+            with self.assertRaisesRegex(NotImplementedError, "fwhm=0.0"):
+                hitran_cross_sections(
+                    hitran_dir=root,
+                    molecule="H2O",
+                    spectral_grid=np.array([1000.0]),
+                    pressure_atm=np.array([1.0]),
+                    temperature_k=np.array([296.0]),
+                    fwhm=0.1,
+                )
+
     def test_cross_sections_use_fortran_index_voigt_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

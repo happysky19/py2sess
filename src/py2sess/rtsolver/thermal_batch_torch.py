@@ -49,6 +49,10 @@ class ThermalBatchTorchResult:
 
 def _as_tensor(value, *, dtype, device):
     """Converts ``value`` to a torch tensor on the requested context."""
+    if torch.is_tensor(value):
+        if value.dtype == dtype and value.device == device:
+            return value
+        return value.to(dtype=dtype, device=device)
     if isinstance(value, np.ndarray) and not value.flags.writeable:
         # Solver inputs are read-only. Sharing mmap-backed CPU arrays avoids
         # copying full-spectrum cache slices before every torch batch call.
@@ -56,6 +60,15 @@ def _as_tensor(value, *, dtype, device):
             warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
             return torch.as_tensor(value, dtype=dtype, device=device)
     return torch.as_tensor(value, dtype=dtype, device=device)
+
+
+def fo_thermal_geometry_to_torch(geometry: dict, *, dtype, device) -> dict:
+    """Moves reusable FO geometry arrays to torch once per geometry."""
+    converted = dict(geometry)
+    for key in ("xfine", "wfine", "raycon", "cota", "cotfine", "csqfine"):
+        if key in converted:
+            converted[key] = _as_tensor(converted[key], dtype=dtype, device=device)
+    return converted
 
 
 def _accumulate_upwelling_profile_torch(*, layer_source, layer_trans, surface_source):
@@ -90,7 +103,10 @@ def _thermal_coefficients_batch(delta_tau, thermal_bb_input):
     """Builds linear thermal-source coefficients for a wavelength batch."""
     lower = thermal_bb_input[:, :-1]
     upper = thermal_bb_input[:, 1:]
-    return lower, (upper - lower) / delta_tau
+    nonzero_tau = delta_tau != 0.0
+    safe_delta_tau = torch.where(nonzero_tau, delta_tau, torch.ones_like(delta_tau))
+    slope = torch.where(nonzero_tau, (upper - lower) / safe_delta_tau, 0.0)
+    return lower, slope
 
 
 def _thermal_green_function_batch(
@@ -367,7 +383,13 @@ def _fo_thermal_toa_batch(
     if do_source_deltam_scaling:
         single_scatter_scale = single_scatter_scale / (1.0 - omega * scaling)
     therm0 = lower_bb * single_scatter_scale
-    therm1 = ((upper_bb - lower_bb) / deltaus) * single_scatter_scale
+    nonzero_deltaus = deltaus != 0.0
+    safe_deltaus = torch.where(nonzero_deltaus, deltaus, torch.ones_like(deltaus))
+    therm1 = torch.where(
+        nonzero_deltaus,
+        ((upper_bb - lower_bb) / safe_deltaus) * single_scatter_scale,
+        torch.zeros_like(deltaus),
+    )
     height_t = _as_tensor(heights, dtype=dtype, device=device)
     extinction = deltaus / (height_t[:-1] - height_t[1:])
     geometry = fo_geometry

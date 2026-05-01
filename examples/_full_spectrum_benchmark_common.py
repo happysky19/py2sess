@@ -3,45 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Collection
 from dataclasses import dataclass
-from importlib.resources import as_file, files
 from pathlib import Path
-import time
 
 import numpy as np
-
-from py2sess.optical.properties import sum_component_axis
-from py2sess.optical.phase import ssa_from_optical_depth
-from py2sess.optical.scene import (
-    atmospheric_profile_from_levels,
-    build_scene_layer_optical_properties,
-    build_scene_layer_optical_properties_from_gas_tau,
-)
-from py2sess.optical.scene_io import build_benchmark_scene_inputs
-
-
-SCENE_LAYER_CROSS_SECTION_REQUIRED_KEYS = ("pressure_hpa", "temperature_k", "gas_cross_sections")
-SCENE_LAYER_GAS_TAU_REQUIRED_KEYS = ("pressure_hpa", "temperature_k", "gas_absorption_tau")
-SCENE_LAYER_REQUIRED_KEYSETS = (
-    SCENE_LAYER_GAS_TAU_REQUIRED_KEYS,
-    SCENE_LAYER_CROSS_SECTION_REQUIRED_KEYS,
-)
-SCENE_LAYER_OPTIONAL_KEYS = (
-    "gas_vmr",
-    "heights",
-    "surface_altitude_m",
-    "co2_ppmv",
-    "opacity_wavelengths",
-    "aerosol_loadings",
-    "aerosol_wavelengths_microns",
-    "aerosol_bulk_iops",
-    "aerosol_select_wavelength_microns",
-)
-LAYER_OPTICAL_ABSORPTION_KEYS = ("absorption_tau", "gas_absorption_tau")
-LAYER_OPTICAL_RAYLEIGH_KEY = "rayleigh_scattering_tau"
-LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY = "aerosol_extinction_tau"
-LAYER_OPTICAL_AEROSOL_SCATTERING_KEY = "aerosol_scattering_tau"
 
 
 @dataclass(frozen=True)
@@ -64,68 +29,23 @@ class BenchmarkRow:
         return self.wavelengths / self.rt_seconds
 
 
-def input_store_kind(path: Path) -> str:
-    if path.is_dir():
-        return "array-directory"
-    return "npz"
-
-
-def input_keys(path: Path) -> set[str]:
-    if path.is_dir():
-        return {entry.stem for entry in path.glob("*.npy") if entry.is_file()}
-    with np.load(path) as data:
-        return set(data.files)
-
-
-def load_input_arrays(path: Path, keys: tuple[str, ...] | None = None) -> dict[str, np.ndarray]:
-    """Loads selected benchmark input arrays.
-
-    Directory inputs store one ``.npy`` file per array and are opened with
-    memory mapping. Legacy ``.npz`` inputs are still read into memory.
-    """
-    if path.is_dir():
-        names = (
-            sorted(input_keys(path))
-            if keys is None
-            else [key for key in keys if (path / f"{key}.npy").is_file()]
-        )
-        return {key: np.load(path / f"{key}.npy", mmap_mode="r") for key in names}
-    with np.load(path) as data:
-        names = data.files if keys is None else [key for key in keys if key in data.files]
-        return {key: np.array(data[key]) for key in names}
-
-
-def load_packaged_reference_total(name: str) -> np.ndarray:
-    resource = files("py2sess.data.benchmark").joinpath(name)
-    with as_file(resource) as path, np.load(path) as data:
-        if set(data.files) != {"ref_2s", "ref_fo", "ref_total"}:
-            raise ValueError(f"{name} must contain only reference outputs")
-        return np.asarray(data["ref_total"], dtype=float)
-
-
-def require_directory_input_store(path: Path, *, label: str) -> None:
-    if not path.is_dir():
-        raise ValueError(
-            f"{label} strict generated-input mode requires an array-directory input store, "
-            "not a legacy .npz bundle"
-        )
-
-
 def add_common_benchmark_arguments(
     parser: argparse.ArgumentParser,
     *,
-    input_help: str,
     torch_bvp_choices: tuple[str, ...] = ("auto", "block"),
 ) -> None:
-    parser.add_argument("input", type=Path, nargs="?", help=input_help)
-    parser.add_argument("--profile", type=Path, help="Atmospheric profile text file.")
-    parser.add_argument("--scene", type=Path, help="Benchmark scene YAML file.")
+    parser.add_argument(
+        "--profile", type=Path, required=True, help="Atmospheric profile text file."
+    )
+    parser.add_argument("--scene", type=Path, required=True, help="Benchmark scene YAML file.")
     parser.add_argument("--backend", choices=["numpy", "torch", "both"], default="both")
     parser.add_argument("--limit", type=int, default=None, help="Optional spectral-row limit.")
     parser.add_argument(
         "--chunk-size", type=int, default=None, help="Optional chunk size override."
     )
-    parser.add_argument("--numpy-bvp-engine", choices=["auto", "block"], default="auto")
+    parser.add_argument(
+        "--numpy-bvp-engine", choices=["auto", "block", "pentadiagonal"], default="auto"
+    )
     parser.add_argument("--torch-bvp-engine", choices=torch_bvp_choices, default="auto")
     parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
     parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
@@ -136,280 +56,20 @@ def add_common_benchmark_arguments(
         help="Benchmark the public forward profile path instead of endpoint-only output.",
     )
     parser.add_argument(
-        "--use-dumped-derived-optics",
-        action="store_true",
-        help="Use stored optical preprocessing outputs instead of Python preprocessing.",
-    )
-    parser.add_argument(
         "--require-python-generated-inputs",
         action="store_true",
-        help="Fail instead of falling back to direct or dumped derived RT inputs.",
+        help="Fail if the scene would use direct HITRAN instead of a saved gas table.",
     )
-
-
-def validate_scene_input_args(
-    parser: argparse.ArgumentParser,
-    args: argparse.Namespace,
-    *,
-    forbidden_scene_flags: tuple[tuple[str, str], ...] = (),
-) -> bool:
-    scene_mode = args.profile is not None or args.scene is not None
-    if scene_mode and (args.profile is None or args.scene is None):
-        parser.error("--profile and --scene must be passed together")
-    if scene_mode and args.input is not None:
-        parser.error("pass either a runtime input store or --profile/--scene, not both")
-    if not scene_mode and args.input is None:
-        parser.error("input store or --profile/--scene is required")
-    for attr, flag in forbidden_scene_flags:
-        if scene_mode and getattr(args, attr):
-            parser.error(f"{flag} is not valid with --profile/--scene")
-    return scene_mode
-
-
-def benchmark_input_source(
-    args: argparse.Namespace,
-    *,
-    kind: str,
-    label: str,
-    scene_mode: bool,
-) -> tuple[dict[str, np.ndarray] | None, set[str], Path, str]:
-    if scene_mode:
-        bundle = build_benchmark_scene_inputs(
-            kind=kind,
-            profile_path=args.profile,
-            scene_path=args.scene,
-            spectral_limit=args.limit,
-            strict_runtime_inputs=args.require_python_generated_inputs,
-        )
-        return bundle, set(bundle), args.scene, "profile+scene"
-
-    if args.require_python_generated_inputs:
-        require_directory_input_store(args.input, label=label)
-    return None, input_keys(args.input), args.input, input_store_kind(args.input)
-
-
-def select_layer_optical_keys(
-    available: set[str],
-    *,
-    total_key: str,
-    ssa_key: str,
-) -> tuple[str, ...]:
-    absorption_key = next(
-        (key for key in LAYER_OPTICAL_ABSORPTION_KEYS if key in available),
-        None,
-    )
-    if absorption_key is None or LAYER_OPTICAL_RAYLEIGH_KEY not in available:
-        required = scene_layer_required_keys(available)
-        if required is not None:
-            return required + tuple(key for key in SCENE_LAYER_OPTIONAL_KEYS if key in available)
-        return (total_key, ssa_key)
-
-    keys = [absorption_key, LAYER_OPTICAL_RAYLEIGH_KEY]
-    if LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY in available:
-        if LAYER_OPTICAL_AEROSOL_SCATTERING_KEY in available:
-            keys.extend(
-                (
-                    LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY,
-                    LAYER_OPTICAL_AEROSOL_SCATTERING_KEY,
-                )
-            )
-        else:
-            return (total_key, ssa_key)
-    elif LAYER_OPTICAL_AEROSOL_SCATTERING_KEY in available:
-        keys.append(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY)
-    return tuple(keys)
-
-
-def layer_optical_keys_are_components(keys: tuple[str, ...]) -> bool:
-    return any(key in keys for key in LAYER_OPTICAL_ABSORPTION_KEYS)
-
-
-def scene_layer_required_keys(keys: Collection[str]) -> tuple[str, ...] | None:
-    for required in SCENE_LAYER_REQUIRED_KEYSETS:
-        if all(key in keys for key in required):
-            return required
-    return None
-
-
-def layer_optical_keys_are_scene(keys: tuple[str, ...]) -> bool:
-    return scene_layer_required_keys(keys) is not None
-
-
-def require_python_generated_layer_optical_inputs(
-    keys: tuple[str, ...],
-    *,
-    total_key: str,
-    ssa_key: str,
-    label: str,
-) -> None:
-    if keys == (total_key, ssa_key):
-        raise ValueError(
-            f"{label} strict generated-input mode requires component optical-depth "
-            "fields such as absorption_tau and rayleigh_scattering_tau"
-        )
-
-
-def select_phase_optical_keys(
-    available: set[str],
-    *,
-    label: str,
-    use_dumped_derived_optics: bool,
-    layer_optical_generates_fractions: bool,
-    layer_optical_from_scene: bool,
-    require_python_generated_inputs: bool,
-    required_fraction_keys: tuple[str, ...],
-    dumped_keys: tuple[str, ...],
-    aerosol_interp_key: str,
-    aerosol_coordinate_keys: tuple[str, ...] = (),
-) -> tuple[str, ...]:
-    if require_python_generated_inputs and use_dumped_derived_optics:
-        raise ValueError(
-            f"{label} strict generated-input mode cannot be combined with "
-            "--use-dumped-derived-optics"
-        )
-    if layer_optical_from_scene:
-        required_physical = ("aerosol_moments",)
-    elif layer_optical_generates_fractions:
-        required_physical = ("depol", "aerosol_moments")
-    else:
-        required_physical = required_fraction_keys
-
-    if not use_dumped_derived_optics and set(required_physical).issubset(available):
-        keys = list(required_physical)
-        if aerosol_interp_key in available:
-            keys.append(aerosol_interp_key)
-        else:
-            keys.extend(key for key in aerosol_coordinate_keys if key in available)
-        return tuple(keys)
-    if require_python_generated_inputs:
-        missing = ", ".join(key for key in required_physical if key not in available)
-        raise ValueError(
-            f"{label} strict generated-input mode requires physical phase inputs"
-            + (f": {missing}" if missing else "")
-        )
-    return dumped_keys
-
-
-def prepare_layer_optical_properties(
-    bundle: dict[str, np.ndarray],
-    *,
-    total_key: str,
-    ssa_key: str,
-    validate_inputs: bool = True,
-) -> tuple[dict[str, np.ndarray], float, str]:
-    """Builds ``tau``/``ssa`` and scattering fractions when components exist."""
-    absorption_key = next((key for key in LAYER_OPTICAL_ABSORPTION_KEYS if key in bundle), None)
-    if absorption_key is not None and LAYER_OPTICAL_RAYLEIGH_KEY in bundle:
-        start = time.perf_counter()
-        aerosol_ext = bundle.get(LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY)
-        aerosol_scat = bundle.get(LAYER_OPTICAL_AEROSOL_SCATTERING_KEY)
-        absorption = np.asarray(bundle[absorption_key], dtype=float)
-        rayleigh = np.asarray(bundle[LAYER_OPTICAL_RAYLEIGH_KEY], dtype=float)
-        aerosol_scat_arr = None if aerosol_scat is None else np.asarray(aerosol_scat, dtype=float)
-        aerosol_ext_arr = None if aerosol_ext is None else np.asarray(aerosol_ext, dtype=float)
-        if validate_inputs:
-            for name, value in (
-                (absorption_key, absorption),
-                (LAYER_OPTICAL_RAYLEIGH_KEY, rayleigh),
-                (LAYER_OPTICAL_AEROSOL_SCATTERING_KEY, aerosol_scat_arr),
-                (LAYER_OPTICAL_AEROSOL_EXTINCTION_KEY, aerosol_ext_arr),
-            ):
-                if value is not None and (not np.all(np.isfinite(value)) or np.any(value < 0.0)):
-                    raise ValueError(f"{name} must be finite and nonnegative")
-            if (
-                aerosol_ext_arr is not None
-                and aerosol_scat_arr is not None
-                and np.any(aerosol_scat_arr > aerosol_ext_arr + 1.0e-14)
-            ):
-                raise ValueError("aerosol_scattering_tau must not exceed aerosol_extinction_tau")
-        aerosol_scat_sum = 0.0 if aerosol_scat_arr is None else sum_component_axis(aerosol_scat_arr)
-        aerosol_ext_sum = (
-            aerosol_scat_sum if aerosol_ext_arr is None else sum_component_axis(aerosol_ext_arr)
-        )
-        total_tau = absorption + rayleigh + aerosol_ext_sum
-        scattering_tau = rayleigh + aerosol_scat_sum
-        prepared = {
-            **bundle,
-            total_key: total_tau,
-            ssa_key: ssa_from_optical_depth(total_tau, scattering_tau),
-            "_scattering_tau": scattering_tau,
-        }
-        return (
-            prepared,
-            time.perf_counter() - start,
-            "python-generated from component optical depths",
-        )
-
-    if scene_layer_required_keys(bundle) is not None:
-        start = time.perf_counter()
-        profile = atmospheric_profile_from_levels(
-            pressure_hpa=bundle["pressure_hpa"],
-            temperature_k=bundle["temperature_k"],
-            gas_vmr=bundle.get("gas_vmr"),
-            heights_km=bundle.get("heights"),
-            surface_altitude_m=scalar_value(bundle.get("surface_altitude_m", 0.0)),
-        )
-        aerosol_kwargs = {}
-        if "aerosol_loadings" in bundle:
-            aerosol_kwargs = {
-                "aerosol_loadings": bundle["aerosol_loadings"],
-                "aerosol_wavelengths_microns": bundle.get("aerosol_wavelengths_microns"),
-                "aerosol_bulk_iops": bundle.get("aerosol_bulk_iops"),
-                "aerosol_select_wavelength_microns": scalar_value(
-                    bundle.get("aerosol_select_wavelength_microns", 0.4)
-                ),
-            }
-        scene_kwargs = {
-            "wavelengths_nm": bundle.get("opacity_wavelengths", bundle["wavelengths"]),
-            "profile": profile,
-            "co2_ppmv": scalar_value(bundle.get("co2_ppmv", 385.0)),
-            **aerosol_kwargs,
-        }
-        if "gas_absorption_tau" in bundle:
-            scene = build_scene_layer_optical_properties_from_gas_tau(
-                gas_absorption_tau=bundle["gas_absorption_tau"],
-                **scene_kwargs,
-            )
-        else:
-            scene = build_scene_layer_optical_properties(
-                gas_cross_sections=bundle["gas_cross_sections"],
-                **scene_kwargs,
-            )
-        prepared = {
-            **bundle,
-            "heights": profile.heights_km,
-            total_key: scene.layer.tau,
-            ssa_key: scene.layer.ssa,
-            "absorption_tau": scene.gas_absorption_tau,
-            "rayleigh_scattering_tau": scene.rayleigh_scattering_tau,
-            "aerosol_extinction_tau": scene.aerosol_extinction_tau,
-            "aerosol_scattering_tau": scene.aerosol_scattering_tau,
-            "rayleigh_fraction": scene.layer.rayleigh_fraction,
-            "aerosol_fraction": scene.layer.aerosol_fraction,
-            "depol": scene.depol,
-        }
-        return (
-            prepared,
-            time.perf_counter() - start,
-            "python-generated from scene/profile inputs",
-        )
-
-    return bundle, 0.0, "direct input"
-
-
-def require_keys(bundle: dict[str, np.ndarray], keys: tuple[str, ...], *, label: str) -> None:
-    missing = [key for key in keys if key not in bundle]
-    if missing:
-        missing_text = ", ".join(missing)
-        raise KeyError(f"{label} input store is missing required arrays: {missing_text}")
 
 
 def public_bvp_solver(engine: str) -> str:
+    if engine == "auto":
+        return "auto"
     if engine == "block":
         return "banded"
     if engine == "pentadiagonal":
         return "pentadiag"
-    return "scipy"
+    return engine
 
 
 def slice_spectral_rows(
@@ -427,19 +87,6 @@ def slice_spectral_rows(
     return chunk
 
 
-def trim_spectral_rows(
-    bundle: dict[str, np.ndarray],
-    keys: tuple[str, ...],
-    row_count: int,
-    stop: int,
-) -> dict[str, np.ndarray]:
-    prepared = dict(bundle)
-    for key in keys:
-        if key in prepared and np.asarray(prepared[key]).shape[:1] == (row_count,):
-            prepared[key] = prepared[key][:stop]
-    return prepared
-
-
 def recommended_chunk_size(
     *,
     total_rows: int,
@@ -452,11 +99,12 @@ def recommended_chunk_size(
     nlay = max(int(nlayers), 1)
     if workload == "solar_obs":
         row_floats = (48 if backend == "torch" else 40) * nlay + 64
-        target_mib = 512 if backend == "torch" else 1400
+        target_mib = 1024 if backend == "torch" else 1400
         target_bytes = target_mib * 1024 * 1024
     elif workload == "thermal":
         row_floats = (6 if backend == "torch" else 4) * nlay + 32
-        target_bytes = 384 * 1024 * 1024
+        target_mib = 560 if backend == "torch" else 384
+        target_bytes = target_mib * 1024 * 1024
     else:  # pragma: no cover
         raise ValueError(f"unsupported workload: {workload}")
     chunk = target_bytes // (8 * row_floats)
@@ -507,14 +155,6 @@ def _format_accuracy(value: float | None) -> str:
 def scalar_value(value: np.ndarray | float | int) -> float:
     array = np.asarray(value)
     return float(array.reshape(-1)[0])
-
-
-def looks_like_row_index(values: np.ndarray) -> bool:
-    grid = np.asarray(values, dtype=float)
-    if grid.ndim != 1 or grid.size < 2:
-        return False
-    row_numbers = np.arange(1, grid.size + 1, dtype=float)
-    return np.allclose(grid, row_numbers, rtol=0.0, atol=1.0e-12)
 
 
 def accuracy_summary(value: np.ndarray, reference: np.ndarray) -> tuple[float, float]:

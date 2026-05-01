@@ -260,20 +260,45 @@ def _solve_pentadiagonal_bvp_batch_torch(
     wlower,
 ):
     """Solves regular two-stream BVP systems with pentadiagonal elimination."""
-    wupper0, wupper1 = wupper
-    wlower0, wlower1 = wlower
-    x1 = xpos1.mT.contiguous()
-    x2 = xpos2.mT.contiguous()
-    et = eigentrans.mT.contiguous()
-    wupper0 = wupper0.mT.contiguous()
-    wupper1 = wupper1.mT.contiguous()
-    wlower0 = wlower0.mT.contiguous()
-    wlower1 = wlower1.mT.contiguous()
-    nlay, batch = x1.shape
+    return _solve_pentadiagonal_bvp_batch_torch_impl(
+        albedo,
+        bottom_source,
+        surface_factor,
+        stream_value,
+        xpos1,
+        xpos2,
+        eigentrans,
+        wupper[0],
+        wupper[1],
+        wlower[0],
+        wlower[1],
+    )
+
+
+def _solve_pentadiagonal_bvp_batch_torch_eager(
+    albedo: torch.Tensor,
+    bottom_source: torch.Tensor,
+    surface_factor: float,
+    stream_value: float,
+    xpos1: torch.Tensor,
+    xpos2: torch.Tensor,
+    eigentrans: torch.Tensor,
+    wupper0_in: torch.Tensor,
+    wupper1_in: torch.Tensor,
+    wlower0_in: torch.Tensor,
+    wlower1_in: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    x1 = xpos1.transpose(0, 1).contiguous()
+    x2 = xpos2.transpose(0, 1).contiguous()
+    et = eigentrans.transpose(0, 1).contiguous()
+    wupper0 = wupper0_in.transpose(0, 1).contiguous()
+    wupper1 = wupper1_in.transpose(0, 1).contiguous()
+    wlower0 = wlower0_in.transpose(0, 1).contiguous()
+    wlower1 = wlower1_in.transpose(0, 1).contiguous()
+    nlay = x1.shape[0]
+    batch = x1.shape[1]
     ntotal = 2 * nlay
-    dtype = x1.dtype
-    device = x1.device
-    col = torch.zeros((ntotal, batch), dtype=dtype, device=device)
+    col = torch.zeros((ntotal, batch), dtype=x1.dtype, device=x1.device)
 
     factor = surface_factor * albedo
     xpnet = x2[-1] - factor * x1[-1] * stream_value
@@ -288,13 +313,13 @@ def _solve_pentadiagonal_bvp_batch_torch(
         col[row_p] = wupper1[n] - wlower1[prev]
     col[-1] = -wlower1[-1] + wlower0[-1] * stream_value * factor + bottom_source
 
-    elm1 = torch.zeros((ntotal - 1, batch), dtype=dtype, device=device)
-    elm2 = torch.zeros((ntotal - 2, batch), dtype=dtype, device=device)
+    elm1 = torch.zeros((ntotal - 1, batch), dtype=x1.dtype, device=x1.device)
+    elm2 = torch.zeros((ntotal - 2, batch), dtype=x1.dtype, device=x1.device)
 
     elm31 = 1.0 / x1[0]
     elm1_i2 = -(x2[0] * et[0]) * elm31
     elm1[0] = elm1_i2
-    elm2_i2 = torch.zeros(batch, dtype=dtype, device=device)
+    elm2_i2 = torch.zeros(batch, dtype=x1.dtype, device=x1.device)
     elm2[0] = elm2_i2
 
     col_i2 = col[0] * elm31
@@ -318,11 +343,11 @@ def _solve_pentadiagonal_bvp_batch_torch(
             mat2_i = x1[prev]
             mat3_i = -x2[n]
             mat4_i = -x1[n] * et[n]
-            mat5_i = 0.0
+            mat5_i = torch.zeros_like(mat1_i)
         else:
             n = (i + 1) // 2
             prev = n - 1
-            mat1_i = 0.0
+            mat1_i = torch.zeros_like(x1[prev])
             mat2_i = x1[prev] * et[prev]
             mat3_i = x2[prev]
             mat4_i = -x1[n]
@@ -355,7 +380,6 @@ def _solve_pentadiagonal_bvp_batch_torch(
     elm1_i2 = elm1_i1
     elm1_i1 = (mat4_i + bet * elm2_i1) * den
     elm1[i] = elm1_i1
-    elm2_i2 = elm2_i1
 
     col_i = (mat1_i * col_i2 + bet * col_i1 - col[i]) * den
     col_i2 = col_i1
@@ -381,7 +405,14 @@ def _solve_pentadiagonal_bvp_batch_torch(
         col[i] = col_i
         col_i2 = col_i1
         col_i1 = col_i
-    return col[0::2].mT, col[1::2].mT
+    return col[0::2].transpose(0, 1), col[1::2].transpose(0, 1)
+
+
+_solve_pentadiagonal_bvp_batch_torch_impl = (
+    torch.jit.script(_solve_pentadiagonal_bvp_batch_torch_eager)
+    if torch is not None
+    else _solve_pentadiagonal_bvp_batch_torch_eager
+)
 
 
 def solve_solar_observation_bvp_batch_torch(

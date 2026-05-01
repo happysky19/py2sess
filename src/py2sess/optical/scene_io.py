@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 
-from .createprops import load_createprops_provider
 from .geocape import (
     gas_cross_sections_from_tables,
     geocape_select_wavelength_microns,
@@ -43,6 +42,7 @@ class ProfileTextData:
     surface_temperature_k: float | None
     surface_altitude_m: float
     metadata: dict[str, str]
+    columns: dict[str, np.ndarray]
 
 
 def load_profile_text(path: str | Path, *, gas_species: tuple[str, ...] = ()) -> ProfileTextData:
@@ -87,11 +87,11 @@ def build_benchmark_scene_inputs(
     """Build benchmark runtime inputs from profile text and scene YAML."""
     scene_file = Path(scene_path)
     scene = load_scene_yaml(scene_file)
+    _reject_opacity_provider(scene)
     if strict_runtime_inputs:
         _validate_strict_runtime_scene(scene)
     mode = _scene_mode(scene, kind)
-    provider = _load_opacity_provider(scene, scene_file.parent, kind=kind)
-    spectral = _spectral_arrays(scene, provider, scene_file.parent)
+    spectral = _spectral_arrays(scene, scene_file.parent)
     aerosol_moment_wavelengths = spectral["wavelengths"]
     full_row_count = spectral["wavelengths"].shape[0]
     if spectral_limit is not None:
@@ -99,7 +99,6 @@ def build_benchmark_scene_inputs(
             raise ValueError("spectral_limit must be positive")
         stop = min(int(spectral_limit), full_row_count)
         spectral = _slice_matching_rows(spectral, full_row_count, stop)
-        provider = _slice_matching_rows(provider, full_row_count, stop)
     gases = _scene_gases(scene)
     gas_defaults = _scene_gas_vmr_defaults(scene, scene_file.parent)
     profile_gases = tuple(gas for gas in gases if gas.upper() not in gas_defaults)
@@ -121,12 +120,6 @@ def build_benchmark_scene_inputs(
         heights_km=profile.heights_km,
         surface_altitude_m=surface_altitude,
     )
-    provider_has_components = {
-        "absorption_tau",
-        "rayleigh_scattering_tau",
-        "aerosol_scattering_tau",
-    }.issubset(provider)
-
     bundle: dict[str, np.ndarray] = {
         "wavelengths": spectral["wavelengths"],
         "pressure_hpa": profile.pressure_hpa,
@@ -135,13 +128,12 @@ def build_benchmark_scene_inputs(
         "heights": opacity_profile.heights_km,
         "surface_altitude_m": np.array(surface_altitude, dtype=float),
     }
-    if not provider_has_components:
-        bundle["gas_absorption_tau"] = _gas_absorption_tau(
-            scene,
-            scene_file.parent,
-            spectral,
-            opacity_profile,
-        )
+    bundle["gas_absorption_tau"] = _gas_absorption_tau(
+        scene,
+        scene_file.parent,
+        spectral,
+        opacity_profile,
+    )
     for key in (
         "wavenumber_cm_inv",
         "wavenumber_band_cm_inv",
@@ -152,7 +144,6 @@ def build_benchmark_scene_inputs(
         if key in spectral:
             bundle[key] = spectral[key]
 
-    _add_provider_arrays(bundle, provider)
     _add_surface_arrays(
         bundle,
         scene,
@@ -166,10 +157,11 @@ def build_benchmark_scene_inputs(
         bundle,
         scene,
         scene_file.parent,
+        profile=profile,
         n_layers=profile.pressure_hpa.size - 1,
         moment_wavelengths_nm=aerosol_moment_wavelengths,
     )
-    _add_reference_arrays(bundle, scene, scene_file.parent)
+    _add_reference_arrays(bundle, scene, scene_file.parent, spectral=spectral)
 
     rt_config = _section(scene, "rt")
     if "stream" in rt_config:
@@ -241,11 +233,12 @@ def _load_geocape_profile(
     temperature = data[:, columns.index("TATM")]
     gas_names = columns[3:]
     gas = _select_gas_vmr(data[:, 3:], gas_names=gas_names, gas_species=gas_species)
-    pressure, temperature, gas, heights = _top_to_bottom(
+    pressure, temperature, gas, heights, _ = _top_to_bottom(
         pressure=pressure,
         temperature=temperature,
         gas_vmr=gas,
         heights=None,
+        columns={},
     )
     return ProfileTextData(
         pressure_hpa=pressure,
@@ -256,6 +249,7 @@ def _load_geocape_profile(
         surface_temperature_k=_metadata_float(metadata, "surfaceTemperature(K)"),
         surface_altitude_m=_metadata_float(metadata, "ZSUR(m)", default=0.0),
         metadata=metadata,
+        columns={},
     )
 
 
@@ -280,12 +274,14 @@ def _load_simple_profile(profile_path: Path, *, gas_species: tuple[str, ...]) ->
         name for name in names if name not in {pressure_name, temperature_name, height_name}
     )
     gas_columns = _gas_columns(data, gas_names)
+    raw_columns = {name: np.asarray(data[name], dtype=float) for name in names}
     gas = _select_gas_vmr(gas_columns, gas_names=gas_names, gas_species=gas_species)
-    pressure, temperature, gas, heights = _top_to_bottom(
+    pressure, temperature, gas, heights, columns = _top_to_bottom(
         pressure=pressure,
         temperature=temperature,
         gas_vmr=gas,
         heights=heights,
+        columns=raw_columns,
     )
     return ProfileTextData(
         pressure_hpa=pressure,
@@ -296,6 +292,7 @@ def _load_simple_profile(profile_path: Path, *, gas_species: tuple[str, ...]) ->
         surface_temperature_k=None,
         surface_altitude_m=0.0,
         metadata={},
+        columns=columns,
     )
 
 
@@ -320,11 +317,6 @@ def _scene_gases(scene: dict[str, Any]) -> tuple[str, ...]:
 
 def _validate_strict_runtime_scene(scene: dict[str, Any]) -> None:
     opacity = _section(scene, "opacity")
-    if opacity.get("provider") is not None:
-        raise ValueError(
-            "strict scene mode must not use opacity.provider; use profile, "
-            "opacity.gas_cross_sections.table3d, and aerosol table specs"
-        )
     gas_cfg = opacity.get("gas_cross_sections")
     if isinstance(gas_cfg, dict) and "hitran" in gas_cfg:
         raise ValueError(
@@ -333,6 +325,14 @@ def _validate_strict_runtime_scene(scene: dict[str, Any]) -> None:
         )
     if _scene_gases(scene) and not (isinstance(gas_cfg, dict) and "table3d" in gas_cfg):
         raise ValueError("strict scene mode requires opacity.gas_cross_sections.table3d")
+
+
+def _reject_opacity_provider(scene: dict[str, Any]) -> None:
+    if _section(scene, "opacity").get("provider") is not None:
+        raise ValueError(
+            "opacity.provider is no longer supported; use profile, "
+            "opacity.gas_cross_sections.table3d, and aerosol table specs"
+        )
 
 
 def _scene_gas_vmr_defaults(scene: dict[str, Any], base_dir: Path) -> dict[str, np.ndarray]:
@@ -390,7 +390,6 @@ def _gas_default_column(value: np.ndarray, nlevel: int, gas: str) -> np.ndarray:
 
 def _spectral_arrays(
     scene: dict[str, Any],
-    provider: dict[str, np.ndarray],
     base_dir: Path,
 ) -> dict[str, np.ndarray]:
     spectral = _section(scene, "spectral")
@@ -440,12 +439,6 @@ def _spectral_arrays(
             "wavenumber_band_cm_inv": bands,
             "wavenumber_cm_inv": center,
         }
-    if "wavelengths" in provider:
-        arrays = {"wavelengths": np.asarray(provider["wavelengths"], dtype=float)}
-        for key in ("wavenumber_cm_inv", "wavenumber_band_cm_inv", "wavelength_microns"):
-            if key in provider:
-                arrays[key] = np.asarray(provider[key], dtype=float)
-        return arrays
     raise ValueError("scene spectral section must define wavelengths or wavenumbers")
 
 
@@ -641,40 +634,12 @@ def _solar_flux_factor(
     return _broadcast_spectral(value, nspec, "flux_factor", base_dir, source_nspec=source_nspec)
 
 
-def _load_opacity_provider(
-    scene: dict[str, Any],
-    base_dir: Path,
-    *,
-    kind: str,
-) -> dict[str, np.ndarray]:
-    provider = _section(scene, "opacity").get("provider")
-    if provider is None:
-        return {}
-    if not isinstance(provider, dict):
-        raise ValueError("opacity.provider must be a mapping")
-    if str(provider.get("kind", "fortran_createprops")).lower() != "fortran_createprops":
-        raise ValueError("opacity.provider.kind must be fortran_createprops")
-    if "path" not in provider:
-        raise ValueError("opacity.provider requires path")
-    return load_createprops_provider(_resolve_path(provider["path"], base_dir), kind=kind)
-
-
-def _add_provider_arrays(
-    bundle: dict[str, np.ndarray],
-    provider: dict[str, np.ndarray],
-) -> None:
-    for key, value in provider.items():
-        if key in {"wavelengths", "wavenumber_cm_inv", "wavenumber_band_cm_inv"} and key in bundle:
-            _assert_matching_array(key, bundle[key], value)
-            continue
-        bundle[key] = value
-
-
 def _add_aerosol_arrays(
     bundle: dict[str, np.ndarray],
     scene: dict[str, Any],
     base_dir: Path,
     *,
+    profile: ProfileTextData,
     n_layers: int,
     moment_wavelengths_nm: np.ndarray,
 ) -> None:
@@ -687,6 +652,20 @@ def _add_aerosol_arrays(
     moments = aerosol.get("moments")
     loadings = aerosol.get("loadings")
     ssprops = aerosol.get("ssprops")
+    properties = aerosol.get("properties")
+    if properties is not None:
+        table = _load_aerosol_properties(
+            properties,
+            base_dir,
+            wavelengths_nm=np.asarray(moment_wavelengths_nm, dtype=float),
+        )
+        bundle["aerosol_extinction_per_loading"] = table["bulk_extinction"]
+        bundle["aerosol_scattering_per_loading"] = table["bulk_scattering"]
+        bundle["aerosol_moments"] = table["phase_moments"]
+        if loadings is None:
+            loadings = aerosol.get("loading_columns")
+        if loadings is None:
+            raise ValueError("aerosol.properties requires aerosol.loading_columns")
     if ssprops is not None:
         tables = _load_geocape_ssprops(
             ssprops,
@@ -698,7 +677,12 @@ def _add_aerosol_arrays(
         if moments is None:
             bundle["aerosol_moments"] = tables.moments
 
-    if loadings is not None and moments is None and ssprops is None:
+    if (
+        loadings is not None
+        and moments is None
+        and ssprops is None
+        and "aerosol_moments" not in bundle
+    ):
         raise ValueError("aerosol loadings require aerosol moments")
     if moments is None and "aerosol_moments" not in bundle:
         bundle["aerosol_moments"] = np.zeros((2, 3, 0), dtype=float)
@@ -706,6 +690,19 @@ def _add_aerosol_arrays(
         bundle["aerosol_moments"] = _load_array(moments, base_dir, "aerosol_moments")
     if loadings is None:
         return
+    if properties is not None and isinstance(loadings, dict):
+        bundle["aerosol_loadings"] = _aerosol_loadings_from_profile(
+            profile,
+            loadings,
+            n_layers=n_layers,
+            aerosol_names=table["aerosol_names"],
+        )
+    elif isinstance(loadings, dict) and "columns" in loadings:
+        bundle["aerosol_loadings"] = _aerosol_loadings_from_profile(
+            profile,
+            loadings["columns"],
+            n_layers=n_layers,
+        )
     if isinstance(loadings, dict) and str(loadings.get("kind", "")).lower() == "geocape_files":
         select_index = int(loadings.get("select_index", aerosol.get("select_index", 2)))
         files = [_resolve_path(path, base_dir) for path in loadings.get("paths", ())]
@@ -721,15 +718,16 @@ def _add_aerosol_arrays(
             "aerosol_select_wavelength_microns",
             np.asarray(geocape_select_wavelength_microns(select_index), dtype=float),
         )
-    else:
+    elif "aerosol_loadings" not in bundle:
         bundle["aerosol_loadings"] = _load_array(loadings, base_dir, "aerosol_loadings")
-    if "aerosol_wavelengths_microns" not in bundle:
+    uses_unit_loading_table = "aerosol_extinction_per_loading" in bundle
+    if not uses_unit_loading_table and "aerosol_wavelengths_microns" not in bundle:
         bundle["aerosol_wavelengths_microns"] = _load_array(
             aerosol["wavelengths_microns"],
             base_dir,
             "aerosol_wavelengths_microns",
         )
-    if "aerosol_bulk_iops" not in bundle:
+    if not uses_unit_loading_table and "aerosol_bulk_iops" not in bundle:
         bundle["aerosol_bulk_iops"] = _load_array(
             aerosol["bulk_iops"], base_dir, "aerosol_bulk_iops"
         )
@@ -740,8 +738,132 @@ def _add_aerosol_arrays(
         )
 
 
+def _load_aerosol_properties(
+    spec: Any,
+    base_dir: Path,
+    *,
+    wavelengths_nm: np.ndarray,
+) -> dict[str, np.ndarray | tuple[str, ...]]:
+    if not isinstance(spec, dict) or "path" not in spec:
+        raise ValueError("aerosol.properties requires path")
+    path = _resolve_path(spec["path"], base_dir)
+    try:
+        from scipy.io import netcdf_file
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("scipy is required to read aerosol NetCDF properties") from exc
+
+    with netcdf_file(path, "r", mmap=False) as data:
+        names = _netcdf_string_array(data.variables.get("aerosol_name"))
+        if "wavelength_nm" in data.variables:
+            table_wavelengths = np.asarray(data.variables["wavelength_nm"].data, dtype=float)
+        elif "wavelength_microns" in data.variables:
+            table_wavelengths = 1000.0 * np.asarray(
+                data.variables["wavelength_microns"].data, dtype=float
+            )
+        else:
+            raise ValueError("aerosol properties NetCDF requires wavelength_nm")
+        bulk_ext = np.asarray(data.variables["bulk_extinction"].data, dtype=float)
+        bulk_scat = np.asarray(data.variables["bulk_scattering"].data, dtype=float)
+        phase = np.asarray(data.variables["phase_moments"].data, dtype=float)
+
+    if table_wavelengths.ndim != 1 or np.any(np.diff(table_wavelengths) <= 0.0):
+        raise ValueError("aerosol property wavelengths must be one-dimensional and increasing")
+    if bulk_ext.shape != bulk_scat.shape or bulk_ext.shape[0] != table_wavelengths.size:
+        raise ValueError("bulk_extinction and bulk_scattering must have shape (nwave, naerosol)")
+    if not np.all(np.isfinite(bulk_ext)) or not np.all(np.isfinite(bulk_scat)):
+        raise ValueError("aerosol bulk tables must be finite")
+    if np.any(bulk_ext < 0.0) or np.any(bulk_scat < 0.0) or np.any(bulk_scat > bulk_ext + 1e-14):
+        raise ValueError("aerosol bulk scattering must satisfy 0 <= scattering <= extinction")
+    return {
+        "aerosol_names": names,
+        "bulk_extinction": _interp_columns(wavelengths_nm, table_wavelengths, bulk_ext),
+        "bulk_scattering": _interp_columns(wavelengths_nm, table_wavelengths, bulk_scat),
+        "phase_moments": _phase_moment_endpoints(wavelengths_nm, table_wavelengths, phase),
+    }
+
+
+def _aerosol_loadings_from_profile(
+    profile: ProfileTextData,
+    spec: Any,
+    *,
+    n_layers: int,
+    aerosol_names: tuple[str, ...] = (),
+) -> np.ndarray:
+    if not isinstance(spec, dict):
+        raise ValueError("aerosol loading_columns must map profile columns to aerosol names")
+    if aerosol_names:
+        column_by_aerosol = {str(aerosol).lower(): str(column) for column, aerosol in spec.items()}
+        columns = [column_by_aerosol.get(name.lower(), name) for name in aerosol_names]
+    else:
+        columns = [str(column) for column in spec]
+    normalized = {name.lower(): values for name, values in profile.columns.items()}
+    loadings = []
+    for column in columns:
+        values = normalized.get(column.lower())
+        if values is None:
+            raise ValueError(f"profile is missing aerosol loading column {column}")
+        arr = np.asarray(values, dtype=float)
+        if arr.shape == (n_layers + 1,):
+            arr = 0.5 * (arr[:-1] + arr[1:])
+        elif arr.shape != (n_layers,):
+            raise ValueError(
+                f"aerosol loading column {column} must have {n_layers} layer values "
+                f"or {n_layers + 1} level values"
+            )
+        loadings.append(arr)
+    out = np.column_stack(loadings) if loadings else np.zeros((n_layers, 0), dtype=float)
+    if not np.all(np.isfinite(out)) or np.any(out < 0.0):
+        raise ValueError("aerosol loading columns must be finite and nonnegative")
+    return out
+
+
+def _interp_columns(x: np.ndarray, xp: np.ndarray, values: np.ndarray) -> np.ndarray:
+    grid = np.asarray(x, dtype=float)
+    if grid.min() < xp[0] or grid.max() > xp[-1]:
+        raise ValueError("aerosol property table does not cover the scene spectral grid")
+    out = np.empty((grid.size, values.shape[1]), dtype=float)
+    for column in range(values.shape[1]):
+        out[:, column] = np.interp(grid, xp, values[:, column])
+    return out
+
+
+def _phase_moment_endpoints(
+    wavelengths_nm: np.ndarray,
+    table_wavelengths: np.ndarray,
+    phase_moments: np.ndarray,
+) -> np.ndarray:
+    if phase_moments.ndim == 3 and phase_moments.shape[0] == 2:
+        return np.asarray(phase_moments, dtype=float)
+    if phase_moments.ndim != 3 or phase_moments.shape[0] != table_wavelengths.size:
+        raise ValueError("phase_moments must have shape (nwave, nmoment, naerosol)")
+    endpoints = (float(wavelengths_nm[0]), float(wavelengths_nm[-1]))
+    out = np.empty((2, phase_moments.shape[1], phase_moments.shape[2]), dtype=float)
+    flat = phase_moments.reshape(phase_moments.shape[0], -1)
+    for endpoint_index, endpoint in enumerate(endpoints):
+        out[endpoint_index] = _interp_columns(
+            np.array([endpoint], dtype=float), table_wavelengths, flat
+        )[0].reshape(phase_moments.shape[1], phase_moments.shape[2])
+    return out
+
+
+def _netcdf_string_array(variable: Any) -> tuple[str, ...]:
+    if variable is None:
+        return ()
+    raw = np.asarray(variable.data)
+    if raw.ndim == 1:
+        return tuple(
+            value.decode("utf-8").strip() if isinstance(value, bytes) else str(value).strip()
+            for value in raw
+        )
+    return tuple(bytes(row).decode("utf-8").strip() for row in raw)
+
+
 def _add_reference_arrays(
-    bundle: dict[str, np.ndarray], scene: dict[str, Any], base_dir: Path
+    bundle: dict[str, np.ndarray],
+    scene: dict[str, Any],
+    base_dir: Path,
+    *,
+    spectral: dict[str, np.ndarray],
 ) -> None:
     reference = scene.get("reference")
     if reference is None:
@@ -751,9 +873,45 @@ def _add_reference_arrays(
     path = _resolve_path(reference["path"], base_dir)
     key = str(reference.get("total", "ref_total"))
     with np.load(path) as data:
+        _validate_reference_spectral_grid(data, spectral)
         if key not in data:
             raise KeyError(f"reference file is missing {key}")
         bundle["ref_total"] = np.asarray(data[key], dtype=float)
+
+
+def _validate_reference_spectral_grid(data: Any, spectral: dict[str, np.ndarray]) -> None:
+    if "wavelength_nm" not in data:
+        raise KeyError("reference file is missing wavelength_nm")
+    _assert_reference_grid_matches(
+        "wavelength_nm",
+        np.asarray(data["wavelength_nm"], dtype=float),
+        np.asarray(spectral["wavelengths"], dtype=float),
+    )
+    for key in ("wavenumber_cm_inv", "wavenumber_band_cm_inv"):
+        if key in data and key in spectral:
+            if key == "wavenumber_cm_inv":
+                candidate = np.asarray(data[key], dtype=float)
+                paired = 1.0e7 / np.asarray(spectral["wavelengths"], dtype=float)
+                if candidate.shape == paired.shape and np.allclose(
+                    candidate, paired, rtol=0.0, atol=1.0e-10
+                ):
+                    continue
+            _assert_reference_grid_matches(
+                key,
+                np.asarray(data[key], dtype=float),
+                np.asarray(spectral[key], dtype=float),
+            )
+
+
+def _assert_reference_grid_matches(name: str, value: np.ndarray, expected: np.ndarray) -> None:
+    if (
+        value.ndim == expected.ndim
+        and value.shape[0] >= expected.shape[0]
+        and value.shape[1:] == expected.shape[1:]
+    ):
+        value = value[: expected.shape[0]]
+    if value.shape != expected.shape or not np.allclose(value, expected, rtol=0.0, atol=1.0e-10):
+        raise ValueError(f"reference {name} does not match scene spectral grid")
 
 
 def _solar_geometry(scene: dict[str, Any]) -> np.ndarray:
@@ -849,13 +1007,6 @@ def _resolve_path(path: str | Path, base_dir: Path) -> Path:
     return candidate if candidate.is_absolute() else base_dir / candidate
 
 
-def _assert_matching_array(name: str, left: np.ndarray, right: np.ndarray) -> None:
-    left_arr = np.asarray(left, dtype=float)
-    right_arr = np.asarray(right, dtype=float)
-    if left_arr.shape != right_arr.shape or not np.allclose(left_arr, right_arr):
-        raise ValueError(f"scene {name} does not match opacity.provider {name}")
-
-
 def _spectral_1d(value: Any, base_dir: Path, name: str) -> np.ndarray:
     if isinstance(value, dict) and {"start", "step", "count"}.issubset(value):
         count = int(value["count"])
@@ -898,13 +1049,21 @@ def _top_to_bottom(
     temperature: np.ndarray,
     gas_vmr: np.ndarray,
     heights: np.ndarray | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
-    if np.all(np.diff(pressure) < 0.0):
+    columns: dict[str, np.ndarray] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, dict[str, np.ndarray]]:
+    pressure_step = np.diff(pressure)
+    output_columns = {
+        name: np.asarray(value, dtype=float) for name, value in (columns or {}).items()
+    }
+    if np.all(pressure_step < 0.0):
         pressure = pressure[::-1]
         temperature = temperature[::-1]
         gas_vmr = gas_vmr[::-1]
         heights = None if heights is None else heights[::-1]
-    return pressure, temperature, gas_vmr, heights
+        output_columns = {name: value[::-1] for name, value in output_columns.items()}
+    elif not np.all(pressure_step > 0.0):
+        raise ValueError("profile pressure must be strictly monotonic")
+    return pressure, temperature, gas_vmr, heights, output_columns
 
 
 def _select_gas_vmr(

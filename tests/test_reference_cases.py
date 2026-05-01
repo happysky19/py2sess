@@ -10,6 +10,8 @@ from py2sess import (
     thermal_source_from_temperature_profile,
     TwoStreamEss,
     TwoStreamEssOptions,
+)
+from py2sess.reference_cases import (
     load_tir_benchmark_case,
     load_uv_benchmark_case,
 )

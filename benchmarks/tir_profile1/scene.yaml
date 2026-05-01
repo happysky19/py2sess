@@ -1,0 +1,24 @@
+mode: thermal
+gases: [H2O, CO2, N2O, O3, HNO3, SO2, NH3]
+spectral:
+  wavenumber_cm_inv: {start: 500.0, step: 0.2, count: 1000}
+  wavelength_order: reverse_from_wavenumber
+  wavenumber_band_width_cm_inv: 1.0
+geometry:
+  view_angle: 49.514425392048906
+surface:
+  albedo: 0.02
+  altitude_m: 58.0308
+  temperature_k: 300.349
+opacity:
+  gas_cross_sections:
+    table3d: {path: gas_xsec.nc}
+  aerosol:
+    properties: {path: aerosol_properties.nc}
+    loading_columns:
+      organic_loading: organic
+      seasalt_acc_loading: seasalt_acc
+      seasalt_coa_loading: seasalt_coa
+      soot_loading: soot
+      sulfate_loading: sulfate
+reference: {path: reference_outputs.npz, total: ref_total}

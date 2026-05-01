@@ -239,7 +239,7 @@ def _fortran_planck_band_simpson_vectorized(
 
     mid = x_low + 0.5 * interval
     value = (endpoints + 4.0 * mid**3 / np.expm1(mid)) * interval / 6.0
-    converged = np.abs((value - previous) / value) <= _FORTRAN_PLANCK_CRITERION
+    converged = _simpson_converged(value, previous)
     if np.any(converged):
         result[converged] = scaling[converged] * value[converged] * _FORTRAN_PLANCK_CONC
     if np.all(converged):
@@ -258,7 +258,7 @@ def _fortran_planck_band_simpson_vectorized(
         * interval[active]
         / 12.0
     )
-    converged2 = np.abs((value2 - value[active]) / value2) <= _FORTRAN_PLANCK_CRITERION
+    converged2 = _simpson_converged(value2, value[active])
     active_positions = np.flatnonzero(active)
     if np.any(converged2):
         result[active_positions[converged2]] = (
@@ -282,7 +282,7 @@ def _fortran_planck_band_simpson_vectorized(
             factor = float(2 * (1 + (k % 2)))
             value += factor * x_current**3 / np.expm1(x_current)
         value *= step / 3.0
-        converged = np.abs((value - active_previous) / value) <= _FORTRAN_PLANCK_CRITERION
+        converged = _simpson_converged(value, active_previous)
         if np.any(converged):
             result[keep_positions[converged]] = (
                 active_scaling[converged] * value[converged] * _FORTRAN_PLANCK_CONC
@@ -301,6 +301,11 @@ def _fortran_planck_band_simpson_vectorized(
         active_scaling = active_scaling[keep]
 
     raise RuntimeError("Fortran-compatible Simpson Planck integration did not converge")
+
+
+def _simpson_converged(value: np.ndarray, previous: np.ndarray) -> np.ndarray:
+    scale = np.maximum(np.abs(value), np.finfo(np.float64).tiny)
+    return np.abs(value - previous) / scale <= _FORTRAN_PLANCK_CRITERION
 
 
 def _fortran_planck_band_vectorized(

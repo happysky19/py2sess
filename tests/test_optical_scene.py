@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from py2sess.optical.scene import (
+    aerosol_components_from_unit_loading,
     aerosol_components_from_tables,
     atmospheric_profile_from_levels,
     build_scene_layer_optical_properties,
@@ -16,18 +17,18 @@ from py2sess.optical.rayleigh import rayleigh_bodhaine
 
 
 class OpticalSceneTests(unittest.TestCase):
-    def test_rayleigh_bodhaine_matches_fortran_formula_values(self) -> None:
+    def test_rayleigh_bodhaine_matches_corrected_formula_values(self) -> None:
         rayleigh = rayleigh_bodhaine(np.array([300.0, 400.0, 500.0, 550.0, 1000.0]))
 
         np.testing.assert_allclose(
             rayleigh.cross_section,
             np.array(
                 [
-                    5.6524611694259e-26,
-                    1.6738176053697816e-26,
-                    6.661314194223813e-27,
-                    4.510510396388468e-27,
-                    4.0131596194371946e-28,
+                    5.652652063778901e-26,
+                    1.6738775522132147e-26,
+                    6.661557820676765e-27,
+                    4.5106763079555585e-27,
+                    4.0133097052758598e-28,
                 ]
             ),
             rtol=0.0,
@@ -37,11 +38,11 @@ class OpticalSceneTests(unittest.TestCase):
             rayleigh.depolarization,
             np.array(
                 [
-                    0.03255221352837535,
-                    0.02966853942251837,
-                    0.02859921775110769,
-                    0.028303524147044047,
-                    0.02743789237994326,
+                    0.03257202392715272,
+                    0.029689591493564187,
+                    0.028620732334062735,
+                    0.02832516682409016,
+                    0.027459910541284476,
                 ]
             ),
             rtol=0.0,
@@ -154,6 +155,19 @@ class OpticalSceneTests(unittest.TestCase):
             ),
         )
 
+    def test_aerosol_components_from_unit_loading_use_direct_formula(self) -> None:
+        components = aerosol_components_from_unit_loading(
+            aerosol_loadings=np.array([[2.0, 4.0], [1.0, 8.0]]),
+            aerosol_extinction_per_loading=np.array([[0.2, 0.1], [0.4, 0.2]]),
+            aerosol_scattering_per_loading=np.array([[0.1, 0.05], [0.2, 0.1]]),
+        )
+
+        np.testing.assert_allclose(
+            components.extinction_tau,
+            np.array([[[0.4, 0.4], [0.2, 0.8]], [[0.8, 0.8], [0.4, 1.6]]]),
+        )
+        np.testing.assert_allclose(components.scattering_tau, 0.5 * components.extinction_tau)
+
     def test_scene_layer_builder_combines_profile_components(self) -> None:
         profile = atmospheric_profile_from_levels(
             pressure_hpa=np.array([100.0, 500.0, 1000.0]),
@@ -192,7 +206,7 @@ class OpticalSceneTests(unittest.TestCase):
         self.assertEqual(scene.layer.tau.shape, (2, 2))
         self.assertEqual(scene.depol.shape, (2,))
 
-    def test_scene_opacity_components_replace_createprops_layer_quantities(self) -> None:
+    def test_scene_opacity_components_build_layer_quantities(self) -> None:
         profile = atmospheric_profile_from_levels(
             pressure_hpa=np.array([100.0, 500.0, 1000.0]),
             temperature_k=np.array([220.0, 260.0, 290.0]),

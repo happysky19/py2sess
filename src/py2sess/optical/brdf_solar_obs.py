@@ -38,7 +38,7 @@ def _ross_kernel(
     ds2 = sxi * sxj
     ds3 = xi + xj
     cksi = ds1 - ds2 * cphi
-    cksi = min(1.0, cksi)
+    cksi = max(-1.0, min(1.0, cksi))
     sksi = math.sqrt(max(0.0, 1.0 - cksi * cksi))
     ksi = math.acos(cksi)
     if thick:

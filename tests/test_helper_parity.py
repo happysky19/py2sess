@@ -5,20 +5,24 @@ import unittest
 
 import numpy as np
 
-from py2sess import load_tir_benchmark_case, load_uv_benchmark_case
+from py2sess.reference_cases import load_tir_benchmark_case, load_uv_benchmark_case
 from py2sess.rtsolver.geometry import auxgeom_solar_obs, chapman_factors
+from py2sess.optical.brdf_solar_obs import _ross_kernel as _solar_ross_kernel
 from py2sess.optical.brdf_solar_obs import solar_obs_brdf_from_kernels
+from py2sess.optical.brdf_thermal import _ross_kernel as _thermal_ross_kernel
 from py2sess.optical.brdf_thermal import thermal_brdf_from_kernels
 from py2sess.optical.delta_m import (
     default_delta_m_truncation_factor,
     delta_m_scale_optical_properties,
 )
 from py2sess.optical.planck import (
+    _simpson_converged,
     planck_radiance_wavelength,
     planck_radiance_wavenumber,
     planck_radiance_wavenumber_band,
     thermal_source_from_temperature_profile,
 )
+from py2sess.optical.rayleigh import rayleigh_bodhaine
 from py2sess.optical.surface_leaving import (
     morcasiwat_reflectance,
     seawater_refractive_index,
@@ -202,6 +206,27 @@ class HelperParityTests(unittest.TestCase):
         )
         self.assertAlmostEqual(coeffs.emissivity, 0.3858475363873620)
 
+    def test_ross_kernel_clamps_roundoff_both_sides(self) -> None:
+        solar_value = _solar_ross_kernel(
+            xi=1.0e-6,
+            sxi=1.0,
+            xj=1.0e-6,
+            sxj=1.0,
+            cphi=1.0 + 1.0e-15,
+            thick=False,
+        )
+        thermal_value = _thermal_ross_kernel(
+            xi=1.0e-6,
+            sxi=1.0,
+            xj=1.0e-6,
+            sxj=1.0,
+            cphi=1.0 + 1.0e-15,
+            thick=True,
+        )
+
+        self.assertTrue(np.isfinite(solar_value))
+        self.assertTrue(np.isfinite(thermal_value))
+
     def test_surface_leaving_regression(self) -> None:
         self.assertEqual(seawater_refractive_index(0.55, 34.3), (1.339, 1.96e-09))
         self.assertAlmostEqual(morcasiwat_reflectance(0.55, 0.2), 0.00875347764776946)
@@ -260,6 +285,16 @@ class HelperParityTests(unittest.TestCase):
             atol=1.0e-12,
         )
         self.assertAlmostEqual(source.surface_planck, 34.974800817351124)
+
+    def test_planck_simpson_convergence_handles_zero_values(self) -> None:
+        np.testing.assert_array_equal(
+            _simpson_converged(np.array([0.0], dtype=float), np.array([0.0], dtype=float)),
+            np.array([True]),
+        )
+
+    def test_rayleigh_rejects_peck_reeder_pole_region(self) -> None:
+        with self.assertRaisesRegex(ValueError, "greater than 160 nm"):
+            rayleigh_bodhaine(np.array([159.0], dtype=float))
 
 
 if __name__ == "__main__":

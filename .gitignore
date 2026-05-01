@@ -8,7 +8,5 @@ dist/
 *.egg-info/
 benchmark_bundles/
 outputs/
-local_outputs/
-paper_outputs/
 .codex/
 idea.md

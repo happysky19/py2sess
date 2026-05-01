@@ -1,0 +1,25 @@
+mode: solar
+gases: [H2O, O2]
+gas_vmr:
+  O2: 0.2095
+spectral:
+  wavelengths_nm: {start: 753.30, step: 0.04124124124124124, count: 1000}
+geometry:
+  angles: [47.70200090144217, 49.514425392048906, 275.7465175402976]
+surface:
+  albedo: 0.05
+  altitude_m: 58.0308
+solar:
+  flux_factor: 1.0
+opacity:
+  gas_cross_sections:
+    table3d: {path: gas_xsec.nc}
+  aerosol:
+    properties: {path: aerosol_properties.nc}
+    loading_columns:
+      organic_loading: organic
+      seasalt_acc_loading: seasalt_acc
+      seasalt_coa_loading: seasalt_coa
+      soot_loading: soot
+      sulfate_loading: sulfate
+reference: {path: reference_outputs.npz, total: ref_total}

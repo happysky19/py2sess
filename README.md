@@ -88,10 +88,17 @@ table and conventions.
 ## Examples
 
 ```bash
-python3 examples/run_uv_reference_case.py
-python3 examples/run_tir_reference_case.py
 python3 examples/build_thermal_source_from_temperature.py
 python3 examples/retrieve_synthetic_spectra.py --case uv --noise-level 0
+```
+
+Scene/profile runs:
+
+```python
+from py2sess.scene import load_scene
+
+scene = load_scene(profile="profile.txt", config="scene.yaml")
+result = scene.forward(backend="numpy", include_fo=True)
 ```
 
 Full-spectrum benchmark details are in
@@ -106,7 +113,9 @@ python3 -m ruff check .
 python3 -m ruff format --check .
 ```
 
-Keep large benchmark bundles and generated outputs out of git.
+Full-spectrum benchmarks use profile text plus scene YAML inputs and Python
+optical preprocessing. Keep large local cross-section tables, benchmark bundles,
+and generated outputs out of git.
 
 ## References
 

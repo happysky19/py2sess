@@ -15,13 +15,11 @@ for signal, singular values of `Se^-1/2 K Sa^1/2`, and Hessian condition number.
 `evaluate_jacobian()` builds a dense torch autograd Jacobian, so it is intended
 for small synthetic retrievals and information-content checks.
 
-Intended cases are UV optical-depth scale plus albedo, thermal optical-depth
+Intended examples are UV optical-depth scale plus albedo, thermal optical-depth
 scale plus surface temperature, and low-dimensional thermal profile diagnostics.
 
 Known gaps:
 
-- Raw optical-property generation still needs upstream gas/aerosol providers for
-  real scenes.
 - Thermal scattering gradients are correct but can be slow because the torch
   path uses a dense BVP fallback when `ssa` or `g` require gradients.
 - No instrument model is included yet.

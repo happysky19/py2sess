@@ -116,6 +116,7 @@ def _floor_zero_optical_thickness(delta_tau: np.ndarray) -> np.ndarray:
         raise ValueError("tau must be nonnegative")
     if not np.any(delta_tau == 0.0):
         return delta_tau
+    # Exact clear layers become a tiny optical thickness for stable BVP algebra.
     floored = np.asarray(delta_tau, dtype=float).copy()
     np.putmask(floored, floored == 0.0, _OPTICAL_THICKNESS_MIN)
     return floored

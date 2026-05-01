@@ -7,7 +7,7 @@ import unittest
 import numpy as np
 from scipy.io import netcdf_file
 
-from py2sess.optical.opacity_table import gas_cross_sections_from_table3d
+from py2sess.optical.opacity_table import _decode_names, gas_cross_sections_from_table3d
 from py2sess.optical.scene import (
     atmospheric_profile_from_levels,
     gas_absorption_tau_from_cross_sections,
@@ -16,6 +16,11 @@ from py2sess.optical.scene_io import build_benchmark_scene_inputs
 
 
 class OpacityTableTests(unittest.TestCase):
+    def test_unicode_2d_gas_names_decode_by_row(self) -> None:
+        names = np.array([["O", "3", " "], ["H", "2", "O"]], dtype="U1")
+
+        self.assertEqual(_decode_names(names), ("O3", "H2O"))
+
     def test_table3d_interpolates_profile_levels_and_reorders_gases(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "xsec.nc"

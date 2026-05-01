@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from py2sess import load_tir_benchmark_case, load_uv_benchmark_case
+from py2sess.reference_cases import load_tir_benchmark_case, load_uv_benchmark_case
 from py2sess.optical.phase import (
     aerosol_interp_fraction,
     build_solar_fo_scatter_term,
