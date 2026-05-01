@@ -72,7 +72,7 @@ def main() -> None:
             reference["surface_temperature_jacobian_total"],
         )
     if args.plot is not None:
-        plot_comparison(args.plot, result, reference, indices, scale)
+        plot_thermal_comparison(args.plot, result, reference, indices, scale)
         print(f"plot: {args.plot}")
 
 
@@ -184,13 +184,10 @@ def load_scene_reference(
     scene_path = Path(scene_path)
     if reference_path is None:
         config = read_scene_config(scene_path)
-        try:
-            reference = config.get("jacobian_reference", config.get("reference"))
-            reference_path = scene_path.parent / reference["path"]
-        except KeyError as exc:
-            raise ValueError(
-                "scene YAML must define jacobian_reference.path or pass --reference"
-            ) from exc
+        reference = config.get("jacobian_reference")
+        if not isinstance(reference, dict) or "path" not in reference:
+            raise ValueError("scene YAML must define jacobian_reference.path or pass --reference")
+        reference_path = scene_path.parent / reference["path"]
     return dict(np.load(reference_path))
 
 
@@ -360,7 +357,7 @@ def print_summary(name: str, value: np.ndarray, reference: np.ndarray) -> None:
     print(f"{name}: max_abs={max_abs:.6e} max_rel={max_rel:.6e}")
 
 
-def plot_comparison(
+def plot_thermal_comparison(
     path: Path,
     result: dict[str, np.ndarray],
     reference: dict[str, np.ndarray],

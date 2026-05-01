@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py2sess"
-version = "0.1.0"
+version = "0.2.0"
 description = "Standalone Python implementation of the optimized 2S-ESS forward model."
 readme = "README.md"
 requires-python = ">=3.10"
