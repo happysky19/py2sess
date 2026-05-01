@@ -58,11 +58,6 @@ def main() -> None:
             scale * result["surface_temperature_jacobian_total_normalized"][indices],
             reference["surface_temperature_jacobian_total"],
         )
-    if "radiance_2s" in reference and "surface_emissivity_jacobian_2s" in reference:
-        print("component radiance/Jacobian columns: diagnostic only; convention differs")
-    for key in sorted(reference):
-        if key.endswith("_profile_jacobian_total"):
-            print(f"{key}: diagnostic only; profile chain-rule state is not pass/fail")
 
 
 def thermal_toa_jacobians(scene) -> dict[str, np.ndarray]:
