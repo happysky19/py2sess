@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from py2sess import TwoStreamEss, TwoStreamEssOptions
 from py2sess.optical.planck import (
@@ -45,10 +46,10 @@ def main() -> None:
         compare_solar(result, reference, args.plot)
         return
 
-    if args.profile is None or args.reference is None:
-        raise ValueError("thermal comparison requires --profile and --reference")
+    if args.profile is None:
+        raise ValueError("thermal comparison requires --profile")
     scene = load_scene(profile=args.profile, config=args.scene, strict_runtime_inputs=True)
-    reference = dict(np.load(args.reference))
+    reference = load_scene_reference(args.scene, args.reference)
     result = thermal_toa_jacobians(scene)
     indices = matching_indices(result["wavelength_nm"], reference["wavelength_nm"])
     radiance = result["radiance_total"][indices]
@@ -79,17 +80,14 @@ def solar_toa_jacobians(
     scene_path: str | Path, reference_path: str | Path | None = None
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     import torch
-    import yaml
 
     scene_path = Path(scene_path)
-    config = yaml.safe_load(scene_path.read_text())
+    config = read_scene_config(scene_path)
     if config.get("mode") != "solar":
         raise ValueError("solar Jacobian comparison requires mode: solar")
     inputs_path = scene_path.parent / config["rt_inputs"]["path"]
-    if reference_path is None:
-        reference_path = scene_path.parent / config["reference"]["path"]
     inputs = dict(np.load(inputs_path))
-    reference = dict(np.load(reference_path))
+    reference = load_scene_reference(scene_path, reference_path)
 
     def tensor(name: str, *, requires_grad: bool = False):
         return torch.tensor(
@@ -167,15 +165,33 @@ def compare_solar(
             result[f"surface_albedo_jacobian_{component}"][indices],
             reference[f"surface_albedo_jacobian_{component}"],
         )
-    if "surface_albedo_lps_weighting_function_2s" in reference:
-        print_summary(
-            "diagnostic_fortran_lps_surface_wf_2s",
-            result["surface_albedo_jacobian_2s"][indices],
-            reference["surface_albedo_lps_weighting_function_2s"],
-        )
     if plot_path is not None:
         plot_solar_comparison(plot_path, result, reference, indices)
         print(f"plot: {plot_path}")
+
+
+def read_scene_config(scene_path: str | Path) -> dict:
+    scene_path = Path(scene_path)
+    config = yaml.safe_load(scene_path.read_text())
+    if not isinstance(config, dict):
+        raise ValueError(f"{scene_path} is not a scene mapping")
+    return config
+
+
+def load_scene_reference(
+    scene_path: str | Path, reference_path: str | Path | None = None
+) -> dict[str, np.ndarray]:
+    scene_path = Path(scene_path)
+    if reference_path is None:
+        config = read_scene_config(scene_path)
+        try:
+            reference = config.get("jacobian_reference", config.get("reference"))
+            reference_path = scene_path.parent / reference["path"]
+        except KeyError as exc:
+            raise ValueError(
+                "scene YAML must define jacobian_reference.path or pass --reference"
+            ) from exc
+    return dict(np.load(reference_path))
 
 
 def thermal_toa_jacobians(scene) -> dict[str, np.ndarray]:

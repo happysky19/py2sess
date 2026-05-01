@@ -16,3 +16,4 @@ surface:
 opacity:
   gas_cross_sections:
     table3d: {path: gas_xsec.nc}
+jacobian_reference: {path: fortran_jacobian_reference.npz}

@@ -48,7 +48,7 @@ class FortranJacobianValidationTests(unittest.TestCase):
         config = yaml.safe_load((SOLAR_CASE / "scene.yaml").read_text())
         self.assertEqual(config["mode"], "solar")
         self.assertEqual(config["rt_inputs"]["path"], "rt_inputs.npz")
-        self.assertEqual(config["reference"]["path"], "fortran_jacobian_reference.npz")
+        self.assertEqual(config["jacobian_reference"]["path"], "fortran_jacobian_reference.npz")
 
         inputs = dict(np.load(SOLAR_CASE / config["rt_inputs"]["path"]))
         self.assertEqual(inputs["wavelength_nm"].shape, (1000,))
