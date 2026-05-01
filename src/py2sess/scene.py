@@ -77,7 +77,7 @@ class SceneRun:
     def forward(
         self,
         *,
-        backend: str = "numpy",
+        backend: str | None = None,
         include_fo: bool = True,
         options: TwoStreamEssOptions | None = None,
         **option_overrides: Any,
@@ -88,6 +88,8 @@ class SceneRun:
                 raise ValueError(
                     f"scene mode {self.mode!r} does not match options mode {options.mode!r}"
                 )
+            if backend is not None and backend != options.backend:
+                raise ValueError("backend override does not match options.backend")
             if option_overrides:
                 raise ValueError("pass either options or option overrides, not both")
         inputs = self.to_forward_inputs()
@@ -96,7 +98,7 @@ class SceneRun:
             options = TwoStreamEssOptions(
                 nlyr=nlyr,
                 mode=self.mode,
-                backend=backend,
+                backend="numpy" if backend is None else backend,
                 **option_overrides,
             )
         return TwoStreamEss(options).forward(**inputs.kwargs, include_fo=include_fo)
@@ -276,8 +278,6 @@ def _prepare_layer_properties(mode: str, bundle: dict[str, Any]) -> tuple[dict[s
 
 def _prepare_phase_inputs(mode: str, bundle: dict[str, Any]) -> tuple[dict[str, Any], str]:
     if "g" in bundle and "delta_m_truncation_factor" in bundle:
-        if mode == "solar" and "fo_scatter_term" not in bundle:
-            raise ValueError("solar direct phase input requires fo_scatter_term")
         return bundle, "direct input"
 
     has_component_phase = all(
@@ -394,7 +394,7 @@ def _forward_kwargs(mode: str, bundle: dict[str, Any]) -> dict[str, Any]:
             **common,
             "angles": bundle["user_obsgeom"],
             "fbeam": bundle["flux_factor"],
-            "fo_scatter_term": bundle["fo_scatter_term"],
+            "fo_scatter_term": bundle.get("fo_scatter_term"),
         }
     return {
         **common,

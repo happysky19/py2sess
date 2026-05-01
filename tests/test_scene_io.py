@@ -571,6 +571,52 @@ opacity:
         with self.assertRaisesRegex(ValueError, "does not match"):
             scene.forward(options=TwoStreamEssOptions(nlyr=1, mode="thermal"))
 
+    def test_scene_api_rejects_backend_override_with_options(self) -> None:
+        from py2sess import TwoStreamEssOptions
+
+        scene = SceneRun.from_bundle(
+            mode="solar",
+            bundle={
+                "wavelengths": np.array([500.0]),
+                "tau": np.zeros((1, 1)),
+                "omega": np.zeros((1, 1)),
+                "g": np.zeros((1, 1)),
+                "delta_m_truncation_factor": np.zeros((1, 1)),
+                "heights": np.array([1.0, 0.0]),
+                "user_obsgeom": np.array([30.0, 20.0, 0.0]),
+                "albedo": np.zeros(1),
+                "flux_factor": np.ones(1),
+                "fo_scatter_term": np.zeros((1, 1)),
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "backend override"):
+            scene.forward(
+                options=TwoStreamEssOptions(nlyr=1, mode="solar", backend="numpy"),
+                backend="torch",
+            )
+
+    def test_direct_solar_phase_scene_allows_missing_fo_scatter_term(self) -> None:
+        scene = SceneRun.from_bundle(
+            mode="solar",
+            bundle={
+                "wavelengths": np.array([500.0]),
+                "tau": np.array([[0.02, 0.01]]),
+                "omega": np.array([[0.3, 0.2]]),
+                "g": np.array([[0.1, 0.05]]),
+                "delta_m_truncation_factor": np.array([[0.01, 0.0025]]),
+                "heights": np.array([2.0, 1.0, 0.0]),
+                "user_obsgeom": np.array([30.0, 20.0, 0.0]),
+                "albedo": np.zeros(1),
+                "flux_factor": np.ones(1),
+            },
+        )
+
+        inputs = scene.to_forward_inputs()
+        self.assertIsNone(inputs.kwargs["fo_scatter_term"])
+        result = scene.forward(include_fo=False)
+        self.assertTrue(np.all(np.isfinite(result.radiance)))
+
     def test_python_object_scene_matches_bundle_scene_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
