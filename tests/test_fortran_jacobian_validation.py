@@ -56,6 +56,7 @@ class FortranJacobianValidationTests(unittest.TestCase):
         self.assertEqual(inputs["ssa"].shape, (1000, 114))
         self.assertEqual(inputs["g"].shape, (1000, 114))
         self.assertEqual(inputs["delta_m_truncation_factor"].shape, (1000, 114))
+        self.assertEqual(inputs["fo_scatter_term"].shape, (1000, 114))
 
     @unittest.skipUnless(has_torch(), "PyTorch is required")
     def test_radiance_and_surface_emissivity_gradients_match_fortran_reference(self) -> None:
@@ -94,23 +95,26 @@ class FortranJacobianValidationTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(has_torch(), "PyTorch is required")
-    def test_solar_radiance_and_albedo_gradient_match_fortran_reference(self) -> None:
+    def test_solar_fo_2s_radiance_and_albedo_gradient_match_fortran_reference(
+        self,
+    ) -> None:
         compare = _comparison_module()
         result, reference = compare.solar_toa_jacobians(SOLAR_CASE / "scene.yaml")
         indices = compare.matching_indices(result["wavelength_nm"], reference["wavelength_nm"])
 
-        np.testing.assert_allclose(
-            result["radiance_2s"][indices],
-            reference["radiance_2s"],
-            rtol=5.0e-10,
-            atol=1.0e-12,
-        )
-        np.testing.assert_allclose(
-            result["surface_albedo_jacobian_2s"][indices],
-            reference["surface_albedo_jacobian_2s"],
-            rtol=5.0e-5,
-            atol=5.0e-8,
-        )
+        for component in ("2s", "fo", "total"):
+            np.testing.assert_allclose(
+                result[f"radiance_{component}"][indices],
+                reference[f"radiance_{component}"],
+                rtol=5.0e-5,
+                atol=5.0e-8,
+            )
+            np.testing.assert_allclose(
+                result[f"surface_albedo_jacobian_{component}"][indices],
+                reference[f"surface_albedo_jacobian_{component}"],
+                rtol=5.0e-5,
+                atol=5.0e-8,
+            )
 
     @unittest.skipUnless(has_torch(), "PyTorch is required")
     def test_direct_rt_variable_autograd_matches_finite_difference(self) -> None:

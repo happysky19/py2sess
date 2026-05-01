@@ -104,6 +104,7 @@ def solar_toa_jacobians(
     trunc = tensor("delta_m_truncation_factor")
     albedo = tensor("albedo", requires_grad=True)
     fbeam = tensor("fbeam")
+    fo_scatter = tensor("fo_scatter_term")
 
     solver = TwoStreamEss(
         TwoStreamEssOptions(
@@ -123,15 +124,24 @@ def solar_toa_jacobians(
         albedo=albedo,
         fbeam=fbeam,
         delta_m_truncation_factor=trunc,
-        include_fo=False,
+        fo_scatter_term=fo_scatter,
+        include_fo=True,
     )
     radiance_2s = result.radiance_2s.reshape(-1)
-    jacobian = torch.autograd.grad(radiance_2s.sum(), albedo)[0]
+    radiance_fo = result.radiance_fo.reshape(-1)
+    radiance_total = result.radiance_total.reshape(-1)
+    jac_2s = torch.autograd.grad(radiance_2s.sum(), albedo, retain_graph=True)[0]
+    jac_fo = torch.autograd.grad(radiance_fo.sum(), albedo, retain_graph=True)[0]
+    jac_total = torch.autograd.grad(radiance_total.sum(), albedo)[0]
     return (
         {
             "wavelength_nm": np.asarray(inputs["wavelength_nm"], dtype=float),
             "radiance_2s": radiance_2s.detach().cpu().numpy(),
-            "surface_albedo_jacobian_2s": jacobian.detach().cpu().numpy(),
+            "radiance_fo": radiance_fo.detach().cpu().numpy(),
+            "radiance_total": radiance_total.detach().cpu().numpy(),
+            "surface_albedo_jacobian_2s": jac_2s.detach().cpu().numpy(),
+            "surface_albedo_jacobian_fo": jac_fo.detach().cpu().numpy(),
+            "surface_albedo_jacobian_total": jac_total.detach().cpu().numpy(),
         },
         reference,
     )
@@ -146,12 +156,17 @@ def compare_solar(
     print("Fortran solar Jacobian comparison")
     print(f"scene wavelengths: {result['wavelength_nm'].size}")
     print(f"reference wavelengths: {reference['wavelength_nm'].size}")
-    print_summary("radiance_2s", result["radiance_2s"][indices], reference["radiance_2s"])
-    print_summary(
-        "surface_albedo_jacobian_2s",
-        result["surface_albedo_jacobian_2s"][indices],
-        reference["surface_albedo_jacobian_2s"],
-    )
+    for component in ("2s", "fo", "total"):
+        print_summary(
+            f"radiance_{component}",
+            result[f"radiance_{component}"][indices],
+            reference[f"radiance_{component}"],
+        )
+        print_summary(
+            f"surface_albedo_jacobian_{component}",
+            result[f"surface_albedo_jacobian_{component}"][indices],
+            reference[f"surface_albedo_jacobian_{component}"],
+        )
     if "surface_albedo_lps_weighting_function_2s" in reference:
         print_summary(
             "diagnostic_fortran_lps_surface_wf_2s",
@@ -416,13 +431,31 @@ def plot_solar_comparison(
             "Radiance",
         ),
         (
-            "Surface-albedo Jacobian",
+            "FO TOA radiance",
+            result["radiance_fo"][indices],
+            reference["radiance_fo"],
+            "Radiance",
+        ),
+        (
+            "Total TOA radiance",
+            result["radiance_total"][indices],
+            reference["radiance_total"],
+            "Radiance",
+        ),
+        (
+            "Total surface-albedo Jacobian",
+            result["surface_albedo_jacobian_total"][indices],
+            reference["surface_albedo_jacobian_total"],
+            "dI / d albedo",
+        ),
+        (
+            "2S surface-albedo Jacobian",
             result["surface_albedo_jacobian_2s"][indices],
             reference["surface_albedo_jacobian_2s"],
             "dI / d albedo",
         ),
     ]
-    fig, axes = plt.subplots(2, 2, figsize=(11, 6), sharex=True)
+    fig, axes = plt.subplots(len(series), 2, figsize=(11, 10), sharex=True)
     for row, (title, py_value, ref_value, ylabel) in enumerate(series):
         axes[row, 0].plot(x_axis, ref_value, color="black", linewidth=1.8, label="Fortran")
         axes[row, 0].plot(
