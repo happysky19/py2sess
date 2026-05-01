@@ -12,6 +12,7 @@ from py2sess.scene import load_scene
 
 ROOT = Path(__file__).resolve().parents[1]
 CASE = ROOT / "benchmarks" / "thermal_jacobian_profile1"
+SOLAR_CASE = ROOT / "benchmarks" / "solar_jacobian_profile1"
 
 
 def _comparison_module():
@@ -40,6 +41,21 @@ class FortranJacobianValidationTests(unittest.TestCase):
         self.assertEqual(inputs.kwargs["tau"].shape, (1000, 123))
         self.assertIn("planck", inputs.kwargs)
         self.assertNotIn("fortran", inputs.kwargs)
+
+    def test_solar_jacobian_case_is_yaml_controlled(self) -> None:
+        import yaml
+
+        config = yaml.safe_load((SOLAR_CASE / "scene.yaml").read_text())
+        self.assertEqual(config["mode"], "solar")
+        self.assertEqual(config["rt_inputs"]["path"], "rt_inputs.npz")
+        self.assertEqual(config["reference"]["path"], "fortran_jacobian_reference.npz")
+
+        inputs = dict(np.load(SOLAR_CASE / config["rt_inputs"]["path"]))
+        self.assertEqual(inputs["wavelength_nm"].shape, (1000,))
+        self.assertEqual(inputs["tau"].shape, (1000, 114))
+        self.assertEqual(inputs["ssa"].shape, (1000, 114))
+        self.assertEqual(inputs["g"].shape, (1000, 114))
+        self.assertEqual(inputs["delta_m_truncation_factor"].shape, (1000, 114))
 
     @unittest.skipUnless(has_torch(), "PyTorch is required")
     def test_radiance_and_surface_emissivity_gradients_match_fortran_reference(self) -> None:
@@ -75,6 +91,25 @@ class FortranJacobianValidationTests(unittest.TestCase):
             reference["surface_temperature_jacobian_total"],
             rtol=1.0e-4,
             atol=5.0e-7,
+        )
+
+    @unittest.skipUnless(has_torch(), "PyTorch is required")
+    def test_solar_radiance_and_albedo_gradient_match_fortran_reference(self) -> None:
+        compare = _comparison_module()
+        result, reference = compare.solar_toa_jacobians(SOLAR_CASE / "scene.yaml")
+        indices = compare.matching_indices(result["wavelength_nm"], reference["wavelength_nm"])
+
+        np.testing.assert_allclose(
+            result["radiance_2s"][indices],
+            reference["radiance_2s"],
+            rtol=5.0e-10,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            result["surface_albedo_jacobian_2s"][indices],
+            reference["surface_albedo_jacobian_2s"],
+            rtol=5.0e-5,
+            atol=5.0e-8,
         )
 
     @unittest.skipUnless(has_torch(), "PyTorch is required")

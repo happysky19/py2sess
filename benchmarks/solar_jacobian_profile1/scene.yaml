@@ -1,0 +1,4 @@
+mode: solar
+rt_inputs: {path: rt_inputs.npz}
+reference: {path: fortran_jacobian_reference.npz}
+notes: production UVVSWIR exact-driver 2S albedo derivative

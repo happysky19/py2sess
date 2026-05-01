@@ -6,7 +6,8 @@ Compact thermal Fortran-Jacobian validation case.
 PYTHONPATH=src python3 examples/compare_fortran_jacobian.py \
   --profile benchmarks/thermal_jacobian_profile1/profile.csv \
   --scene benchmarks/thermal_jacobian_profile1/scene.yaml \
-  --reference benchmarks/thermal_jacobian_profile1/fortran_jacobian_reference.npz
+  --reference benchmarks/thermal_jacobian_profile1/fortran_jacobian_reference.npz \
+  --plot outputs/gradient_validation/thermal_jacobian_profile1.png
 ```
 
 The scene runs 1000 thermal wavelengths from profile and YAML inputs. The
