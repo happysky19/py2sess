@@ -96,6 +96,55 @@ class ApiTests(unittest.TestCase):
         np.testing.assert_allclose(thermal_result.radiance, np.array([0.9]), atol=1.0e-12)
         np.testing.assert_allclose(thermal_result.radiance_profile, np.full((1, 4), 0.9))
 
+    def test_batched_torch_forward_accepts_transparent_atmosphere(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        z = np.array([3.0, 2.0, 1.0, 0.0])
+        tau = torch.zeros((2, 3), dtype=torch.float64)
+        zeros = torch.zeros_like(tau)
+        solar = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=3, mode="solar", backend="torch", torch_dtype="float64")
+        )
+        solar_result = solar.forward(
+            tau=tau,
+            ssa=zeros,
+            g=zeros,
+            z=z,
+            angles=[30.0, 20.0, 0.0],
+            fbeam=0.0,
+            albedo=torch.zeros(2, dtype=torch.float64),
+            delta_m_truncation_factor=zeros,
+        )
+        self.assertTrue(torch.isfinite(solar_result.radiance).all().item())
+        np.testing.assert_allclose(to_numpy(solar_result.radiance), np.zeros(2), atol=1.0e-12)
+
+        thermal = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=3, mode="thermal", backend="torch", torch_dtype="float64")
+        )
+        surface_planck = torch.tensor([1.0, 2.0], dtype=torch.float64)
+        emissivity = torch.tensor([0.9, 0.8], dtype=torch.float64)
+        thermal_result = thermal.forward(
+            tau=tau,
+            ssa=zeros,
+            g=zeros,
+            z=z,
+            angles=20.0,
+            planck=torch.zeros((2, 4), dtype=torch.float64),
+            surface_planck=surface_planck,
+            emissivity=emissivity,
+            albedo=1.0 - emissivity,
+            delta_m_truncation_factor=zeros,
+            include_fo=True,
+        )
+        self.assertTrue(torch.isfinite(thermal_result.radiance).all().item())
+        np.testing.assert_allclose(
+            to_numpy(thermal_result.radiance),
+            to_numpy(surface_planck * emissivity),
+            atol=1.0e-12,
+        )
+
     def test_fo_scatter_term_helper_matches_scalar_fo_phase_logic(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True))
         tau = np.array([0.01, 0.02, 0.03])

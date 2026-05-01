@@ -855,7 +855,7 @@ class TwoStreamEss:
         if n_rows <= 0:
             return 1
         row_floats = (48 if backend == "torch" else 40) * max(int(n_layers), 1) + 64
-        target_mib = 512 if backend == "torch" else 1400
+        target_mib = 1024 if backend == "torch" else 1400
         target_bytes = target_mib * 1024 * 1024
         granularity = 2000 if backend == "torch" else 1000
         chunk = max(granularity, int(target_bytes // (8 * row_floats)))
@@ -868,7 +868,8 @@ class TwoStreamEss:
         if n_rows <= 0:
             return 1
         row_floats = (6 if backend == "torch" else 4) * max(int(n_layers), 1) + 32
-        target_bytes = 384 * 1024 * 1024
+        target_mib = 560 if backend == "torch" else 384
+        target_bytes = target_mib * 1024 * 1024
         granularity = 2000 if backend == "torch" else 1000
         chunk = max(granularity, int(target_bytes // (8 * row_floats)))
         chunk = min(n_rows, ((chunk + granularity - 1) // granularity) * granularity)
@@ -1601,7 +1602,10 @@ class TwoStreamEss:
         """Runs the FO-only thermal batch path with torch tensors."""
         from .rtsolver.backend import _load_torch
         from .rtsolver.thermal_batch_numpy import precompute_fo_thermal_geometry_numpy
-        from .rtsolver.thermal_batch_torch import _fo_thermal_toa_batch
+        from .rtsolver.thermal_batch_torch import (
+            _fo_thermal_toa_batch,
+            fo_thermal_geometry_to_torch,
+        )
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
@@ -1672,6 +1676,7 @@ class TwoStreamEss:
         )
         self._require_finite_torch("tau", tau)
         height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
+        height_grid_t = value_to_torch(mapped["height_grid"], context)
         angles = self._thermal_angles(mapped["user_angles"])
         want_profiles = self.options.output_levels
         total_by_geometry = []
@@ -1691,6 +1696,11 @@ class TwoStreamEss:
                     user_angle_degrees=float(angle),
                     earth_radius=earth_radius,
                     nfine=nfine,
+                )
+                fo_geometry = fo_thermal_geometry_to_torch(
+                    fo_geometry,
+                    dtype=context.dtype,
+                    device=context.device,
                 )
                 total_chunks = []
                 atmos_chunks = []
@@ -1717,7 +1727,7 @@ class TwoStreamEss:
                         "omega": omega[row_slice],
                         "scaling": scaling[row_slice],
                         "thermal_bb_input": planck[row_slice],
-                        "heights": height_grid,
+                        "heights": height_grid_t,
                         "user_angle_degrees": float(angle),
                         "earth_radius": earth_radius,
                         "nfine": nfine,
@@ -2214,6 +2224,9 @@ class TwoStreamEss:
                     chapman = np.triu(np.full((n_layers, n_layers), secant, dtype=float))
                 else:
                     chapman = geometry.chapman_factors[:, :, geom_index]
+                chapman_t = value_to_torch(chapman, context)
+                pxsq_t = value_to_torch(geometry.pxsq, context)
+                px0x_t = value_to_torch(geometry.px0x[geom_index], context)
                 n_rows = int(tau.shape[0])
                 chunk_size = self._solar_batch_chunk_size(n_rows, n_layers, backend="torch")
                 two_chunks = []
@@ -2247,14 +2260,14 @@ class TwoStreamEss:
                         albedo=albedo_rows[row_slice],
                         flux_factor=fbeam_rows[row_slice],
                         stream_value=prepared.stream_value,
-                        chapman=chapman,
+                        chapman=chapman_t,
                         x0=float(geometry.x0[geom_index]),
                         user_stream=float(geometry.user_streams[geom_index]),
                         user_secant=float(geometry.user_secants[geom_index]),
                         azmfac=float(geometry.azmfac[geom_index]),
                         px11=float(geometry.px11),
-                        pxsq=geometry.pxsq,
-                        px0x=geometry.px0x[geom_index],
+                        pxsq=pxsq_t,
+                        px0x=px0x_t,
                         ulp=float(geometry.ulp[geom_index]),
                         dtype=context.dtype,
                         device=context.device,
@@ -2526,6 +2539,7 @@ class TwoStreamEss:
         from .rtsolver.thermal_batch_torch import (
             _fo_thermal_toa_batch,
             _two_stream_thermal_toa_batch,
+            fo_thermal_geometry_to_torch,
         )
 
         torch = _load_torch()
@@ -2605,6 +2619,11 @@ class TwoStreamEss:
             if mapped["height_grid"] is None
             else np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
         )
+        height_grid_t = (
+            None
+            if mapped["height_grid"] is None
+            else value_to_torch(mapped["height_grid"], context)
+        )
         want_profiles = self.options.output_levels
         two_stream_by_geometry = []
         fo_by_geometry = []
@@ -2658,6 +2677,11 @@ class TwoStreamEss:
                         earth_radius=earth_radius,
                         nfine=fo_nfine,
                     )
+                    fo_geometry = fo_thermal_geometry_to_torch(
+                        fo_geometry,
+                        dtype=context.dtype,
+                        device=context.device,
+                    )
                 for start in range(0, n_rows, chunk_size):
                     stop = min(start + chunk_size, n_rows)
                     row_slice = slice(start, stop)
@@ -2697,7 +2721,7 @@ class TwoStreamEss:
                             thermal_bb_input=planck[row_slice],
                             surfbb=surfbb[row_slice],
                             emissivity=emissivity_rows[row_slice],
-                            heights=height_grid,
+                            heights=height_grid_t,
                             user_angle_degrees=float(angle),
                             earth_radius=earth_radius,
                             nfine=fo_nfine,

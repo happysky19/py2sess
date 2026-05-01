@@ -62,6 +62,10 @@ def _infer_context(values: tuple[Any, ...], *, dtype, device):
 
 def _as_tensor(value, *, dtype, device):
     """Converts ``value`` to a torch tensor on the requested context."""
+    if torch.is_tensor(value):
+        if value.dtype == dtype and value.device == device:
+            return value
+        return value.to(dtype=dtype, device=device)
     if isinstance(value, np.ndarray) and not value.flags.writeable:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="The given NumPy array is not writable")

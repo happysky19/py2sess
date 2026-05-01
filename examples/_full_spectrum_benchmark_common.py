@@ -99,11 +99,12 @@ def recommended_chunk_size(
     nlay = max(int(nlayers), 1)
     if workload == "solar_obs":
         row_floats = (48 if backend == "torch" else 40) * nlay + 64
-        target_mib = 512 if backend == "torch" else 1400
+        target_mib = 1024 if backend == "torch" else 1400
         target_bytes = target_mib * 1024 * 1024
     elif workload == "thermal":
         row_floats = (6 if backend == "torch" else 4) * nlay + 32
-        target_bytes = 384 * 1024 * 1024
+        target_mib = 560 if backend == "torch" else 384
+        target_bytes = target_mib * 1024 * 1024
     else:  # pragma: no cover
         raise ValueError(f"unsupported workload: {workload}")
     chunk = target_bytes // (8 * row_floats)

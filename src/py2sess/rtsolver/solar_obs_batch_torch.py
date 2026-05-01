@@ -33,6 +33,10 @@ def _exp_cutoff_torch(values, cutoff: float):
 
 def _as_tensor(value, *, dtype, device):
     """Converts ``value`` to a torch tensor on the requested context."""
+    if torch.is_tensor(value):
+        if value.dtype == dtype and value.device == device:
+            return value
+        return value.to(dtype=dtype, device=device)
     if isinstance(value, np.ndarray) and not value.flags.writeable:
         # Solver inputs are read-only. Sharing mmap-backed CPU arrays avoids
         # copying full-spectrum cache slices before every torch batch call.
@@ -108,9 +112,12 @@ def _qsprep_obs_batch_torch(delta_tau, chapman, user_secant: float):
     tauslant_previous[:, 0] = 0.0
     tauslant_previous[:, 1:] = tauslant_all[:, :-1]
     delta_tauslant = tauslant_all - tauslant_previous
+    nonzero_tau = delta_tau != 0.0
+    safe_delta_tau = torch.where(nonzero_tau, delta_tau, torch.ones_like(delta_tau))
+    average_secant_raw = torch.where(nonzero_tau, delta_tauslant / safe_delta_tau, 0.0)
     too_deep = tauslant_all > MAX_TAU_PATH
     if not bool(torch.any(too_deep)):
-        average_secant = delta_tauslant / delta_tau
+        average_secant = average_secant_raw
         initial_trans = torch.exp(-tauslant_previous)
         t_delt_mubar = torch.exp(-delta_tauslant)
         itrans_userm = initial_trans * user_secant
@@ -142,7 +149,6 @@ def _qsprep_obs_batch_torch(delta_tau, chapman, user_secant: float):
     zero = torch.zeros((batch, nlayers), dtype=dtype, device=device)
     initial_trans_raw = torch.exp(-tauslant_previous)
     initial_trans = torch.where(active, initial_trans_raw, zero)
-    average_secant_raw = delta_tauslant / delta_tau
     average_secant = torch.where(active, average_secant_raw, zero)
     t_delt_mubar = torch.where(
         active & (delta_tauslant <= MAX_TAU_PATH), torch.exp(-delta_tauslant), zero

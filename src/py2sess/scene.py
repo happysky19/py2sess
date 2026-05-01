@@ -363,11 +363,16 @@ def _prepare_thermal_source(bundle: dict[str, Any]) -> tuple[dict[str, Any], str
         **{coordinate_name: bundle[coordinate_name]},
     )
     prepared = dict(bundle)
-    prepared["planck"] = np.asarray(source.planck, dtype=float)
-    prepared["surface_planck"] = np.asarray(source.surface_planck, dtype=float)
+    prepared["planck"] = _contiguous_array(source.planck)
+    prepared["surface_planck"] = _contiguous_array(source.surface_planck)
     if "emissivity" not in prepared:
         prepared["emissivity"] = 1.0 - np.asarray(prepared["albedo"], dtype=float)
     return prepared, f"temperature ({coordinate_name})"
+
+
+def _contiguous_array(value: Any) -> np.ndarray:
+    arr = np.asarray(value, dtype=float)
+    return arr if arr.ndim == 0 else np.ascontiguousarray(arr)
 
 
 def _forward_kwargs(mode: str, bundle: dict[str, Any]) -> dict[str, Any]:
