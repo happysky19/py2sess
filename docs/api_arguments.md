@@ -30,7 +30,7 @@ are needed; profile arrays use the final axis for TOA-to-BOA levels.
 | `plane_parallel` | Use plane-parallel geometry instead of spherical geometry | scalar | `False` | `DO_PLANE_PARALLEL` |
 | `delta_scaling` | Apply delta-M scaling in the 2S core | scalar | `True` | `DO_D2S_SCALING` |
 | `brdf_surface` | Enable explicit BRDF coefficients | scalar | `False` | `DO_BRDF_SURFACE` |
-| `bvp_solver` | Thermal 2S boundary-value solver: `auto`, `scipy`, `banded`, or `pentadiag` | scalar | `auto` | BVP solver selector |
+| `bvp_solver` | 2S boundary-value solver: `auto`, `scipy`, `banded`, or `pentadiag` | scalar | `auto` | BVP solver selector |
 | `tau` | Layer optical thickness | `(..., nlyr)` | required | `DELTAU_INPUT` |
 | `ssa` | Single-scattering albedo | `(..., nlyr)` | required | `OMEGA_INPUT` |
 | `g` | Asymmetry factor | `(..., nlyr)` | required | `ASYMM_INPUT` |
