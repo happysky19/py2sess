@@ -1083,6 +1083,86 @@ class ApiTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(tensor.grad).all().item())
             self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)
 
+    def test_thermal_pentadiagonal_backward_matches_dense_on_pivot_edge_case(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        from py2sess.rtsolver import bvp_batch_torch
+
+        xpos1 = torch.tensor([[1.2, 1.1], [1.3, 1.25]], dtype=torch.float64)
+        xpos2 = torch.tensor([[0.4, 0.45], [0.6, 0.55]], dtype=torch.float64)
+        eigentrans = torch.tensor([[0.8, 0.5], [0.9, 0.4]], dtype=torch.float64)
+        zeros = torch.zeros((2, 2), dtype=torch.float64)
+        wupper = (zeros.clone(), zeros.clone())
+        wlower = (zeros.clone(), zeros.clone())
+
+        def _run(solver):
+            albedo = torch.tensor([0.1, 0.2], dtype=torch.float64, requires_grad=True)
+            emissivity = torch.tensor([0.9, 0.8], dtype=torch.float64, requires_grad=True)
+            surfbb = torch.tensor([1.4, 1.5], dtype=torch.float64, requires_grad=True)
+            lcon, mcon = solver(
+                albedo=albedo,
+                emissivity=emissivity,
+                surfbb=surfbb,
+                surface_factor=2.0,
+                stream_value=0.5,
+                xpos1=xpos1,
+                xpos2=xpos2,
+                eigentrans=eigentrans,
+                wupper=wupper,
+                wlower=wlower,
+            )
+            (lcon + mcon).sum().backward()
+            return (
+                to_numpy(lcon),
+                to_numpy(mcon),
+                to_numpy(albedo.grad),
+                to_numpy(emissivity.grad),
+                to_numpy(surfbb.grad),
+            )
+
+        fast = _run(bvp_batch_torch.solve_thermal_bvp_batch_torch)
+        dense = _run(bvp_batch_torch.solve_thermal_dense_bvp_batch_torch)
+        for fast_value, dense_value in zip(fast, dense):
+            np.testing.assert_allclose(fast_value, dense_value, rtol=1.0e-10, atol=1.0e-12)
+
+    def test_batched_thermal_torch_single_layer_keeps_gradients(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=1, mode="thermal", backend="torch", torch_dtype="float64")
+        )
+        tau = torch.tensor([[0.2], [0.25]], dtype=torch.float64, requires_grad=True)
+        ssa = torch.tensor([[0.15], [0.12]], dtype=torch.float64, requires_grad=True)
+        g = torch.tensor([[0.1], [0.12]], dtype=torch.float64, requires_grad=True)
+        planck = torch.tensor([[1.0, 1.1], [0.9, 1.0]], dtype=torch.float64, requires_grad=True)
+        surface_planck = torch.tensor([1.4, 1.3], dtype=torch.float64, requires_grad=True)
+        albedo = torch.tensor([0.05, 0.08], dtype=torch.float64, requires_grad=True)
+
+        result = solver.forward(
+            tau=tau,
+            ssa=ssa,
+            g=g,
+            z=np.array([1.0, 0.0]),
+            angles=30.0,
+            stream=0.5,
+            albedo=albedo,
+            delta_m_truncation_factor=torch.zeros_like(tau),
+            planck=planck,
+            surface_planck=surface_planck,
+            emissivity=1.0 - albedo,
+            include_fo=True,
+        )
+
+        result.radiance_total.sum().backward()
+        for tensor in (tau, ssa, g, planck, surface_planck, albedo):
+            self.assertIsNotNone(tensor.grad)
+            self.assertTrue(torch.isfinite(tensor.grad).all().item())
+            self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)
+
     def test_batched_torch_level_profiles_keep_gradients(self) -> None:
         if not has_torch():
             self.skipTest("torch not installed")

@@ -11,7 +11,6 @@ from .backend import _load_torch
 from .bvp_batch_torch import (
     _canonical_torch_bvp_engine,
     default_auto_bvp_context_torch,
-    repair_nonfinite_bvp_rows_torch,
     solve_thermal_bvp_batch_torch,
     solve_thermal_block_bvp_batch_torch,
     solve_thermal_dense_bvp_batch_torch,
@@ -236,6 +235,50 @@ def _two_stream_thermal_toa_batch(
         asymm,
         scaling,
     )
+    transparent_rows = torch.all(delta_tau == 0.0, dim=1)
+    if bool(transparent_rows.all()):
+        if return_profile:
+            return torch.zeros(
+                (tau.shape[0], tau.shape[1] + 1),
+                dtype=tau.dtype,
+                device=tau.device,
+            )
+        return torch.zeros((tau.shape[0],), dtype=tau.dtype, device=tau.device)
+    if bool(transparent_rows.any()):
+        good = ~transparent_rows
+        subset = _two_stream_thermal_toa_batch(
+            tau=tau[good],
+            omega=omega[good],
+            asymm=asymm[good],
+            scaling=scaling[good],
+            thermal_bb_input=thermal_bb_input[good],
+            surfbb=surfbb[good] if torch.is_tensor(surfbb) and surfbb.ndim > 0 else surfbb,
+            emissivity=(
+                emissivity[good]
+                if torch.is_tensor(emissivity) and emissivity.ndim > 0
+                else emissivity
+            ),
+            albedo=albedo[good] if torch.is_tensor(albedo) and albedo.ndim > 0 else albedo,
+            stream_value=stream_value,
+            user_stream=user_stream,
+            pxsq=pxsq,
+            thermal_tcutoff=thermal_tcutoff,
+            bvp_device=bvp_device,
+            bvp_dtype=bvp_dtype,
+            bvp_engine=bvp_engine,
+            return_profile=return_profile,
+        )
+        if return_profile:
+            result = torch.zeros(
+                (tau.shape[0], tau.shape[1] + 1),
+                dtype=tau.dtype,
+                device=tau.device,
+            )
+            result[good] = subset
+            return result
+        result = torch.zeros((tau.shape[0],), dtype=tau.dtype, device=tau.device)
+        result[good] = subset
+        return result
     therm0, therm1 = _thermal_coefficients_batch(delta_tau, thermal_bb_input)
     eigenvalue, eigentrans, xpos1, xpos2, norm_saved = _hom_solution_thermal_batch(
         stream_value=stream_value,
@@ -287,12 +330,7 @@ def _two_stream_thermal_toa_batch(
         tterm_save=tterm_save,
     )
     bvp_engine = _canonical_torch_bvp_engine(bvp_engine)
-    needs_scattering_grad = omega_total.requires_grad or asymm_total.requires_grad
-    if needs_scattering_grad:
-        # The recurrence solvers update saved columns in place; dense solve keeps
-        # thermal scattering retrieval differentiable.
-        solve_bvp = solve_thermal_dense_bvp_batch_torch
-    elif bvp_engine == "pentadiagonal":
+    if bvp_engine == "pentadiagonal":
         solve_bvp = solve_thermal_bvp_batch_torch
     elif bvp_engine == "block":
         solve_bvp = solve_thermal_block_bvp_batch_torch
@@ -319,26 +357,6 @@ def _two_stream_thermal_toa_batch(
         solve_device=bvp_device,
         solve_dtype=bvp_dtype,
     )
-    if solve_bvp in {solve_thermal_bvp_batch_torch, solve_thermal_block_bvp_batch_torch}:
-        lcon, mcon = repair_nonfinite_bvp_rows_torch(
-            lcon=lcon,
-            mcon=mcon,
-            bad_row_solver=solve_thermal_dense_bvp_batch_torch,
-            solver_kwargs={
-                "albedo": albedo,
-                "emissivity": emissivity,
-                "surfbb": surfbb,
-                "surface_factor": surface_factor,
-                "stream_value": stream_value,
-                "xpos1": xpos1,
-                "xpos2": xpos2,
-                "eigentrans": eigentrans,
-                "wupper": t_wupper,
-                "wlower": t_wlower,
-            },
-            solve_device=bvp_device,
-            solve_dtype=bvp_dtype,
-        )
     wlower0, _wlower1 = t_wlower
     idownsurf = (
         wlower0[:, -1] + lcon[:, -1] * xpos1[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos2[:, -1]
@@ -493,7 +511,7 @@ def solve_thermal_batch_torch(
     dtype, device
         Optional torch dtype and device for converted inputs.
     bvp_device, bvp_dtype
-        Optional context for the dense BVP fallback. This is useful for Apple
+        Optional context for the internal BVP solve. This is useful for Apple
         MPS development runs, where ``bvp_engine="auto"`` defaults to a CPU
         float64 BVP solve while keeping the outer tensors on MPS.
     bvp_engine
