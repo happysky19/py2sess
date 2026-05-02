@@ -1127,6 +1127,42 @@ class ApiTests(unittest.TestCase):
         for fast_value, dense_value in zip(fast, dense):
             np.testing.assert_allclose(fast_value, dense_value, rtol=1.0e-10, atol=1.0e-12)
 
+    def test_batched_thermal_torch_single_layer_keeps_gradients(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=1, mode="thermal", backend="torch", torch_dtype="float64")
+        )
+        tau = torch.tensor([[0.2], [0.25]], dtype=torch.float64, requires_grad=True)
+        ssa = torch.tensor([[0.15], [0.12]], dtype=torch.float64, requires_grad=True)
+        g = torch.tensor([[0.1], [0.12]], dtype=torch.float64, requires_grad=True)
+        planck = torch.tensor([[1.0, 1.1], [0.9, 1.0]], dtype=torch.float64, requires_grad=True)
+        surface_planck = torch.tensor([1.4, 1.3], dtype=torch.float64, requires_grad=True)
+        albedo = torch.tensor([0.05, 0.08], dtype=torch.float64, requires_grad=True)
+
+        result = solver.forward(
+            tau=tau,
+            ssa=ssa,
+            g=g,
+            z=np.array([1.0, 0.0]),
+            angles=30.0,
+            stream=0.5,
+            albedo=albedo,
+            delta_m_truncation_factor=torch.zeros_like(tau),
+            planck=planck,
+            surface_planck=surface_planck,
+            emissivity=1.0 - albedo,
+            include_fo=True,
+        )
+
+        result.radiance_total.sum().backward()
+        for tensor in (tau, ssa, g, planck, surface_planck, albedo):
+            self.assertIsNotNone(tensor.grad)
+            self.assertTrue(torch.isfinite(tensor.grad).all().item())
+            self.assertGreater(float(torch.abs(tensor.grad).sum()), 0.0)
+
     def test_batched_torch_level_profiles_keep_gradients(self) -> None:
         if not has_torch():
             self.skipTest("torch not installed")

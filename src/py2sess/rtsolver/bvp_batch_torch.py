@@ -1053,6 +1053,21 @@ def solve_thermal_bvp_batch_torch(
     """Solves regular thermal two-stream BVP systems."""
     output_device = xpos1.device
     output_dtype = xpos1.dtype
+    if xpos1.shape[1] == 1:
+        return solve_thermal_dense_bvp_batch_torch(
+            albedo=albedo,
+            emissivity=emissivity,
+            surfbb=surfbb,
+            surface_factor=surface_factor,
+            stream_value=stream_value,
+            xpos1=xpos1,
+            xpos2=xpos2,
+            eigentrans=eigentrans,
+            wupper=wupper,
+            wlower=wlower,
+            solve_device=solve_device,
+            solve_dtype=solve_dtype,
+        )
     needs_grad = any(
         torch.is_tensor(value) and bool(value.requires_grad)
         for value in (
