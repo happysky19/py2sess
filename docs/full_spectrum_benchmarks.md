@@ -40,10 +40,59 @@ scripts/run_full_benchmark_threads.sh
 ```
 
 Useful environment variables: `BACKEND=numpy|torch|both`, `THREADS`,
-`LIMIT`, `CHUNK_SIZE`, and `OUTPUT_LEVELS=1`.
+`TORCH_DEVICE=cpu|cuda|mps`, `TORCH_DTYPE=float64|float32`, `LIMIT`,
+`CHUNK_SIZE`, and `OUTPUT_LEVELS=1`.
 
 Add `--component-timing` only when you need diagnostic NumPy FO/2S split
 timing. The default benchmark reports public `scene.forward()` RT time.
+
+## CUDA / Colab
+
+Colab usually starts with a CUDA-enabled PyTorch build already installed. Clone
+the repo and install py2sess without the `torch` extra so pip does not replace
+Colab's PyTorch wheel:
+
+```python
+!git clone https://github.com/happysky19/py2sess.git
+%cd py2sess
+%pip install -e .
+```
+
+Check the runtime before benchmarking:
+
+```python
+import torch
+
+print(torch.__version__, torch.version.cuda)
+print(torch.cuda.is_available())
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no CUDA")
+```
+
+The benchmark CLI accepts `--torch-device cuda`:
+
+```bash
+PYTHONPATH=src python examples/benchmark_scene_full_spectrum.py \
+  --profile benchmarks/uv_profile1/profile.csv \
+  --scene benchmarks/uv_profile1/scene.yaml \
+  --backend torch \
+  --torch-device cuda \
+  --torch-dtype float64 \
+  --require-python-generated-inputs
+```
+
+The checked-in UV and TIR scenes contain 1,000 spectral wavelengths. Larger
+scaling experiments either need larger scene tables or should explicitly tile
+the prepared inputs along the spectral dimension. CUDA timings through the
+public NumPy-input API include host-to-device tensor transfer; workflows that
+keep tensors on GPU may time differently.
+
+The reference Colab Tesla T4 result below was generated from
+[`docs/assets/cuda_colab_t4_scaling.csv`](assets/cuda_colab_t4_scaling.csv)
+with [`scripts/plot_cuda_colab_t4_scaling.py`](../scripts/plot_cuda_colab_t4_scaling.py).
+The plotting script requires matplotlib. It is a reproducibility reference for
+this environment, not a general performance guarantee.
+
+![py2sess CUDA scaling on Colab Tesla T4](assets/cuda_colab_t4_scaling.svg)
 
 ## Inputs
 

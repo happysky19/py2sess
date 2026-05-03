@@ -12,7 +12,7 @@ Environment:
   PYTHON=python3          Python executable
   BACKEND=both           numpy, torch, or both
   THREADS="1 2 4"        Thread counts to run
-  TORCH_DEVICE=cpu       Torch device
+  TORCH_DEVICE=cpu       Torch device: cpu, cuda, or mps
   TORCH_DTYPE=float64    Torch dtype
   LIMIT=                 Optional spectral-row limit
   CHUNK_SIZE=            Optional chunk-size override

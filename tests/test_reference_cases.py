@@ -80,6 +80,14 @@ def _generated_uv_phase(case):
     return phase, scatter
 
 
+def _has_cuda() -> bool:
+    if not has_torch():
+        return False
+    import torch
+
+    return bool(torch.cuda.is_available())
+
+
 class ReferenceCaseTests(unittest.TestCase):
     def test_packaged_reference_outputs_are_separate_files(self) -> None:
         for input_name, reference_name in (
@@ -216,6 +224,49 @@ class ReferenceCaseTests(unittest.TestCase):
         )
         np.testing.assert_allclose(
             to_numpy(public.radiance_total), to_numpy(kernel.total_toa), rtol=1.0e-12, atol=1e-12
+        )
+
+    def test_public_forward_tir_fixture_cuda_matches_numpy(self) -> None:
+        if not _has_cuda():
+            self.skipTest("CUDA is not available")
+        rows = 16
+        case = load_tir_benchmark_case()
+        phase = _generated_tir_phase(case)
+        planck, surface_planck = _generated_tir_source(case)
+        common = dict(
+            tau=case.tau_arr[:rows],
+            ssa=case.omega_arr[:rows],
+            g=phase.g[:rows],
+            z=case.heights,
+            angles=case.user_angle,
+            stream=case.stream_value,
+            albedo=case.albedo[:rows],
+            delta_m_truncation_factor=phase.delta_m_truncation_factor[:rows],
+            planck=planck[:rows],
+            surface_planck=surface_planck[:rows],
+            emissivity=case.emissivity[:rows],
+            include_fo=True,
+        )
+        numpy_result = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=case.n_layers, mode="thermal")
+        ).forward(**common)
+        cuda_result = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=case.n_layers,
+                mode="thermal",
+                backend="torch",
+                torch_device="cuda",
+                torch_dtype="float64",
+                torch_enable_grad=False,
+            )
+        ).forward(**common)
+
+        self.assertEqual(cuda_result.radiance_total.device.type, "cuda")
+        np.testing.assert_allclose(
+            to_numpy(cuda_result.radiance_total),
+            numpy_result.radiance_total,
+            rtol=1.0e-8,
+            atol=1.0e-10,
         )
 
     def test_tir_torch_matches_numpy_component_split(self) -> None:
@@ -417,6 +468,72 @@ class ReferenceCaseTests(unittest.TestCase):
         np.testing.assert_allclose(
             to_numpy(public.radiance_total), two_stream + fo, rtol=1.0e-12, atol=1.0e-12
         )
+
+    def test_public_forward_uv_fixture_cuda_matches_numpy(self) -> None:
+        if not _has_cuda():
+            self.skipTest("CUDA is not available")
+        rows = 16
+        case = load_uv_benchmark_case()
+        phase, scatter = _generated_uv_phase(case)
+        common = dict(
+            tau=case.tau[:rows],
+            ssa=case.omega[:rows],
+            g=phase.g[:rows],
+            z=case.heights,
+            angles=case.user_obsgeom,
+            stream=case.stream_value,
+            fbeam=case.flux_factor[:rows],
+            albedo=case.albedo[:rows],
+            delta_m_truncation_factor=phase.delta_m_truncation_factor[:rows],
+            include_fo=True,
+            fo_scatter_term=scatter[:rows],
+        )
+        numpy_result = TwoStreamEss(TwoStreamEssOptions(nlyr=case.n_layers, mode="solar")).forward(
+            **common
+        )
+        cuda_result = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=case.n_layers,
+                mode="solar",
+                backend="torch",
+                torch_device="cuda",
+                torch_dtype="float64",
+                torch_enable_grad=False,
+            )
+        ).forward(**common)
+
+        self.assertEqual(cuda_result.radiance_total.device.type, "cuda")
+        np.testing.assert_allclose(
+            to_numpy(cuda_result.radiance_total),
+            numpy_result.radiance_total,
+            rtol=1.0e-8,
+            atol=1.0e-10,
+        )
+
+    def test_torch_cuda_device_request_requires_available_cuda(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        if _has_cuda():
+            self.skipTest("CUDA is available")
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=1,
+                mode="solar",
+                backend="torch",
+                torch_device="cuda",
+                torch_dtype="float64",
+                torch_enable_grad=False,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "CUDA is not available"):
+            solver.forward(
+                tau=np.array([[0.01]], dtype=float),
+                ssa=np.array([[0.0]], dtype=float),
+                g=np.array([[0.0]], dtype=float),
+                z=np.array([1.0, 0.0], dtype=float),
+                angles=[30.0, 20.0, 0.0],
+                albedo=np.array([0.1], dtype=float),
+            )
 
     def test_uv_torch_matches_numpy_2s(self) -> None:
         if not has_torch():

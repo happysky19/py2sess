@@ -47,7 +47,7 @@ def add_common_benchmark_arguments(
         "--numpy-bvp-engine", choices=["auto", "block", "pentadiagonal"], default="auto"
     )
     parser.add_argument("--torch-bvp-engine", choices=torch_bvp_choices, default="auto")
-    parser.add_argument("--torch-device", choices=["cpu", "mps"], default="cpu")
+    parser.add_argument("--torch-device", choices=["cpu", "cuda", "mps"], default="cpu")
     parser.add_argument("--torch-dtype", choices=["float64", "float32"], default="float64")
     parser.add_argument("--torch-threads", type=int, default=1)
     parser.add_argument(
