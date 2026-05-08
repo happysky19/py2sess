@@ -68,6 +68,43 @@ class PaperRtBenchmarkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bench._active_layer_indices(3, 4)
 
+    def test_paper_preset_uses_50k_representative_wavelengths(self) -> None:
+        bench = _load_script("benchmark_paper_rt.py")
+        self.assertEqual(bench.DEFAULT_BASE_WAVELENGTHS, 50000)
+        forward_specs = bench._benchmark_specs(
+            layer_counts=(5, bench.DEFAULT_BASE_LAYERS),
+            wavelength_counts=(300, 1000),
+            base_layers=bench.DEFAULT_BASE_LAYERS,
+            base_wavelengths=bench.DEFAULT_BASE_WAVELENGTHS,
+            full_grid=False,
+        )
+        self.assertIn((50000, 5, "layers"), forward_specs)
+        self.assertIn((50000, bench.DEFAULT_BASE_LAYERS, "layers"), forward_specs)
+
+        jacobian_specs = bench._jacobian_specs(
+            layer_counts=(5, bench.DEFAULT_BASE_LAYERS),
+            wavelength_counts=(300, 1000),
+            grad_layer_counts=(1, bench.DEFAULT_BASE_LAYERS),
+            base_layers=bench.DEFAULT_BASE_LAYERS,
+            base_wavelengths=bench.DEFAULT_BASE_WAVELENGTHS,
+            full_grid=False,
+        )
+        self.assertIn((50000, bench.DEFAULT_BASE_LAYERS, 1, "grad_vars", "tau"), jacobian_specs)
+        self.assertIn(
+            (
+                50000,
+                bench.DEFAULT_BASE_LAYERS,
+                bench.DEFAULT_BASE_LAYERS,
+                "omega_grad_vars",
+                "omega",
+            ),
+            jacobian_specs,
+        )
+        self.assertIn(
+            (50000, bench.DEFAULT_BASE_LAYERS, 0, "surface_albedo", "surface_albedo"),
+            jacobian_specs,
+        )
+
     @unittest.skipUnless(has_torch(), "PyTorch is required")
     def test_synthetic_jacobian_smoke_has_finite_gradients(self) -> None:
         bench = _load_script("benchmark_paper_rt.py")

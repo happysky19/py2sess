@@ -33,6 +33,8 @@ DEFAULT_LAYER_COUNTS = (5, 10, 20, 50, 100, 114, 200)
 DEFAULT_WAVELENGTH_COUNTS = (300, 1000, 3000, 10000, 30000, 100000, 300000)
 DEFAULT_JACOBIAN_WAVELENGTH_COUNTS = (300, 1000, 3000, 10000)
 DEFAULT_GRAD_LAYER_COUNTS = (1, 2, 5, 10, 20, 50, 114)
+DEFAULT_BASE_LAYERS = 114
+DEFAULT_BASE_WAVELENGTHS = 50000
 SMOKE_LAYER_COUNTS = (2, 3)
 SMOKE_WAVELENGTH_COUNTS = (2, 3)
 SMOKE_GRAD_LAYER_COUNTS = (1, 2)
@@ -1189,8 +1191,8 @@ def run_benchmarks(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         base_wavelengths = args.base_wavelengths or SMOKE_WAVELENGTH_COUNTS[-1]
         fortran_limit = args.fortran_limit if args.fortran_limit is not None else 2
     else:
-        base_layers = base_layers or 114
-        base_wavelengths = base_wavelengths or 10000
+        base_layers = base_layers or DEFAULT_BASE_LAYERS
+        base_wavelengths = base_wavelengths or DEFAULT_BASE_WAVELENGTHS
 
     if has_torch():
         torch = _torch_module()
