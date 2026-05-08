@@ -559,7 +559,9 @@ def solve_solar_obs_batch_torch(
     all_layers_active = bool(misc["all_active"])
     bvp_engine_for_call = bvp_engine
     if _needs_autograd_safe_bvp(omega_t, asymm_t, scaling_t):
-        bvp_engine_for_call = "dense"
+        # The pentadiagonal wrapper has a custom VJP for optical-property gradients.
+        # Avoid the dense per-wavelength BVP solve, which is orders of magnitude slower.
+        bvp_engine_for_call = "pentadiagonal"
     total = torch.zeros(tau_t.shape[0], dtype=dtype, device=device)
     total_profile = None
     if return_profile:

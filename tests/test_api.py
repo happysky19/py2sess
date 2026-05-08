@@ -1127,6 +1127,52 @@ class ApiTests(unittest.TestCase):
         for fast_value, dense_value in zip(fast, dense):
             np.testing.assert_allclose(fast_value, dense_value, rtol=1.0e-10, atol=1.0e-12)
 
+    def test_solar_observation_pentadiagonal_backward_matches_dense(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        from py2sess.rtsolver import bvp_batch_torch
+
+        base = {
+            "albedo": torch.tensor([0.1, 0.2], dtype=torch.float64),
+            "direct_beam": torch.tensor([0.03, 0.04], dtype=torch.float64),
+            "xpos1": torch.tensor([[1.2, 1.1], [1.3, 1.25]], dtype=torch.float64),
+            "xpos2": torch.tensor([[0.4, 0.45], [0.6, 0.55]], dtype=torch.float64),
+            "eigentrans": torch.tensor([[0.8, 0.5], [0.9, 0.4]], dtype=torch.float64),
+            "wupper0": torch.tensor([[0.01, 0.02], [0.03, 0.01]], dtype=torch.float64),
+            "wupper1": torch.tensor([[0.02, 0.01], [0.01, 0.03]], dtype=torch.float64),
+            "wlower0": torch.tensor([[0.01, 0.03], [0.02, 0.02]], dtype=torch.float64),
+            "wlower1": torch.tensor([[0.03, 0.01], [0.01, 0.02]], dtype=torch.float64),
+        }
+
+        def _run(solver):
+            values = {
+                key: value.clone().detach().requires_grad_(True) for key, value in base.items()
+            }
+            lcon, mcon = solver(
+                albedo=values["albedo"],
+                direct_beam=values["direct_beam"],
+                surface_factor=2.0,
+                stream_value=0.5,
+                xpos1=values["xpos1"],
+                xpos2=values["xpos2"],
+                eigentrans=values["eigentrans"],
+                wupper=(values["wupper0"], values["wupper1"]),
+                wlower=(values["wlower0"], values["wlower1"]),
+            )
+            (lcon + 0.7 * mcon).sum().backward()
+            return (
+                to_numpy(lcon),
+                to_numpy(mcon),
+                *(to_numpy(values[key].grad) for key in base),
+            )
+
+        fast = _run(bvp_batch_torch.solve_solar_observation_bvp_batch_torch)
+        dense = _run(bvp_batch_torch.solve_solar_observation_dense_bvp_batch_torch)
+        for fast_value, dense_value in zip(fast, dense):
+            np.testing.assert_allclose(fast_value, dense_value, rtol=1.0e-10, atol=1.0e-12)
+
     def test_batched_thermal_torch_single_layer_keeps_gradients(self) -> None:
         if not has_torch():
             self.skipTest("torch not installed")
