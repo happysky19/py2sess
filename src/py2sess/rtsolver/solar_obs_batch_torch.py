@@ -46,6 +46,16 @@ def _as_tensor(value, *, dtype, device):
     return torch.as_tensor(value, dtype=dtype, device=device)
 
 
+def _static_float_tuple(value) -> tuple[float, ...] | None:
+    """Returns static geometry constants without tensor scalar extraction."""
+    if torch.is_tensor(value):
+        return None
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return None
+    return tuple(float(item) for item in arr)
+
+
 def _needs_autograd_safe_bvp(*values) -> bool:
     """Returns true when the 2S BVP solve must preserve optical-property gradients."""
     return bool(torch.is_grad_enabled() and any(value.requires_grad for value in values))
@@ -544,8 +554,10 @@ def solve_solar_obs_batch_torch(
     albedo_t = _as_tensor(albedo, dtype=dtype, device=device)
     flux_t = _as_tensor(flux_factor, dtype=dtype, device=device)
     chapman_t = _as_tensor(chapman, dtype=dtype, device=device)
-    pxsq_t = _as_tensor(pxsq, dtype=dtype, device=device)
-    px0x_t = _as_tensor(px0x, dtype=dtype, device=device)
+    pxsq_values = _static_float_tuple(pxsq)
+    px0x_values = _static_float_tuple(px0x)
+    pxsq_t = None if pxsq_values is not None else _as_tensor(pxsq, dtype=dtype, device=device)
+    px0x_t = None if px0x_values is not None else _as_tensor(px0x, dtype=dtype, device=device)
 
     delta_tau, omega_total, asymm_total = delta_m_scale_optical_properties_torch(
         tau_t,
@@ -575,7 +587,7 @@ def solve_solar_obs_batch_torch(
         eigenvalue, eigentrans, xpos1, xpos2, norm_saved = _hom_solution_solar_obs_batch_torch(
             fourier=fourier,
             stream_value=stream_value,
-            pxsq=float(pxsq_t[fourier]),
+            pxsq=pxsq_values[fourier] if pxsq_values is not None else float(pxsq_t[fourier]),
             omega=omega_total,
             omega_asymm_3=omega_asymm_3,
             delta_tau=delta_tau,
@@ -603,7 +615,7 @@ def solve_solar_obs_batch_torch(
             pi4=pi4,
             flux_factor=flux_t,
             layer_pis_cutoff=misc["layer_pis_cutoff"],
-            px0x=float(px0x_t[fourier]),
+            px0x=px0x_values[fourier] if px0x_values is not None else float(px0x_t[fourier]),
             omega=omega_total,
             omega_asymm_3=omega_asymm_3,
             average_secant=misc["average_secant"],
