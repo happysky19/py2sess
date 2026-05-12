@@ -1,0 +1,1292 @@
+\documentclass[gmd, manuscript]{copernicus}
+
+\graphicspath{{assets/}}
+\setlength{\emergencystretch}{3em}
+
+\begin{document}
+\sloppy
+
+\title{py2sess v0.2.0: a Python platform for differentiable 2 stream-exact single scattering radiative-transfer benchmarks}
+
+\Author[1][author@email.edu]{Author}{Name}
+\Author[1]{Coauthor}{Name}
+
+\affil[1]{Institution, Department, Address}
+
+\runningtitle{Differentiable 2S-ESS benchmarks with py2sess}
+\runningauthor{Author et al.}
+
+\received{}
+\pubdiscuss{}
+\revised{}
+\accepted{}
+\published{}
+\firstpage{1}
+
+\maketitle
+
+\begin{abstract}
+Atmospheric retrieval development needs radiative-transfer (RT) solvers whose spectra,
+timings, and sensitivities can be tested in the same scientific workflow.  py2sess
+v0.2.0 maps the 2 stream-exact single scattering (2S-ESS) method into NumPy and
+PyTorch without changing the underlying approximation.  It reproduces exported Fortran
+2S-ESS thermal-emission and solar-scattering benchmark spectra with maximum relative
+differences below 0.005 \%.  Prepared-input timing experiments then isolate the RT
+kernel from opacity generation.  Forward runtime is controlled by wavelength count,
+vertical depth, source-regime complexity, and backend throughput.  PyTorch
+vector--Jacobian products (VJPs) make local layer and surface sensitivities available
+from the tested forward code, but they are not free: on an NVIDIA A100, 50 000
+wavelengths and 114 layers require 0.26--0.77 s for wavelength-local surface
+sensitivities and 0.52--2.25 s for layer-resolved optical-property sensitivities.
+Activating one layer or all layers changes these VJP timings little, indicating that
+graph retention and reverse traversal dominate over a loop over state variables.  A
+small OCO-3 reflected-solar example demonstrates the same Python workflow on measured
+spectra under constrained aerosol and spectroscopy assumptions.  The result is a
+validated platform for prepared-input 2S-ESS benchmarking, retrieval prototyping, and
+differentiable sensitivity studies.
+\end{abstract}
+
+\introduction
+
+Radiative-transfer (RT) models are the forward operators in atmospheric spectroscopy,
+remote sensing, data assimilation, and optimal-estimation retrievals.  Retrieval
+algorithms need both spectra and derivatives with respect to atmospheric and surface
+state variables; this role of the forward-model Jacobian is central to the inverse
+problem formulation of Rodgers (2000) and to linearized RT solvers such as LIDORT and
+VLIDORT (Spurr, 2006; Spurr and Natraj, 2011; Spurr et al., 2022).  Fast forward RT is
+therefore necessary but not sufficient.  For retrieval development and sensitivity
+analysis, the practical bottleneck is often the ability to obtain reliable derivatives
+for a changing state-vector definition without rewriting and revalidating a new
+hand-linearized model each time.
+
+This issue has become more important as retrieval prototyping, uncertainty analysis,
+observing-system simulation, and machine-learning emulator development have moved into
+Python array workflows.  NumPy provides a common CPU array interface for scientific
+computing (Harris et al., 2020), while PyTorch provides accelerator execution and
+automatic differentiation in the same programming model used for machine learning
+(Baydin et al., 2018; Paszke et al., 2019).  In RT, differentiable implementations are
+increasingly used to connect forward models with inverse modeling and learning-based
+workflows, including recent differentiable Monte Carlo and three-dimensional RT studies
+(Salesin et al., 2024; Wang et al., 2024; Cao et al., 2025).  A one-dimensional,
+hyperspectral RT solver that can be called, timed, and differentiated directly in this
+environment is therefore useful even when mature Fortran solvers remain the reference
+for production calculations.
+
+The 2 stream-exact single scattering (2S-ESS) method combines a two-stream
+multiple-scattering approximation with exact single scattering in a curved atmosphere
+(Spurr and Natraj, 2011; Natraj et al., 2023).  The method is designed for
+high-throughput spectral radiance calculations: the multiple-scattering field is
+approximated efficiently, while the single-scattering term retains accurate phase
+function and slant-path geometry.  The Fortran 2S-ESS implementation is optimized and
+analytically linearized, and 2S-ESS has been used in greenhouse-gas, aerosol, and
+temperature/composition retrieval studies (Natraj et al., 2022, 2023).  The present
+paper does not introduce a new RT approximation or claim to supersede that analytic
+Fortran linearization.  Instead, it asks a platform question: what prepared-input RT
+performance and derivative cost are obtained when the same 2S-ESS algebra is exposed
+through a Python implementation with NumPy and PyTorch backends?
+
+This benchmark is complementary to RT acceleration and application studies that reduce
+the cost of existing retrieval forward models through principal-component or
+lookup-table ideas (Spurr et al., 2013; Bak et al., 2021; Natraj and Spurr, 2025).  The
+question here is narrower but different: once prepared optical properties and source
+arrays are available, how does a Python-native 2S-ESS kernel scale, and what additional
+cost is introduced when local sensitivities are obtained by PyTorch reverse-mode
+differentiation?
+
+The answer matters scientifically because state-vector experimentation is a real part
+of retrieval research.  A retrieval developer may need to switch sensitivities among
+optical thickness, single-scattering albedo, asymmetry parameter, thermal source terms,
+surface albedo, or instrument-specific surface parameters.  With a differentiable
+backend, these experiments can be performed in the same tested forward model and
+checked against finite differences.  This flexibility is also relevant to emulator and
+surrogate development, where local RT sensitivities may help diagnose training data or
+couple differentiable RT components with learned models.  The central quantity for such
+work is not a language-level speedup, but a reproducible cost map for forward RT and
+local sensitivity calculations after optical properties are available.
+
+We report three benchmark groups and one real-data workflow demonstration.  First,
+exported full-spectrum thermal-emission and solar-scattering benchmark scenes
+compare py2sess spectra against the Fortran 2S-ESS reference and measure RT
+module/component timing for Fortran, NumPy, PyTorch CPU, and PyTorch CUDA.  Second,
+synthetic forward-only cases use deterministic inhomogeneous prepared optical profiles
+to isolate scaling with wavelength count and vertical-grid size.  Third, synthetic
+PyTorch cases measure vector--Jacobian-product (VJP) timings for local prepared-input
+sensitivities.
+Finally, a small OCO-3 reflected-solar example tests whether the same Python workflow
+can ingest measured spectra after gas optical-depth caches and instrument inputs have
+been prepared.  This OCO-3 example is demoted deliberately to a workflow
+demonstration: it uses open spectroscopy and constrained aerosol assumptions and is not
+an operational aerosol product or an independent validation of the OCO-3 Level-2
+retrieval.  The solver regimes are thermal emission and solar-scattering observation;
+the O$_2$ A-band benchmark is described as Solar rather than ultraviolet.  GPU
+results are reported for NVIDIA Tesla T4 and A100 systems where CUDA was available.
+The benchmark study is deliberately limited to the RT kernel: opacity generation, file
+input/output, scene parsing, and host-to-device tensor construction are outside the
+timed region.
+
+\section{Model and benchmark design}
+
+\subsection{2S-ESS radiative-transfer equations}
+
+py2sess follows the 2S-ESS decomposition described by Natraj et al. (2023).  The
+upwelling radiance at the top of the atmosphere is written as the sum of a two-stream
+multiple-scattering contribution and an exact first-order contribution,
+\begin{equation}
+  I_{\rm TOA}^{\uparrow}
+  =
+  I_{\rm 2S}^{\uparrow}
+  +
+  I_{\rm FO}^{\uparrow}.
+  \label{eq:rt_decomposition}
+\end{equation}
+The two-stream term solves for the diffuse field on the layer grid, including
+regime-specific particular sources.  The FO term is evaluated outside the two-stream
+boundary-value problem and added at the same output level.  In thermal-emission cases,
+the two-stream calculation is azimuth independent and uses Planck-source particular
+terms; the FO component is the exact line-of-sight thermal and surface-emission term.
+In solar-scattering cases, the solver evaluates solar slant-path transmission,
+direct-beam particular sources, the retained azimuthal Fourier components, and exact
+first-order solar scattering.
+
+The prepared RT inputs are layer optical thickness, single-scattering albedo,
+asymmetry parameter, source terms, and surface properties.  When optical properties are
+constructed from component quantities, py2sess uses
+\begin{align}
+  \tau_n &= \tau_{n,{\rm abs}} + \tau_{n,{\rm sca}}, \\
+  \omega_n &= \frac{\tau_{n,{\rm sca}}}{\tau_n}, \\
+  g_n &=
+  \frac{\sum_a g_{a,n}\tau_{a,n,{\rm sca}}}
+       {\tau_{n,{\rm sca}}},
+  \label{eq:optical_inputs}
+\end{align}
+where Rayleigh scattering contributes zero to $g_n$ and aerosol components contribute
+through their scattering optical depths and moments.  For a purely absorbing layer
+($\tau_{n,{\rm sca}}=0$), $\omega_n=0$ and $g_n$ is set to zero by convention because
+the asymmetry parameter then has no radiative effect.  The solar FO source uses the
+corresponding mixture of Rayleigh and aerosol phase functions at the scattering angle.
+
+The strongly forward-scattering part is removed before the two-stream solve by the
+delta-M transformation,
+\begin{equation}
+\begin{aligned}
+\widetilde{\tau}_n &= (1-\omega_n f_n)\tau_n,\\
+\widetilde{\omega}_n &= \frac{(1-f_n)\omega_n}{1-\omega_n f_n},\\
+\widetilde{g}_n &= \frac{g_n-f_n}{1-f_n},
+\end{aligned}
+\label{eq:deltam}
+\end{equation}
+where $f_n$ is the truncation factor.  The default Henyey--Greenstein-like choice is
+$f_n=g_n^2$, while mixed Rayleigh--aerosol inputs may provide $f_n$ from phase
+moments.  In the derivative benchmarks, $f_n$ is treated as a prepared RT input; the
+reported sensitivities do not include derivatives through phase-table construction or
+through the default $f_n=g_n^2$ rule.  Numerical endpoint regularization is applied to
+avoid exactly singular two-stream limits.
+
+For a homogeneous layer and Fourier component $m$, the two-stream homogeneous
+equations can be written after the standard sum--difference transformation as
+\begin{equation}
+  \frac{{\rm d}}{{\rm d}\tau}
+  \begin{bmatrix}
+    y_{m,1}\\
+    y_{m,2}
+  \end{bmatrix}
+  =
+  \begin{bmatrix}
+    0 & s_m\\
+    d_m & 0
+  \end{bmatrix}
+  \begin{bmatrix}
+    y_{m,1}\\
+    y_{m,2}
+  \end{bmatrix}
+  +
+  \mathbf{q}_m(\tau),
+  \label{eq:twostream_system}
+\end{equation}
+where $\tau$ is optical depth measured downward within the layer and
+$(y_{m,1},y_{m,2})$ are the sum--difference variables equivalent to upwelling and
+downwelling quadrature intensities.  The two-stream ordinate $\bar{\mu}$ is a closure
+choice.  Classical two-stream formulations include quadrature choices such as
+$\bar{\mu}=1/\sqrt{3}$ and hemispheric or mean-value closures with different angular
+moments (Meador and Weaver, 1980; Toon et al., 1989; Spurr and Natraj, 2011).  The
+benchmarks use the ordinates in the exported reference settings:
+$\bar{\mu}=0.5$ for the thermal-emission case and $\bar{\mu}=1/\sqrt{3}$ for the
+solar-scattering case.  With
+$c_n=3\widetilde{\omega}_n\widetilde{g}_n$,
+$p_0^2=\bar{\mu}^2$, and $p_1^2=(1-\bar{\mu}^2)/2$, the retained Fourier components
+use
+\begin{equation}
+\begin{alignedat}{2}
+s_{0,n} &= \frac{\widetilde{\omega}_n-1}{\bar{\mu}},
+&\quad d_{0,n} &= \frac{p_0^2c_n-1}{\bar{\mu}},\\
+s_{1,n} &= \frac{p_1^2c_n-1}{\bar{\mu}},
+&\quad d_{1,n} &= -\frac{1}{\bar{\mu}} .
+\end{alignedat}
+\label{eq:twostream_sd}
+\end{equation}
+Thermal-emission calculations use only $m=0$; solar-scattering calculations retain the
+$m=0$ and $m=1$ terms used by the reference benchmark.
+
+The homogeneous eigenvalue and transformed up/down eigenvectors are
+\begin{equation}
+\begin{aligned}
+  k_{m,n} &= \sqrt{s_{m,n}d_{m,n}},\\
+  \chi_{m,n} &= -\frac{s_{m,n}}{k_{m,n}},\\
+  \mathbf{X}^{+}_{m,n}
+    &=\frac{1}{2}
+      \begin{bmatrix}1+\chi_{m,n}\\1-\chi_{m,n}\end{bmatrix},\\
+  \mathbf{X}^{-}_{m,n}
+    &=\frac{1}{2}
+      \begin{bmatrix}1-\chi_{m,n}\\1+\chi_{m,n}\end{bmatrix}.
+\end{aligned}
+\label{eq:twostream_eigen}
+\end{equation}
+The layer solution in quadrature-intensity space is then
+\begin{equation}
+  \begin{split}
+  \mathbf{I}_{m,n}^{\rm 2S}(\tau)
+  &=
+  L_{m,n}\mathbf{X}_{m,n}^{+}e^{-k_{m,n}\tau}\\
+  &\quad
+  +
+  M_{m,n}\mathbf{X}_{m,n}^{-}e^{-k_{m,n}(\widetilde{\tau}_n-\tau)}
+  +
+  \mathbf{W}_{m,n}(\tau),
+  \end{split}
+  \label{eq:twostream_solution}
+\end{equation}
+where $L_{m,n}$ and $M_{m,n}$ are layer constants and $\mathbf{W}_{m,n}$ is the
+particular solution.
+
+For the solar two-stream particular solution, the py2sess solar batch path used in
+these benchmarks evaluates the direct-beam source with the Green-function beam
+multiplier treatment described for 2S-ESS by Natraj et al. (2023).  Within a layer the
+source has the form
+\begin{equation}
+  \mathbf{q}_{m,n}^{\odot}(\tau)
+  =
+  \mathbf{Q}_{m,n}^{\odot}\exp(-\eta_{n}\tau),
+  \qquad
+  \gamma_{\pm,m,n}=\eta_n\pm k_{m,n},
+  \label{eq:solar_green}
+\end{equation}
+where $\eta_n$ is the layer-average solar secant from the slant-path geometry.  Taylor
+limits are used when the denominators involving $\gamma_{\pm,m,n}$ are small.
+$\mathbf{Q}_{m,n}^{\odot}$ contains the Fourier normalization, beam flux, phase-moment
+terms, and layer optical-property factors for the selected source term.  For the
+two-stream thermal source, Planck's law is evaluated at the relevant wavelength or
+wavenumber and represented linearly in each layer,
+\begin{equation}
+  B_n(\tau)=B_{n,0}+B_{n,1}\tau,\qquad
+  \mathbf{q}_{n}^{\rm th}(\tau)
+  =
+  (1-\widetilde{\omega}_n)B_n(\tau)
+  \begin{bmatrix}1\\1\end{bmatrix}.
+  \label{eq:thermal_source}
+\end{equation}
+The two-stream thermal source in Eq. (\ref{eq:thermal_source}) uses the delta-M-scaled
+single-scattering albedo.  The thermal particular solution is evaluated through
+analytic source multipliers at layer boundaries and at the user angle.
+
+The boundary-value problem (BVP) for the layer constants is
+\begin{equation}
+  \begin{aligned}
+  \mathbf{A}_m\mathbf{c}_m &= \mathbf{r}_m,\\
+  \mathbf{c}_m &=
+  (L_{m,1},M_{m,1},\ldots,L_{m,N},M_{m,N})^T .
+  \end{aligned}
+  \label{eq:bvp}
+\end{equation}
+Rows enforce no incoming diffuse radiation at the top boundary, continuity across
+internal boundaries, and the lower-boundary surface reflection or emission condition.
+The mathematical system is banded and block structured because only adjacent layers are
+coupled.  With the constants ordered as
+$(L_1,M_1,L_2,M_2,\ldots,L_N,M_N)$, each continuity row touches only the two
+neighbouring layers, so the regular system has five non-zero diagonals.  The reported
+double-precision batch calculations use this pentadiagonal path for both NumPy and
+PyTorch.  For each independent wavelength row, py2sess stores the lower-second,
+lower-first, main, upper-first, and upper-second coefficient bands, eliminates the two
+lower bands in a Thomas-like forward sweep, and recovers the layer constants by
+back substitution.  This is an $O(L)$ banded solve per row rather than a dense
+$O(L^3)$ solve on the $2L\times2L$ BVP matrix.  For PyTorch VJPs, the BVP solve is
+wrapped by a custom autograd rule whose reverse pass solves the transposed
+pentadiagonal adjoint system and differentiates the prepared bands and right-hand side.
+Dense or block-tridiagonal repair is available for non-finite exceptional rows, but
+dense all-row BVP solves are not the primary path in the reported benchmarks.
+
+After the quadrature-angle solution is known, the intensity is post-processed to the
+requested user angle $\mu$ through a layer recurrence.  Layers are indexed downward;
+$\tau=0$ is the top of layer $n$ and $\tau=\widetilde{\tau}_n$ is its bottom.  For an
+upwelling ray, the recurrence marches upward: the bottom-boundary user-angle intensity
+is attenuated across the layer and the layer-integrated source contribution is added at
+the layer top,
+\begin{equation}
+  I_{m,n}^{\uparrow}(0,\mu)
+  =
+  e^{-\widetilde{\tau}_n/\mu}
+  I_{m,n}^{\uparrow}(\widetilde{\tau}_n,\mu)
+  +
+  \mathcal{S}_{m,n}^{\uparrow}(\mu),
+  \label{eq:user_post}
+\end{equation}
+where $\mathcal{S}_{m,n}^{\uparrow}$ contains the analytically integrated homogeneous
+and particular source contributions.  The first-order solar term follows the scalar
+single-scattering equation in the delta-M-scaled optical-depth coordinate $x$ along the
+line of sight,
+\begin{equation}
+  \begin{aligned}
+  \frac{{\rm d}I_n^{\uparrow}(x,\Omega)}{{\rm d}x}
+  &=
+  -I_n^{\uparrow}(x,\Omega)+S_n^{(1)}(x,\Omega),\\
+  S_n^{(1)}
+  &=
+  \frac{\omega_n P_n(\Omega,\Omega_0)F_0}
+       {4\pi(1-\omega_n f_n)}
+  \exp[-\widetilde{\tau}_{\odot,n}(x)] .
+  \end{aligned}
+  \label{eq:ss_rte}
+\end{equation}
+Here $\widetilde{\tau}_{\odot,n}$ is the solar slant optical depth to the scattering
+point, $P_n$ is the mixed Rayleigh--aerosol phase function before the delta-M source
+factor, and $F_0$ is the incident solar flux.  Optical depths in the line-of-sight and
+solar paths use $\widetilde{\tau}_n$, while the exact-scatter source carries the
+corresponding $(1-\omega_n f_n)^{-1}$ factor.  The thermal FO term is the analogous
+line-of-sight integration of thermal source and surface emission.  The validated
+thermal benchmark follows the exported Fortran reference convention: the FO optical
+depth is delta-M scaled, while the local Planck absorption factor remains
+$(1-\omega_n)$.  A diagnostic 1000-wavelength, 50-layer synthetic case gives a maximum
+radiance change of 0.016 \% when a source-side thermal delta-M multiplier is added, so
+this implementation detail is explicit but not a dominant term in the benchmark
+scenes.
+
+The implementation mapping is as follows.  Optical-property builders construct
+$\tau$, $\omega$, $g$, delta-M factors, and FO solar phase terms from component optical
+depths.  Backend-independent delta-M utilities implement Eq. (\ref{eq:deltam}) for
+array and tensor inputs.  The thermal and solar batch solvers implement the
+homogeneous eigensystem, analytic source multipliers, BVP solve, and user-angle
+post-processing in Eqs. (\ref{eq:twostream_system})--(\ref{eq:user_post}).  FO modules
+evaluate Eq. (\ref{eq:ss_rte}) and its thermal analogue outside the multiple-scattering
+BVP.  The same algebra is dispatched to NumPy arrays or PyTorch tensors.  py2sess adds
+vectorized wavelength batching, CUDA-resident tensor execution, and differentiable
+PyTorch paths; it does not add custom CUDA kernels or a separate hand-written adjoint
+solver in the benchmarks reported here.
+
+Batching follows the public array convention that all leading dimensions before the
+final layer axis are independent RT rows.  For a full-spectrum one-column calculation,
+the prepared optical-property arrays have shape $(N_\lambda,L)$ and are interpreted as
+$N_\lambda$ independent wavelength rows sharing the same layer count and geometry.  For
+multi-column or multi-geometry calls, py2sess preserves the leading batch dimensions
+and appends a geometry axis only at the output.  Internally the batch solvers flatten
+the leading dimensions to a row batch, evaluate layer recurrences in the vertical
+dimension, and vectorize the algebra over the row batch.  On CUDA, the prepared tensors
+are placed on the device before timing so the measured region covers the RT algebra and
+autograd graph traversal, not host-to-device construction.
+
+\subsection{Timing scope}
+
+All timing values in this paper are wall-clock RT times after prepared RT arrays are
+available.  File input/output, scene parsing, opacity-table generation, optical-property
+construction, and tensor construction are excluded.  For CUDA runs, tensors are already
+resident on the target device before the timed region, and CUDA work is synchronized
+around each measured repeat.  Reported values use double precision.  Unless otherwise
+specified, each timing value is the mean of five measured repeats.  The synthetic
+benchmark runs include untimed warmup evaluations before those repeats; the
+full-spectrum benchmark rows use the five measured repeats reported by the benchmark
+drivers.  The full-spectrum figures show the measured range across repeats; synthetic
+figures show the standard deviation.
+
+The local CPU rows were measured on an Apple M2 Pro system.  NumPy was run with
+single-threaded BLAS/OpenMP settings.  CUDA rows were measured on NVIDIA Tesla T4 and
+A100 GPUs; CPU timings from those accelerator environments are not used in the figures.
+Fortran rows are measured from the optimized external 2S-ESS benchmark executable on
+the local CPU.  Consequently, the Fortran and Python rows are empirical benchmark-task
+timings with different driver scopes, not processor-normalized compiler or language
+speedup measurements.  Apple MPS is not included because the benchmark comparison was
+defined for NumPy CPU, PyTorch CPU, and PyTorch CUDA.
+
+\subsection{Scope relative to analytic RT Jacobians}
+
+The benchmark is not intended to replace mature hand-linearized RT codes.  Analytic
+linearization and tangent-linear/adjoint modules remain the right target for a fixed
+operational retrieval state vector because the derivative algebra can be specialized,
+validated, and optimized for that product.  Examples include CRTM water-vapor
+Jacobian work for numerical weather prediction (Chen et al., 2010),
+tangent-linear and adjoint polarized-RT development for polarimetric retrievals
+(Ding and Yang, 2023), and the analytic
+linearization in the Fortran 2S-ESS reference model (Natraj et al., 2023).  The py2sess
+question is narrower: after the 2S-ESS forward algebra has been mapped into Python,
+how expensive are local prepared-input derivatives when the differentiated variable is
+changed without deriving a new hand-coded Jacobian?  This makes the PyTorch backend a
+development and sensitivity-analysis path, not a claim that automatic differentiation
+is faster than a tuned analytic Jacobian for a settled production retrieval.
+
+\subsection{Full-spectrum benchmark cases}
+
+The full-spectrum benchmark uses two exported 2S-ESS reference scenes: a
+200 000-point thermal-emission spectrum and a 280 000-point solar-scattering spectrum,
+each with 114 RT layers.  py2sess reads the prepared RT input bundle derived from these
+scenes and computes the Python spectrum with the NumPy backend.  The reference opacity
+inputs have HITRAN2020 provenance (Gordon et al., 2022), but opacity generation is
+treated as upstream preprocessing and is outside the timed RT region.
+
+\begin{table}[t]
+\caption{Full-spectrum benchmark settings.}
+\label{tab:full_spectrum_settings}
+\centering
+\begin{tabular}{lll}
+\hline
+Quantity & Thermal-emission case & Solar-scattering case \\
+\hline
+Paper label & Thermal & Solar \\
+Spectral interval & 14.29--20.00 $\mu$m & 0.753--0.795 $\mu$m \\
+Spectral points & 200 000 & 280 000 \\
+RT layers & 114 & 114 \\
+Primary gases & H$_2$O, CO$_2$, N$_2$O, O$_3$, HNO$_3$, SO$_2$, NH$_3$ & H$_2$O, O$_2$ \\
+Geometry & VZA $=49.51^\circ$ & SZA $=47.70^\circ$, VZA $=49.51^\circ$, RAA $=275.75^\circ$ \\
+Surface & emissivity 0.9853, albedo 0.0147, $T_s=300.35$ K &
+spectral albedo 0.462--0.492 \\
+Two-stream ordinate & $\bar{\mu}=0.5$ & $\bar{\mu}=1/\sqrt{3}$ \\
+\hline
+\end{tabular}
+\end{table}
+
+The spectrum agreement metric is
+\begin{equation}
+  \epsilon_{\rm spec}
+  =
+  \max_i
+  \left[
+    100
+    \frac{\left|I_{{\rm py},i}-I_{{\rm F},i}\right|}
+         {\max\left(\left|I_{{\rm F},i}\right|,10^{-15}\right)}
+  \right],
+  \label{eq:spectrum_error}
+\end{equation}
+where $I_{{\rm F},i}$ is the Fortran reference radiance at spectral point $i$.
+The small denominator floor prevents isolated near-zero radiances from dominating the
+reported maximum relative error; it is many orders of magnitude below the plotted
+radiances in the benchmark spectra.
+
+\subsection{Synthetic forward benchmarks}
+
+Synthetic cases isolate RT scaling from external opacity generation while avoiding a
+featureless constant slab.  The solar-scattering case contains a smooth absorbing
+background, a low-altitude aerosol layer, and an elevated cloud-like scattering layer
+near 0.65 $\mu$m.  The thermal-emission case contains smooth gas-like absorption,
+a weak low-altitude scattering layer, surface emissivity 0.98, surface albedo 0.02, and
+a deterministic US-standard-like temperature profile for thermal source arrays.  These
+profiles are generated analytically by the benchmark script, so no opacity files or
+spectroscopic cross sections are used in the timed region.  The delta-M truncation
+factor is fixed to $f=0$ in the reported VJP cases to keep the sensitivities local to
+the prepared RT variables.
+
+Two one-dimensional sweeps are used.  The spectral sweep varies the number of
+wavelengths at fixed 114 RT layers.  The vertical sweep varies the number of RT layers
+at fixed 50 000 wavelengths.  This design separates the two dominant dimensions without
+requiring a full Cartesian benchmark grid.  For fixed optical properties, wavelengths
+are independent while the vertical solution is layer ordered.  We interpret the
+measured forward timing with the empirical model
+\begin{equation}
+  T_{\rm F}^{(b,c)}(N_\lambda,L)
+  \simeq
+  T_0^{(b)}
+  + \kappa_{\rm F}^{(b,c)} N_\lambda C_{\rm F}^{(c)}(L),
+  \label{eq:forward_scaling}
+\end{equation}
+where $N_\lambda$ is the number of wavelengths, $L$ is the number of RT layers,
+$T_0^{(b)}$ is backend dispatch and fixed overhead, $C_{\rm F}^{(c)}(L)$ is the
+vertical work per wavelength for regime $c$, and $\kappa_{\rm F}^{(b,c)}$ absorbs
+backend throughput, vectorization, and memory traffic.  Equation
+(\ref{eq:forward_scaling}) is used only to define the dimensions being swept; we do not
+fit or interpret it as a formal scaling law.
+
+\subsection{Synthetic VJP sensitivity benchmarks}
+
+The PyTorch sensitivity benchmarks time a VJP: a forward RT evaluation followed by
+reverse-mode differentiation of the summed total-radiance objective.  The calculation
+records gradients with respect to selected local RT variables but does not materialize
+a dense cross-wavelength Jacobian.  The design follows the same validation logic used
+in tangent-linear and adjoint RT studies such as Ding and Yang (2023): finite
+differences are used for compact correctness checks, while the timed derivative cases
+target variables that are scientifically meaningful in retrievals.  In py2sess these
+targets are layer optical thickness, single-scattering albedo, asymmetry factor
+as a scalar phase-shape proxy, wavelength-local surface albedo, and thermal surface
+emissivity.  For the solar omega and $g$ VJPs, the benchmark lets the differentiable
+Henyey--Greenstein first-order scatter source respond to the active variable rather
+than holding a precomputed FO scatter array fixed.  Delta-M truncation factors remain
+fixed, so the sensitivities are still local derivatives with respect to prepared RT
+variables rather than end-to-end derivatives through optical-property preprocessing.
+
+Direct py2sess public-API cases were checked against centered finite differences
+using the same summed objective and fixed prepared inputs (Table
+\ref{tab:gradient_validation}).  The small cases perturb every listed column, and the
+medium cases perturb sampled tau, omega, and $g$ columns in 1000-wavelength,
+50-layer calculations.  These are prepared-input derivative checks, not a
+benchmark-scale dense Jacobian validation.  Relative error is computed as
+$|J_{\rm AD}-J_{\rm FD}|/\max(|J_{\rm FD}|,10^{-12})$, where $J_{\rm AD}$ is the
+PyTorch automatic-differentiation derivative and $J_{\rm FD}$ is the finite-difference
+derivative with perturbation $h=10^{-6}$.  All sampled medium-scale columns have
+relative error below $1.3\times10^{-3}$ and no columns above the $10^{-2}$ diagnostic
+threshold.  The timing benchmark separately requires finite gradient norms and
+checksums for each measured sensitivity row.
+
+The repository also contains compact Fortran-derived Jacobian reference fixtures for
+surface-emissivity, surface-temperature, and surface-albedo derivatives.  These
+fixtures are used for derivative validation of selected thermal and solar cases, but
+they do not contain Fortran analytic-Jacobian runtimes and are therefore not used as
+matched timing comparisons.
+
+\begin{table}[t]
+  \caption{PyTorch gradient checks against centered finite differences for
+  prepared-input RT.}
+  \label{tab:gradient_validation}
+  \centering
+  \scriptsize
+  \begin{tabular}{llllllll}
+  \hline
+  Regime & Case size & Variables & Cols. & Max. $|J_{\rm FD}|$ &
+  Max. abs. err. & Mean abs. err. & Max. rel. err. \\
+  \hline
+  Solar & 2 $\lambda$ $\times$ 3 $L$ & $\tau,\omega,g$ & 18 &
+  $2.21\times10^{-2}$ & $3.16\times10^{-12}$ & $9.29\times10^{-13}$ & $1.27\times10^{-8}$ \\
+  Solar & 2 $\lambda$ $\times$ 3 $L$ & albedo, flux & 4 &
+  $2.45\times10^{-1}$ & $4.86\times10^{-12}$ & $1.81\times10^{-12}$ & $1.03\times10^{-10}$ \\
+  Thermal & 2 $\lambda$ $\times$ 3 $L$ & $\tau,\omega,g$ & 18 &
+  $2.59\times10^{-1}$ & $3.01\times10^{-10}$ & $1.08\times10^{-10}$ & $2.01\times10^{-8}$ \\
+  Thermal & 2 $\lambda$ $\times$ 3 $L$ & Planck terms & 10 &
+  $5.05\times10^{-1}$ & $1.67\times10^{-10}$ & $9.65\times10^{-11}$ & $2.97\times10^{-9}$ \\
+  Thermal & 2 $\lambda$ $\times$ 3 $L$ & emissivity, albedo & 4 &
+  $7.22\times10^{-1}$ & $2.04\times10^{-10}$ & $1.34\times10^{-10}$ & $5.92\times10^{-10}$ \\
+  Solar & 1000 $\lambda$ $\times$ 50 $L$ & sampled $\tau,\omega,g$ & 12 &
+  $4.83\times10^{-3}$ & $7.04\times10^{-10}$ & $3.04\times10^{-10}$ & $1.29\times10^{-3}$ \\
+  Thermal & 1000 $\lambda$ $\times$ 50 $L$ & sampled $\tau,\omega,g$ & 12 &
+  $9.15\times10^{-5}$ & $2.45\times10^{-11}$ & $1.03\times10^{-11}$ & $1.25\times10^{-3}$ \\
+  \hline
+  \end{tabular}
+\end{table}
+
+Holding the prepared delta-M factor fixed is also a derivative convention.  In a
+200-wavelength, 50-layer diagnostic with $f=g^2$, differentiating through $f(g)$ would
+change the Solar $g$-gradient by 1.2 \% in L2 norm and at most 1.7 \% pointwise.
+The corresponding thermal $g$-gradient is much smaller in absolute scale; the omitted
+chain-rule term is $8.9\times10^{-6}$ in L2 norm.  The benchmark sensitivities should
+therefore be read as local derivatives with respect to the prepared RT arrays, not as
+end-to-end derivatives through phase-moment or delta-M preprocessing.
+
+The main sensitivity scaling figure uses tau VJPs.  Three sweeps are measured:
+wavelength count at fixed 114 layers, layer count at fixed 50 000 wavelengths, and
+number of active tau layers at fixed 50 000 wavelengths and 114 layers.  Omega,
+$g$, wavelength-local surface-albedo, and thermal surface-emissivity derivatives are
+reserved for representative overhead comparisons at the 50 000-wavelength, 114-layer
+setting.  The surface cases activate one variable per wavelength, not one scalar shared
+by the full spectrum.
+
+We interpret VJP timing with the operational decomposition
+\begin{equation}
+  T_{{\rm J},q}
+  =
+  T_{\rm F}
+  + T_{{\rm store},q}
+  + T_{{\rm rev},q}
+  + T_{{\rm leaf},q}(N_g),
+  \label{eq:vjp_decomposition}
+\end{equation}
+where $T_{{\rm J},q}$ is the VJP time for differentiated parameter $q$, $T_{\rm F}$ is
+the matching forward RT time, $T_{{\rm store},q}$ is the cost of retaining forward
+intermediates needed by derivative rules, $T_{{\rm rev},q}$ is reverse graph traversal,
+$T_{{\rm leaf},q}$ is gradient accumulation into active leaf tensors, and $N_g$ is the
+number of active local gradient variables.  Equation (\ref{eq:vjp_decomposition}) is a
+bookkeeping model for the measured timings; it is not an analytic adjoint cost theorem.
+
+\subsection{OCO-3 aerosol retrieval showcase}
+
+The real-data demonstration uses OCO-3 reflected-solar spectra in the O$_2$ A band
+near 0.76 $\mu$m and the weak CO$_2$ band near 1.61 $\mu$m (Eldering et al., 2019).
+The strong CO$_2$ band near 2.06 $\mu$m is also built and examined diagnostically, but
+it is not used in the reported retrieval because the open spectroscopy used here leaves
+larger residual structure in that band.  These OCO bands are used by the ACOS/OCO
+full-physics retrieval because the O$_2$ A band constrains photon path length and
+scattering, while the CO$_2$ bands provide complementary absorption and surface
+information (O'Dell et al., 2018; Bell et al., 2023).  We use OCO-3 Level-1B
+radiances and geometry, Level-2 atmospheric profiles and aerosol component labels, and
+open HITRAN2020 spectroscopy to build cached gas optical-depth inputs.  Official OCO
+ABSCO tables are not used.  The retrieval is therefore a py2sess capability test with
+open spectroscopy, not a replacement for the operational ACOS forward model.  During
+optimization, gas optical depths above 80 are clipped only in saturated line cores; at
+that opacity the transmission is already negligible, and the clipping avoids
+undefined reverse-mode products in the O$_2$ A-band calculation.
+
+For the reported pilot case, nine land soundings were selected from one OCO-3 granule
+on 24 June 2022 near 40$^\circ$ N, 60$^\circ$ E.  The screen required finite L1B/L2
+geometry and radiances, valid L1B--L2 sounding matching, OCO-3 quality flag zero,
+land fraction at least 50 \%, O$_2$ A-band Level-2 relative RMS below 0.35 \%, and a
+local high-AOD patch within 50 km.  The retrieval state is intentionally small: one
+shared aerosol optical depth at 0.755 $\mu$m, band-dependent continuum terms, and
+small wavelength shift/stretch nuisance terms.
+The OCO-3 Level-2 AOD is not used as a prior.  It is used only as a same-sounding
+operational reference.  External aerosol context is supplied by MAIAC MCD19A2 AOD and
+MERRA-2 aerosol diagnostics (Gelaro et al., 2017; Lyapustin et al., 2018).  AERONET
+Version-3 AOD was checked, but no Level-2 station collocation within the local patch
+was available for this pilot scene (Giles et al., 2019).
+
+The pilot scene is dust dominated in the collocated MERRA-2 three-dimensional aerosol
+profile.  We therefore use a dust-like effective aerosol model with Henyey--Greenstein
+asymmetry factor $g=0.85$, single-scattering albedo $\omega=0.94$, and Angstrom
+exponent $\alpha=0.20$.  These fixed values define an effective optical model for the
+showcase, not a microphysical aerosol retrieval.  The vertical distribution is
+prescribed from the MERRA-2 layer aerosol mass profile rather than retrieved.  If
+$m_n$ is the non-negative
+MERRA-2 aerosol mass mapped to RT layer $n$, the normalized aerosol layer weight is
+\begin{equation}
+  w_n
+  =
+  \frac{m_n}{\sum_j m_j},
+  \label{eq:oco_aerosol_profile}
+\end{equation}
+which fixes the aerosol profile shape while allowing the column AOD to be inferred
+from the OCO-3 spectra.  The aerosol optical thickness in band $b$ is then
+\begin{equation}
+  \tau_{{\rm aer},b,n}(\lambda)
+  =
+  {\rm AOD}_{755}
+  \left(\frac{\lambda}{0.755~\mu{\rm m}}\right)^{-\alpha}
+  w_n ,
+  \label{eq:oco_aerosol_tau}
+\end{equation}
+with fixed Angstrom exponent $\alpha$.  AOD at 0.55 $\mu$m is reported for comparison
+with MAIAC and MERRA-2.  Since the MERRA-2 profile shape is used as a prior, the
+MERRA-2 column AOD comparison is interpreted as a consistency check rather than a
+fully independent validation target.
+
+The retrieval minimizes a weighted least-squares cost over the retained channels,
+\begin{equation}
+  \Phi(\mathbf{x})
+  =
+  \frac{1}{2}
+  \left[\mathbf{y}-\mathbf{F}(\mathbf{x})\right]^T
+  \mathbf{S}_{\epsilon}^{-1}
+  \left[\mathbf{y}-\mathbf{F}(\mathbf{x})\right]
+  +
+  \frac{1}{2}
+  \left[\mathbf{x}-\mathbf{x}_{a}\right]^T
+  \mathbf{S}_{a}^{-1}
+  \left[\mathbf{x}-\mathbf{x}_{a}\right],
+  \label{eq:oco_cost}
+\end{equation}
+where $\mathbf{y}$ is the measured spectrum, $\mathbf{F}$ is the py2sess forward model
+with prepared gas and aerosol inputs, and $\mathbf{x}$ contains log-AOD, continuum, and
+wavelength nuisance parameters.  The nuisance terms absorb continuum and dispersion
+errors that are not part of the 2S-ESS RT kernel; this improves fit stability but also
+creates degeneracy with aerosol amount.  For this reason the OCO-3 result is presented
+as a constrained workflow demonstration rather than as an aerosol validation product.
+
+\section{Results}
+
+\subsection{Full-spectrum agreement and module/component timing}
+
+py2sess agrees with the Fortran full-spectrum benchmark spectra while exposing a
+different timing profile.  The Python and Fortran spectra overlap at plotting
+precision for both benchmark scenes (Fig. \ref{fig:full_spectrum_spectra}).  The
+maximum relative differences from Eq. (\ref{eq:spectrum_error}) are
+$5.0\times10^{-4}\%$ for the thermal case and $4.7\times10^{-3}\%$ for the
+Solar case.  These accuracy values are used only to verify that the benchmark
+timing is being measured for the intended RT calculation.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=14cm]{full_spectrum_spectrum_comparison.png}
+  \caption{Full-spectrum agreement between py2sess and the Fortran 2S-ESS reference.
+  Panels (a) and (c) show the thermal-emission and solar-scattering spectra,
+  respectively; panels (b) and (d) show the corresponding Python-minus-Fortran
+  relative differences.  Curves are decimated for display; agreement metrics are
+  computed over the full spectral grids.}
+  \label{fig:full_spectrum_spectra}
+\end{figure}
+
+On the Apple M2 Pro, the NumPy thermal component-timing median was 1.16 s, with a repeat
+range of 1.09--2.75 s; the mean shown in Fig. \ref{fig:full_spectrum_runtime} is
+1.46 s because one repeat was slower than the others.  The NumPy Solar median
+was 3.16 s, with a range of 3.13--3.41 s and a mean of 3.21 s.  The optimized Fortran
+driver-reported module means were 2.50 s for the thermal case and 27.1 s for the
+Solar case on the same machine.  PyTorch CPU required mean times of 3.47 s and
+8.54 s.  CUDA
+component timings were shorter for these large spectral grids: the A100 required
+0.114 s for the thermal case and 1.73 s for the Solar case, while the Tesla T4
+required 0.690 s and 2.31 s.
+
+These numbers should be interpreted through the timing scope in Sect. 2.2.  The Python
+bars are FO+2S component timings on prepared arrays, while the Fortran bars are
+driver-reported RT module timings from the external benchmark executable.  The main
+result is therefore not a language-normalized speedup.  Rather, the same validated RT
+calculation can be run in three useful py2sess modes: practical NumPy CPU forward
+execution, differentiable PyTorch execution, and high-throughput CUDA execution.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=14cm]{full_spectrum_rt_runtime.png}
+  \caption{Full-spectrum RT timing.  Python bars show FO+2S component timing on
+  prepared arrays; Fortran bars show the external driver-reported RT module time.
+  Values are means of five runs, and error bars show the measured range.  Because the
+  timer scopes differ, the Fortran and Python bars should not be interpreted as
+  language-normalized speedup ratios.}
+  \label{fig:full_spectrum_runtime}
+\end{figure}
+
+The Solar case is slower than the thermal case in both the full-spectrum and synthetic
+benchmarks.  This is expected from the algorithmic structure.  The thermal-emission
+case is azimuth independent and has thermal source terms.  The solar-scattering case
+adds solar slant-path transmission, direct-beam source multipliers, two retained
+azimuthal Fourier components, and exact first-order solar scattering.  The extra
+geometry and source terms increase the per-wavelength vertical work in Eq.
+(\ref{eq:forward_scaling}).
+
+\subsection{Forward RT scaling}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=14cm]{paper_rt_synthetic_forward_publication.png}
+  \caption{Synthetic forward RT scaling.  The spectral-grid sweep varies the number of
+  wavelengths at fixed 114 RT layers.  The vertical-grid sweep varies the number of RT
+  layers at fixed 50 000 wavelengths.  Error bars show the standard deviation from
+  five runs.}
+  \label{fig:synthetic_forward}
+\end{figure}
+
+Synthetic optical-property cases isolate RT scaling from opacity preparation.  With
+114 RT layers fixed, forward runtime grows with the number of wavelengths after fixed
+backend costs are amortized (Fig. \ref{fig:synthetic_forward}).  At 300 000
+wavelengths, the thermal runtime was 1.76 s for NumPy, 5.79 s for PyTorch CPU,
+1.10 s on the Tesla T4, and 0.188 s on the A100.  The corresponding Solar
+runtimes were 3.46 s, 9.94 s, 2.42 s, and 1.72 s.  At small spectral grids, CUDA
+launch and framework overheads limit the accelerator advantage.  At large spectral grids, the accelerator
+backends become throughput limited and the A100 gives the shortest RT time.
+
+The vertical dimension has a stronger effect.  At fixed 50 000 wavelengths, increasing
+the grid from 5 to 200 RT layers increased the thermal runtime from 0.016 s to
+0.518 s for NumPy, from 0.045 s to 1.72 s for PyTorch CPU, from 0.015 s to
+0.322 s on the Tesla T4, and from 0.0087 s to 0.088 s on the A100.  The
+Solar case reached 1.30 s, 2.83 s, 1.15 s, and 0.963 s at 200 layers on the
+same backends.  These trends show that
+$C_{\rm F}^{(c)}(L)$ in Eq. (\ref{eq:forward_scaling}) is not a constant-time vector
+operation.  The solver propagates coupled quantities through the vertical column and
+evaluates layer source terms, so the measured layer response includes the recurrence,
+cache and memory traffic, and backend vectorization effects associated with a deeper
+column.
+
+\subsection{VJP sensitivity scaling}
+
+The differentiable timing is strongly associated with the size of the RT computational
+graph.  For tau VJP timings at 114 RT layers, the Apple M2 Pro runtime increased from
+0.090 s to 2.07 s for the thermal case and from 0.247 s to 6.04 s for the
+Solar case as the spectral grid increased from 300 to 10 000 wavelengths
+(Fig. \ref{fig:synthetic_jacobian}).  Over the same spectral range, the A100 runtime
+changed only from 0.361 s to 0.379 s for the thermal case and from 0.923 s to
+0.949 s for the Solar case, indicating that fixed PyTorch and accelerator
+overheads remain important at these grid sizes.  The VJP wavelength sweep stops at
+10 000 wavelengths because reverse-mode timing retains and traverses graph
+intermediates that are absent from the forward-only timing; the forward-only sweep can
+therefore be extended farther.
+
+Layer scaling is much larger.  At 50 000 wavelengths, increasing from 5 to 200 RT
+layers raised the thermal tau-sensitivity runtime from 0.126 s to 28.0 s on the
+Apple M2 Pro, from 0.040 s to 5.87 s on the Tesla T4, and from 0.031 s to 1.15 s on
+the A100.  The Solar runtime increased from 0.210 s to 82.1 s, from 0.061 s to
+17.7 s, and from 0.063 s to 6.69 s on the same systems.  The vertical recurrence and
+source terms therefore dominate the reverse-mode pass.  The same Solar--thermal
+separation seen in forward RT persists because the reverse pass must retain and
+traverse the larger solar-source graph.
+
+Endpoint log-slope exponents summarize the one-dimensional sweeps.  These are
+descriptive slopes between the smallest and largest measured cases, not fitted scaling
+laws.  For backend $b$ and case $c$, let $x$ be one swept variable: the number of
+wavelengths $N_\lambda$, the number of RT layers $L$, or the number of active local
+gradient variables $N_g$.  We report
+\begin{equation}
+  a_x^{(b,c)}
+  =
+  \frac{\ln T_{\rm J}^{(b,c)}(x_{\max})-\ln T_{\rm J}^{(b,c)}(x_{\min})}
+       {\ln x_{\max}-\ln x_{\min}},
+  \qquad x\in\{N_\lambda,L,N_g\}.
+  \label{eq:vjp_exponent}
+\end{equation}
+The tau-sensitivity wavelength exponent is nearly linear on the Apple M2 Pro:
+$a_{N_\lambda}=0.89$ for the thermal case and $0.91$ for the Solar case.  It is
+much smaller on the GPUs over the sampled 300--10 000 wavelength range
+($a_{N_\lambda}=0.01$--0.16), where fixed framework and kernel-dispatch costs remain
+visible.  The layer exponent is larger:
+$a_L=1.35$--1.62 on the Apple M2 Pro and Tesla T4, and $a_L=0.98$--1.26 on the A100.
+In contrast, the active-gradient-state exponent is negligible in this experiment,
+spanning only $-0.004 \le a_{N_g} \le 0.008$ across platforms and regimes.
+
+At 50 000 wavelengths and 114 layers, the number of active tau-gradient variables
+increases from $5.0\times10^{4}$ to $5.7\times10^{6}$ across the gradient-state sweep,
+yet the runtime remains nearly constant.  For the thermal case, the PyTorch CPU,
+Tesla T4, and A100 runtimes remain near 11.0 s, 2.27 s, and 0.52 s.  For the
+Solar case, they remain near 29 s, 6.05 s, and 1.93 s.  Requesting all local
+layer sensitivities is therefore not equivalent to repeating the forward RT solve for
+each layer.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=14cm]{paper_rt_synthetic_jacobian_publication.png}
+  \caption{Synthetic tau VJP/local-sensitivity RT scaling.  The left column varies the
+  number of wavelengths up to 10 000 at fixed 114 RT layers; this VJP sweep is shorter
+  than the forward-only spectral sweep because graph retention is required.  The middle
+  column varies the number of RT layers at fixed 50 000 wavelengths.  The right column
+  varies the number of active tau-gradient variables at fixed 50 000 wavelengths and
+  114 RT layers.  Error bars show the standard deviation from five runs.}
+  \label{fig:synthetic_jacobian}
+\end{figure}
+
+\subsection{VJP sensitivity overhead}
+
+In Fig. \ref{fig:jacobian_overhead}, overhead means the multiplicative ratio between a
+VJP sensitivity timing and the matching forward-only RT timing for the same
+50 000-wavelength, 114-layer synthetic case:
+\begin{equation}
+  R_q
+  =
+  \frac{T_{{\rm J},q}}{T_{\rm F}}
+  \simeq
+  1 +
+  \frac{T_{{\rm store},q}+T_{{\rm rev},q}+T_{{\rm leaf},q}}
+       {T_{\rm F}} .
+  \label{eq:vjp_overhead}
+\end{equation}
+Thus $R_q=3$ means that the differentiated run takes three times as long as the matching
+forward run.
+
+A wavelength-local surface-albedo derivative costs 2.3--5.1 times the matching forward
+RT calculation.  Layer-resolved tau derivatives cost 10.4--12.8 times forward RT for
+the thermal case and 6.7--17.7 times forward RT for the Solar case.
+Layer-resolved omega derivatives are more expensive, reaching 13.6--18.7 times
+forward RT for the thermal case and 7.7--25.6 times forward RT for the Solar
+case.  For both tau and omega, the one-layer and all-layer timings are nearly
+identical.  The extra cost is therefore consistent with graph retention and reverse
+traversal, not with a linear loop over requested layer variables.
+
+The difference among derivative targets follows the graph in Eq.
+(\ref{eq:vjp_decomposition}).  The surface-albedo variable enters mainly through
+boundary and source terms.  Tau participates in layer transmittances, homogeneous
+multipliers, source integrals, and BVP coupling.  Omega changes the local scattering
+operator: scaled single-scattering albedo, eigenvalue and eigenvectors, user-angle
+amplitudes, and particular-source coefficients.  In thermal cases it also changes the
+absorption--scattering partition of the thermal source.  In these synthetic overhead
+cases $f=0$, so omega does not affect scaled optical thickness through the delta-M
+factor; its larger overhead comes from the scattering and source graph rather than from
+that pathway.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=14cm]{paper_rt_synthetic_jacobian_overhead_publication.png}
+  \caption{VJP sensitivity overhead relative to forward RT.  Ratios are shown for the
+  tested 50 000-wavelength, 114-layer synthetic cases.  Surface albedo is
+  wavelength-local, with one active variable per wavelength.  Tau and omega are
+  evaluated with one active layer or all 114 active layers.  The figure reports VJP
+  timings, not dense Jacobian materialization.}
+  \label{fig:jacobian_overhead}
+\end{figure}
+
+\subsection{OCO-3 aerosol retrieval showcase}
+
+The OCO-3 pilot case tests whether the prepared-input py2sess workflow can be used as
+a real retrieval-development environment, not only as a synthetic RT benchmark.  The
+case is deliberately constrained: gas optical depths are built from open spectroscopy,
+the aerosol vertical shape is prescribed, and only a shared aerosol column amount plus
+spectral nuisance terms are adjusted.  This design makes the case useful as a platform
+demonstration, but it also makes the limits auditable.
+
+With the MERRA-2 profile weights, $g=0.85$, $\omega=0.94$, and $\alpha=0.20$, the
+O$_2$ A-band + weak-CO$_2$ retrieval gives a mean AOD550 of 0.735 for the nine
+soundings (Fig. \ref{fig:oco3_aerosol_external}).  The colocated reference means are
+0.834 for MAIAC 1 km daily AOD550 and 0.747 for MERRA-2 AOD550.  Relative to MAIAC,
+the py2sess retrieval has bias -0.100, mean absolute difference 0.174, and RMSE
+0.213.  Relative to MERRA-2, the bias is -0.013, the mean absolute difference is
+0.108, the RMSE is 0.139, and the Pearson correlation is 0.857.  The
+continuum-normalized spectral residual RMS is 1.12 \%.
+
+The comparison should be interpreted conservatively.  The MERRA-2 column AOD is not a
+fully independent validation target because the MERRA-2 vertical profile supplies the
+retrieval profile shape.  It is nevertheless a useful consistency check: using the
+MERRA-2 profile moves the mean py2sess AOD550 from 0.598 in the earlier Gaussian-profile
+run to 0.735 and reduces the MERRA-2 mean absolute difference from 0.155 to 0.108.
+The MAIAC field is nearly flat over this small patch, whereas the OCO-3 spectra and
+MERRA-2 retain a local gradient, so the MAIAC comparison is best read as regional
+magnitude consistency rather than pixel-level spatial validation.
+
+The strong CO$_2$ band is the main unresolved limitation in this pilot case.  Including
+it in a shared three-band retrieval increases the residual RMS and pulls the aerosol
+column lower, indicating that the open HITRAN-based ``ABSCO-lite'' inputs are not yet
+adequate for using that band as a quantitative aerosol constraint.  The reported
+retrieval therefore uses O$_2$ A plus weak CO$_2$, and the strong-CO$_2$ result is kept
+as a diagnostic rather than as the paper-facing aerosol estimate.  The outcome is a
+constrained real-data retrieval showcase: it demonstrates that py2sess can connect
+measured OCO-3 spectra, open gas spectroscopy, a simple aerosol state vector, and
+external aerosol context in one reproducible workflow.  It should not be described as
+an operational aerosol validation.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=14cm]{oco3_patch_external_comparison.png}
+  \caption{OCO-3 aerosol pilot-case comparison for the 24 June 2022 dust patch.  The
+  py2sess retrieval uses the O$_2$ A band and weak CO$_2$ band with a MERRA-2
+  vertical-profile constraint and no MERRA-2 column-AOD prior.  Panel (a) compares
+  retrieved AOD550 with MAIAC, MERRA-2, and the earlier Gaussian-profile py2sess
+  baseline.  Panel (b) compares retrieved AOD550 with the external AOD550 references.
+  Panel (c) maps the retrieved AOD550 over the local OCO-3 patch.}
+  \label{fig:oco3_aerosol_external}
+\end{figure}
+
+\section{Discussion}
+
+These benchmarks support a platform contribution, not a new RT approximation.  The
+2S-ESS equations in Sect. 2.1 are the published 2S-ESS formulation mapped into a
+Python implementation with array and tensor backends.  The full-spectrum benchmarks
+show that this mapping reproduces the Fortran reference spectra at the precision needed
+for the timing study.  The synthetic benchmarks then show where the cost lies when
+opacity generation is held fixed: forward RT is controlled by wavelength count,
+vertical depth, source-regime complexity, and backend throughput, while VJP timing is
+controlled by the differentiated graph that must be stored and traversed.
+
+The Solar case is generally slower than the thermal case because the solar-scattering regime
+contains more physics and more algebra per wavelength.  Solar slant paths, direct-beam
+particular sources, retained Fourier terms, and exact first-order scattering all add to
+the vertical work.  This distinction is visible even in synthetic cases generated from
+the same analytic optical-profile recipe, so it should be treated as a solver-regime
+effect rather than as an artifact of a particular opacity table.
+
+The VJP results clarify the statement that automatic differentiation can make
+Jacobians easy to obtain.  It does not make them free.  Layer-resolved optical-property
+sensitivities cost several to tens of forward RT solves in the tested cases, and a
+hand-linearized solver can remain the better production choice for a fixed,
+well-established state vector.  This is consistent with the broader RT literature:
+operational fast models and retrieval RTMs often invest in tangent-linear, adjoint, or
+analytic Jacobian modules because those derivatives are central to data assimilation
+and retrieval performance (Chen et al., 2010; Ding and Yang, 2023).  The Fortran 2S-ESS
+reference is also analytically linearized (Natraj et al., 2023), so a matched Fortran
+Jacobian benchmark would likely remain faster for the exact variables already
+implemented there.  The A100 timings here are nevertheless in the same practical
+regime for development-size prepared-input tests: at 50 000 wavelengths and 114 layers,
+surface-albedo VJPs take less than 1 s and tau or omega VJPs take about
+0.5--2.3 s depending on regime.  The advantage of py2sess is therefore not replacing a
+tuned analytic Jacobian in production; it is that the same tested RT implementation can
+expose sensitivities for new local variables without deriving and maintaining a new
+analytic linearization.  Once the differentiated graph is fixed, the number of active
+local layer variables has little effect on runtime because the VJP is not a set of
+repeated forward perturbations and the benchmark does not materialize a dense
+cross-wavelength Jacobian.
+
+This cost structure can support retrieval prototyping and machine-learning-adjacent
+workflows.  During retrieval development, the differentiated variable can be changed
+from optical thickness to scattering albedo, asymmetry, source terms, or surface
+parameters and checked in the same Python environment.  During emulator or surrogate
+development, local RT sensitivities may help diagnose where a training set must resolve
+state-space curvature or provide differentiable components for hybrid physical and
+learned models.  Those uses are not demonstrated here; the present contribution is the
+measured RT-kernel cost and validation needed before such workflows are built.  The
+OCO-3 case below illustrates the retrieval-development use; emulator and surrogate
+applications remain future work.  These uses do not require py2sess autograd VJPs to
+be faster than a specialized analytic Jacobian for every production problem; they
+require the sensitivities to be reproducible, checkable, and practical for the tested
+development-scale prepared-input cases.
+
+The PyTorch backend is the implemented differentiable path in this release.  A JAX
+implementation could in principle provide similar VJP semantics through functional
+array transformations (Bradbury et al., 2018), and XLA compilation may be attractive
+for a solver written from the start as static functional array code.  A fair benchmark
+would therefore require a separate JAX implementation of the BVP solve, source
+integration, exceptional-row handling, and custom derivative rules, not a mechanical
+translation of this PyTorch path.  The benchmark driver now includes an optional
+``torch.compile'' mode so compiled PyTorch rows can be regenerated with the same
+warmup, synchronization, and CSV schema as the eager rows.  The present implementation
+supports this path for the thermal batch benchmark; the pseudo-spherical Solar
+\texttt{include\_fo} path still relies on NumPy cached geometry precomputation and is skipped
+for compiled rows.  The timings reported here remain eager-mode PyTorch unless
+explicitly labeled otherwise, because compiled rows must be rerun and checked on the
+target CUDA system before being mixed into the paper figures.
+
+The OCO-3 aerosol case illustrates this development role on real data.  It required
+changing aerosol vertical assumptions, phase/SSA defaults, gas-opacity caches, spectral
+nuisance terms, and retrieval diagnostics while keeping the RT core fixed.  The
+improvement obtained by using an external low-altitude MERRA-2 aerosol profile, rather
+than a simple Gaussian pressure profile, is physically consistent with the
+dust-dominated regional aerosol context.  The case also identifies the present boundary
+of the demonstration.  The O$_2$ A + weak-CO$_2$ retrieval gives a plausible regional
+AOD magnitude, but the strong-CO$_2$ band cannot yet be used quantitatively with the
+open spectroscopy tested here, and AOD, continuum shape, vertical profile, and phase
+cannot yet be inferred independently with the simple aerosol model.
+
+The limitations are equally important.  The timing scope is prepared-input RT, not
+end-to-end retrieval.  Retrieval runtime also includes spectroscopic opacity
+generation, optimizer behavior, convergence criteria, prior constraints, and
+instrument-specific state-vector design.  The Fortran comparison is a validated forward
+benchmark; a matched Fortran sensitivity timing study would require the same prepared
+RT inputs, the same repeat policy, and a clear distinction among analytic
+linearization, VJP timing, and finite-difference timing.  Maximum feasible spectral-grid
+size and device-memory ceilings for PyTorch VJPs remain deployment constraints that
+must be assessed before applying the differentiable path to larger production
+retrievals.  The synthetic sensitivity benchmark has been expanded toward a
+retrieval-like prepared-input case, but any revised A100/CPU comparison should be
+reported only after all matching timing assets are regenerated from the same script
+revision.  The OCO-3 showcase uses
+open HITRAN-based
+``ABSCO-lite'' inputs rather than official OCO ABSCO tables, fixes aerosol vertical
+shape and phase properties, has no strict local AERONET site collocation, and uses
+MERRA-2 both as a profile-shape prior and as one contextual AOD comparison.  Additional
+granules, stricter AERONET/SAM collocations, complete dust/fine aerosol optical
+properties, official-quality spectroscopy, and a full retrieval error budget are needed
+before making product-level aerosol claims.  Those comparisons are natural follow-up
+work, but they are not needed for the present conclusion: py2sess provides a
+reproducible Python pathway for 2S-ESS forward RT, CUDA execution, local
+automatic-differentiation sensitivities, and constrained real-data retrieval
+experiments.
+
+\conclusions
+
+py2sess v0.2.0 maps the published 2S-ESS RT formulation into a Python implementation
+with NumPy and PyTorch backends.  It reproduces exported Fortran benchmark spectra for
+large thermal-emission and solar-scattering scenes and provides reproducible
+prepared-input RT timings across local CPU and CUDA systems.  Synthetic scaling shows
+that forward timing is mainly controlled by wavelength count, vertical grid size, and
+source-regime complexity.  PyTorch VJP sensitivities have a substantial overhead
+relative to forward RT, but the overhead is nearly independent of whether one or all
+local optical-property layers are active once the differentiated graph is fixed.  The
+OCO-3 aerosol showcase demonstrates the same platform on measured reflected-solar
+spectra, with a constrained dust-dominated O$_2$ A + weak-CO$_2$ retrieval that is
+compared with MAIAC and MERRA-2 context while also exposing the spectroscopy,
+continuum, and aerosol-model assumptions that prevent product-level claims.  The
+result is a practical benchmarked platform for retrieval prototyping, sensitivity
+studies, state-vector experimentation, and future differentiable surrogate workflows
+using the 2S-ESS approximation.
+
+\codedataavailability{The py2sess development repository is available at
+\url{https://github.com/happysky19/py2sess} under the GPL-3.0-only licence.  For
+submission, the exact code revision, benchmark scripts, selected figure inputs,
+generated figures, exported full-spectrum input bundle, raw timing tables, and external
+2S-ESS Fortran benchmark provenance should be archived in a persistent repository such
+as Zenodo and cited with a DOI.  The DOI is pending in this working draft.  The local
+Apple M2 Pro benchmark environment used Python 3.11.12, NumPy 2.2.6, SciPy 1.17.1,
+PyTorch 2.7.1 without CUDA, and Matplotlib 3.10.3.  The CUDA Colab timing manifests
+record Python 3.12.13, PyTorch 2.10.0+cu128, and CUDA 12.8 for the Tesla T4 and A100
+rows.  The repository contains scripts and documentation to regenerate the
+full-spectrum, synthetic forward, synthetic VJP, overhead-ratio, gradient-validation,
+and OCO-3 aerosol-showcase summaries from the archived inputs.}
+
+\authorcontribution{Author contributions will be completed before submission.}
+
+\competinginterests{The authors declare that they have no conflict of interest.}
+
+\begingroup
+\raggedright
+\begin{thebibliography}{}
+
+\bibitem[Bell et al.(2023)]{bell2023}
+Bell, E., O'Dell, C. W., Taylor, T. E., Merrelli, A., Nelson, R. R.,
+Kiel, M., Eldering, A., Rosenberg, R., and Fisher, B.: Exploring bias in the
+OCO-3 snapshot area mapping mode via geometry, surface, and aerosol effects,
+Atmos. Meas. Tech., 16, 109--133, https://doi.org/10.5194/amt-16-109-2023,
+2023.
+
+\bibitem[Bak et al.(2021)]{bak2021}
+Bak, J., Liu, X., Spurr, R., Yang, K., Nowlan, C. R., Chan Miller, C.,
+Gonzalez Abad, G., and Chance, K.: Radiative transfer acceleration based on the
+principal component analysis and lookup table of corrections: optimization and
+application to UV ozone profile retrievals, Atmos. Meas. Tech., 14, 2659--2672,
+https://doi.org/10.5194/amt-14-2659-2021, 2021.
+
+\bibitem[Baydin et al.(2018)]{baydin2018}
+Baydin, A. G., Pearlmutter, B. A., Radul, A. A., and Siskind, J. M.:
+Automatic differentiation in machine learning: a survey, J. Mach. Learn. Res.,
+18, 1--43, 2018.
+
+\bibitem[Bradbury et al.(2018)]{bradbury2018}
+Bradbury, J., Frostig, R., Hawkins, P., Johnson, M. J., Katariya, Y.,
+Leary, C., Maclaurin, D., Necula, G., Paszke, A., VanderPlas, J.,
+Wanderman-Milne, S., and Zhang, Q.: JAX: composable transformations of
+Python+NumPy programs, available at: \url{https://github.com/jax-ml/jax},
+2018.
+
+\bibitem[Cao et al.(2025)]{cao2025}
+Cao, L., Zhen, Z., Chen, S., and Yin, T.: A physically based differentiable
+radiative transfer model (DRTM) for land surface optical and biochemical
+parameters retrieval, Remote Sens. Environ., 325, 114764,
+https://doi.org/10.1016/j.rse.2025.114764, 2025.
+
+\bibitem[Chen et al.(2010)]{chen2010}
+Chen, Y., Han, Y., Van Delst, P., and Weng, F.: On water vapor Jacobian in
+fast radiative transfer model, J. Geophys. Res., 115, D12303,
+https://doi.org/10.1029/2009JD013379, 2010.
+
+\bibitem[Ding and Yang(2023)]{dingyang2023}
+Ding, J. and Yang, P.: Tangent-linear and adjoint models for the transfer of
+polarized radiation, J. Atmos. Sci., 80, 73--89,
+https://doi.org/10.1175/JAS-D-22-0112.1, 2023.
+
+\bibitem[Eldering et al.(2019)]{eldering2019}
+Eldering, A., Taylor, T. E., O'Dell, C. W., and Pavlick, R.: The OCO-3
+mission: measurement objectives and expected performance based on 1 year of
+simulated data, Atmos. Meas. Tech., 12, 2341--2370,
+https://doi.org/10.5194/amt-12-2341-2019, 2019.
+
+\bibitem[Gelaro et al.(2017)]{gelaro2017}
+Gelaro, R., McCarty, W., Suárez, M. J., Todling, R., Molod, A.,
+Takacs, L., Randles, C. A., Darmenov, A., Bosilovich, M. G., Reichle, R.,
+Wargan, K., Coy, L., Cullather, R., Draper, C., Akella, S., Buchard, V.,
+Conaty, A., da Silva, A. M., Gu, W., Kim, G.-K., Koster, R., Lucchesi, R.,
+Merkova, D., Nielsen, J. E., Partyka, G., Pawson, S., Putman, W.,
+Rienecker, M., Schubert, S. D., Sienkiewicz, M., and Zhao, B.: The
+Modern-Era Retrospective Analysis for Research and Applications, Version 2
+(MERRA-2), J. Climate, 30, 5419--5454,
+https://doi.org/10.1175/JCLI-D-16-0758.1, 2017.
+
+\bibitem[Giles et al.(2019)]{giles2019}
+Giles, D. M., Sinyuk, A., Sorokin, M. G., Schafer, J. S., Smirnov, A.,
+Slutsker, I., Eck, T. F., Holben, B. N., Lewis, J. R., Campbell, J. R.,
+Welton, E. J., Korkin, S. V., and Lyapustin, A. I.: Advancements in the
+Aerosol Robotic Network (AERONET) Version 3 database -- automated
+near-real-time quality control algorithm with improved cloud screening for Sun
+photometer aerosol optical depth (AOD) measurements, Atmos. Meas. Tech., 12,
+169--209, https://doi.org/10.5194/amt-12-169-2019, 2019.
+
+\bibitem[Gordon et al.(2022)]{gordon2022}
+Gordon, I. E., Rothman, L. S., Hargreaves, R. J., Hashemi, R., Karlovets,
+E. V., Skinner, F. M., Conway, E. K., Hill, C., Kochanov, R. V.,
+Tan, Y., Wcislo, P., Finenko, A. A., Nelson, K., Bernath, P. F.,
+Birk, M., Boudon, V., Campargue, A., Chance, K. V., Coustenis, A.,
+Drouin, B. J., Flaud, J.-M., Gamache, R. R., Hodges, J. T., Jacquemart, D.,
+Mlawer, E. J., Nikitin, A. V., Perevalov, V. I., Rotger, M., Tennyson, J.,
+Toon, G. C., Tran, H., Tyuterev, V. G., Adkins, E. M., Baker, A.,
+Barbe, A., Canè, E., Császár, A. G., Dudaryonok, A., Egorov, O.,
+Fleisher, A. J., Fleurbaey, H., Foltynowicz, A., Furtenbacher, T.,
+Harrison, J. J., Hartmann, J.-M., Horneman, V.-M., Huang, X.,
+Karman, T., Karns, J., Kassi, S., Kleiner, I., Kofman, V., Kwabia
+Tchana, F., Lavrentieva, N. N., Lee, T. J., Long, D. A., Lukashevskaya,
+A. A., Lyulin, O. M., Makhnev, V. Y., Matt, W., Massie, S. T.,
+Melosso, M., Mikhailenko, S. N., Mondelain, D., Müller, H. S. P.,
+Naumenko, O. V., Perrin, A., Polyansky, O. L., Raddaoui, E.,
+Raston, P. L., Reed, Z. D., Rey, M., Richard, C., Tóbiás, R.,
+Sadiek, I., Schwenke, D. W., Starikova, E., Sung, K., Tamassia, F.,
+Tashkun, S. A., Vander Auwera, J., Vasilenko, I. A., Vigasin, A. A.,
+Villanueva, G. L., Vispoel, B., Wagner, G., Yachmenev, A., and Yurchenko,
+S. N.: The HITRAN2020 molecular spectroscopic database, J. Quant. Spectrosc.
+Radiat. Transfer, 277, 107949, https://doi.org/10.1016/j.jqsrt.2021.107949,
+2022.
+
+\bibitem[Harris et al.(2020)]{harris2020}
+Harris, C. R., Millman, K. J., van der Walt, S. J., Gommers, R.,
+Virtanen, P., Cournapeau, D., Wieser, E., Taylor, J., Berg, S.,
+Smith, N. J., Kern, R., Picus, M., Hoyer, S., van Kerkwijk, M. H.,
+Brett, M., Haldane, A., del Rio, J. F., Wiebe, M., Peterson, P.,
+Gerard-Marchant, P., Sheppard, K., Reddy, T., Weckesser, W.,
+Abbasi, H., Gohlke, C., and Oliphant, T. E.: Array programming with NumPy,
+Nature, 585, 357--362, https://doi.org/10.1038/s41586-020-2649-2, 2020.
+
+\bibitem[Lyapustin et al.(2018)]{lyapustin2018}
+Lyapustin, A., Wang, Y., Korkin, S., and Huang, D.: MODIS Collection 6 MAIAC
+algorithm, Atmos. Meas. Tech., 11, 5741--5765,
+https://doi.org/10.5194/amt-11-5741-2018, 2018.
+
+\bibitem[Meador and Weaver(1980)]{meadorweaver1980}
+Meador, W. E. and Weaver, W. R.: Two-stream approximations to radiative
+transfer in planetary atmospheres: a unified description of existing methods and
+a new improvement, J. Atmos. Sci., 37, 630--643,
+https://doi.org/10.1175/1520-0469(1980)037<0630:TSATRT>2.0.CO;2, 1980.
+
+\bibitem[Natraj et al.(2022)]{natraj2022geo}
+Natraj, V., Luo, M., Blavier, J.-F., et al.: Simulated multispectral
+temperature and atmospheric composition retrievals for the JPL GEO-IR Sounder,
+Atmos. Meas. Tech., 15, 1251--1267, https://doi.org/10.5194/amt-15-1251-2022,
+2022.
+
+\bibitem[Natraj et al.(2023)]{natraj2023}
+Natraj, V., Spurr, R., Gao, A., Le, T., Zeng, Z.-C., Fan, S., and Yung, Y. L.:
+The 2 stream-exact single scattering (2S-ESS) radiative transfer model, J.
+Quant. Spectrosc. Radiat. Transfer, 295, 108416,
+https://doi.org/10.1016/j.jqsrt.2022.108416, 2023.
+
+\bibitem[Natraj and Spurr(2025)]{natrajspurr2025}
+Natraj, V. and Spurr, R. J. D.: Accelerating radiative transfer calculations in
+the thermal infrared through principal component analysis of inherent optical
+properties, J. Quant. Spectrosc. Radiat. Transfer, 339, 109415,
+https://doi.org/10.1016/j.jqsrt.2025.109415, 2025.
+
+\bibitem[Nelson and O'Dell(2019)]{nelsonodell2019}
+Nelson, R. R. and O'Dell, C. W.: The impact of improved aerosol priors on
+near-infrared measurements of carbon dioxide, Atmos. Meas. Tech., 12,
+1495--1512, https://doi.org/10.5194/amt-12-1495-2019, 2019.
+
+\bibitem[O'Dell et al.(2018)]{odell2018}
+O'Dell, C. W., Eldering, A., Wennberg, P. O., Crisp, D., Gunson, M. R.,
+Fisher, B., Frankenberg, C., Kiel, M., Lindqvist, H., Mandrake, L.,
+Merrelli, A., Natraj, V., Nelson, R. R., Osterman, G. B., Payne, V. H.,
+Taylor, T. E., Wunch, D., Drouin, B. J., Oyafuso, F., Chang, A.,
+McDuffie, J., Smyth, M., Baker, D. F., Basu, S., Chevallier, F.,
+Crowell, S. M. R., Feng, L., Palmer, P. I., Dubey, M., García, O. E.,
+Griffith, D. W. T., Hase, F., Iraci, L. T., Kivi, R., Morino, I.,
+Notholt, J., Ohyama, H., Petri, C., Roehl, C. M., Sha, M. K., Strong, K.,
+Sussmann, R., Te, Y., Uchino, O., and Velazco, V. A.: Improved retrievals of
+carbon dioxide from Orbiting Carbon Observatory-2 with the version 8 ACOS
+algorithm, Atmos. Meas. Tech., 11, 6539--6576,
+https://doi.org/10.5194/amt-11-6539-2018, 2018.
+
+\bibitem[Paszke et al.(2019)]{paszke2019}
+Paszke, A., Gross, S., Massa, F., Lerer, A., Bradbury, J., Chanan, G.,
+Killeen, T., Lin, Z., Gimelshein, N., Antiga, L., Desmaison, A.,
+Kopf, A., Yang, E., DeVito, Z., Raison, M., Tejani, A., Chilamkurthy,
+S., Steiner, B., Fang, L., Bai, J., and Chintala, S.: PyTorch: an imperative
+style, high-performance deep learning library, Adv. Neural Inf. Process. Syst.,
+32, 8024--8035, 2019.
+
+\bibitem[Rodgers(2000)]{rodgers2000}
+Rodgers, C. D.: Inverse Methods for Atmospheric Sounding: Theory and Practice,
+World Scientific, Singapore, https://doi.org/10.1142/3171, 2000.
+
+\bibitem[Salesin et al.(2024)]{salesin2024}
+Salesin, K., Knobelspiesse, K. D., Chowdhary, J., Zhai, P.-W., and Jarosz, W.:
+Unifying radiative transfer models in computer graphics and remote sensing, Part
+II: a differentiable, polarimetric forward model and validation, J. Quant.
+Spectrosc. Radiat. Transfer, 315, 108849,
+https://doi.org/10.1016/j.jqsrt.2023.108849,
+2024.
+
+\bibitem[Spurr(2006)]{spurr2006}
+Spurr, R. J. D.: VLIDORT: a linearized pseudo-spherical vector discrete ordinate
+radiative transfer code for forward model and retrieval studies in multilayer
+multiple scattering media, J. Quant. Spectrosc. Radiat. Transfer, 102, 316--342,
+https://doi.org/10.1016/j.jqsrt.2006.05.005, 2006.
+
+\bibitem[Spurr and Natraj(2011)]{spurrnatraj2011}
+Spurr, R. and Natraj, V.: A linearized two-stream radiative transfer code for
+fast approximation of multiple-scatter fields, J. Quant. Spectrosc. Radiat.
+Transfer, 112, 2630--2637, https://doi.org/10.1016/j.jqsrt.2011.06.014, 2011.
+
+\bibitem[Spurr et al.(2013)]{spurr2013}
+Spurr, R., Natraj, V., Lerot, C., Van Roozendael, M., and Loyola, D.:
+Linearization of the principal component analysis method for radiative transfer
+acceleration: application to retrieval algorithms and sensitivity studies, J.
+Quant. Spectrosc. Radiat. Transfer, 125, 1--17,
+https://doi.org/10.1016/j.jqsrt.2013.04.002,
+2013.
+
+\bibitem[Spurr et al.(2022)]{spurr2022}
+Spurr, R., Natraj, V., Colosimo, S. F., Stutz, J., Christi, M., and Korkin, S.:
+VLIDORT-QS: a quasi-spherical vector radiative transfer model, J. Quant.
+Spectrosc. Radiat. Transfer, 291, 108341,
+https://doi.org/10.1016/j.jqsrt.2022.108341, 2022.
+
+\bibitem[Toon et al.(1989)]{toon1989}
+Toon, O. B., McKay, C. P., Ackerman, T. P., and Santhanam, K.: Rapid
+calculation of radiative heating rates and photodissociation rates in
+inhomogeneous multiple scattering atmospheres, J. Geophys. Res., 94,
+16287--16301, https://doi.org/10.1029/JD094iD13p16287, 1989.
+
+\bibitem[Wang et al.(2024)]{wang2024}
+Wang, Y., Kallel, A., Zhen, Z., Lauret, N., Guilleux, J., Chavanon, E., and
+Gastellu-Etchegorry, J.-P.: 3D Monte Carlo differentiable radiative transfer
+with DART, Remote Sens. Environ., 308, 114201,
+https://doi.org/10.1016/j.rse.2024.114201, 2024.
+
+\end{thebibliography}
+\endgroup
+
+\end{document}

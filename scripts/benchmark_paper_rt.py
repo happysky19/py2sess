@@ -38,12 +38,6 @@ DEFAULT_BASE_WAVELENGTHS = 50000
 SMOKE_LAYER_COUNTS = (2, 3)
 SMOKE_WAVELENGTH_COUNTS = (2, 3)
 SMOKE_GRAD_LAYER_COUNTS = (1, 2)
-UV_TAU_PER_LAYER = 0.01
-UV_OMEGA = 0.2
-UV_G = 0.1
-TIR_TAU_PER_LAYER = 0.01
-TIR_OMEGA = 0.05
-TIR_G = 0.1
 RAW_FIELDS = (
     "experiment",
     "case",
@@ -127,6 +121,8 @@ class BackendConfig:
     label: str
     device: str
     dtype: str
+    compiled: bool = False
+    compile_mode: str = "reduce-overhead"
 
 
 @dataclass(frozen=True)
@@ -139,6 +135,13 @@ class RtCase:
     wavelengths: int
     layers: int
     reference_total: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class _RadianceOnly:
+    """Small result wrapper used by compiled timing callables."""
+
+    radiance_total: Any
 
 
 def _torch_module():
@@ -162,13 +165,19 @@ def _parse_jacobian_targets(value: str) -> tuple[str, ...]:
     aliases = {
         "ssa": "omega",
         "albedo": "surface_albedo",
+        "emissivity": "surface_emissivity",
+        "asymmetry": "g",
+        "phase": "g",
     }
-    allowed = {"tau", "omega", "surface_albedo"}
+    allowed = {"tau", "omega", "g", "surface_albedo", "surface_emissivity"}
     parsed = tuple(
         aliases.get(part.strip(), part.strip()) for part in value.split(",") if part.strip()
     )
     if not parsed or any(target not in allowed for target in parsed):
-        raise ValueError("--jacobian-targets must contain tau, omega, and/or surface_albedo")
+        raise ValueError(
+            "--jacobian-targets must contain tau, omega, g, surface_albedo, "
+            "and/or surface_emissivity"
+        )
     return tuple(dict.fromkeys(parsed))
 
 
@@ -206,16 +215,51 @@ def _standard_heights_and_temperature(layers: int) -> tuple[np.ndarray, np.ndarr
     return bottom_to_top[::-1].copy(), temp[::-1].copy()
 
 
+def _layer_centers_km(z_top_to_bottom: np.ndarray) -> np.ndarray:
+    return 0.5 * (z_top_to_bottom[:-1] + z_top_to_bottom[1:])
+
+
+def _normalized_profile(values: np.ndarray) -> np.ndarray:
+    clipped = np.maximum(np.asarray(values, dtype=float), 0.0)
+    total = float(np.sum(clipped))
+    if total <= 0.0:
+        return np.full_like(clipped, 1.0 / clipped.size)
+    return clipped / total
+
+
 def build_synthetic_uv_case(wavelengths: int, layers: int) -> RtCase:
-    """Build deterministic solar direct RT inputs without opacity files."""
+    """Build deterministic solar direct RT inputs without opacity files.
+
+    The profile is intentionally inhomogeneous: a gas-like absorbing background,
+    a low aerosol layer, and an elevated cloud-like scattering layer. This keeps
+    the benchmark synthetic and prepared-input-only while making the local VJP
+    targets closer to retrieval Jacobian tests than a constant slab.
+    """
     if wavelengths <= 0 or layers <= 0:
         raise ValueError("wavelengths and layers must be positive")
     z, _ = _standard_heights_and_temperature(layers)
-    tau = np.full((wavelengths, layers), UV_TAU_PER_LAYER, dtype=float)
-    ssa = np.full_like(tau, UV_OMEGA)
-    g = np.full_like(tau, UV_G)
+    height = _layer_centers_km(z)
+    wavelength_nm = np.linspace(645.0, 665.0, wavelengths, dtype=float)
+    spectral = wavelength_nm[:, None]
+    gas_line = 1.0 + 3.0 * np.exp(-0.5 * ((spectral - 656.0) / 2.2) ** 2)
+    gas_profile = _normalized_profile(np.exp(-height / 8.0))[None, :]
+    gas_tau = 0.018 * gas_line * gas_profile
+
+    rayleigh_profile = _normalized_profile(np.exp(-height / 7.5))[None, :]
+    rayleigh_tau = 0.010 * (spectral / 650.0) ** -4.0 * rayleigh_profile
+
+    aerosol_profile = _normalized_profile(np.exp(-0.5 * ((height - 2.0) / 1.3) ** 2))[None, :]
+    aerosol_tau = 0.050 * (spectral / 650.0) ** -1.2 * aerosol_profile
+
+    cloud_profile = _normalized_profile(np.exp(-0.5 * ((height - 10.5) / 2.0) ** 2))[None, :]
+    cloud_tau = 0.020 * (1.0 + 0.15 * np.cos((spectral - 645.0) / 20.0 * np.pi)) * cloud_profile
+
+    scattering_tau = rayleigh_tau + aerosol_tau + cloud_tau
+    tau = gas_tau + scattering_tau
+    ssa = scattering_tau / np.maximum(tau, 1.0e-15)
+    g = (0.70 * aerosol_tau + 0.85 * cloud_tau) / np.maximum(scattering_tau, 1.0e-15)
     scaling = np.zeros_like(tau)
-    angles = np.array([47.70200090144217, 49.514425392048906, 275.7465175402976])
+    angles = np.array([40.0, 50.0, 90.0])
     fo_scatter = fo_scatter_term_henyey_greenstein(
         ssa=ssa,
         g=g,
@@ -242,11 +286,24 @@ def build_synthetic_tir_case(wavelengths: int, layers: int) -> RtCase:
     if wavelengths <= 0 or layers <= 0:
         raise ValueError("wavelengths and layers must be positive")
     z, temperature = _standard_heights_and_temperature(layers)
-    tau = np.full((wavelengths, layers), TIR_TAU_PER_LAYER, dtype=float)
-    ssa = np.full_like(tau, TIR_OMEGA)
-    g = np.full_like(tau, TIR_G)
-    scaling = np.zeros_like(tau)
+    height = _layer_centers_km(z)
     wavenumber = np.linspace(700.0, 1300.0, wavelengths)
+    spectral = wavenumber[:, None]
+    absorber_profile = _normalized_profile(
+        np.exp(-height / 6.0) + 0.15 * np.exp(-0.5 * ((height - 15.0) / 5.0) ** 2)
+    )[None, :]
+    gas_lines = (
+        1.0
+        + 2.0 * np.exp(-0.5 * ((spectral - 820.0) / 35.0) ** 2)
+        + 1.4 * np.exp(-0.5 * ((spectral - 1120.0) / 55.0) ** 2)
+    )
+    absorption_tau = 0.030 * gas_lines * absorber_profile
+    haze_profile = _normalized_profile(np.exp(-0.5 * ((height - 3.0) / 2.0) ** 2))[None, :]
+    scattering_tau = 0.004 * (1.0 + 0.1 * np.sin((spectral - 700.0) / 600.0 * np.pi)) * haze_profile
+    tau = absorption_tau + scattering_tau
+    ssa = scattering_tau / np.maximum(tau, 1.0e-15)
+    g = np.full_like(tau, 0.45)
+    scaling = np.zeros_like(tau)
     thermal = thermal_source_from_temperature_profile(
         temperature,
         np.array([288.15]),
@@ -324,6 +381,7 @@ def _float_fields_to_torch(
         "ssa",
         "g",
         "z",
+        "angles",
         "albedo",
         "fbeam",
         "delta_m_truncation_factor",
@@ -354,6 +412,8 @@ def _backend_configs(
     torch_dtypes: tuple[str, ...],
     include_numpy: bool,
     include_torch: bool,
+    torch_compile: bool,
+    torch_compile_mode: str,
     created_utc: str,
 ) -> tuple[list[BackendConfig], list[dict[str, str]]]:
     configs: list[BackendConfig] = []
@@ -382,12 +442,32 @@ def _backend_configs(
 
     if backend_set in {"all", "cpu"}:
         for dtype in torch_dtypes:
-            configs.append(BackendConfig("torch", "Torch CPU", "cpu", dtype))
+            label = "Torch CPU torch.compile" if torch_compile else "Torch CPU"
+            configs.append(
+                BackendConfig(
+                    "torch",
+                    label,
+                    "cpu",
+                    dtype,
+                    compiled=torch_compile,
+                    compile_mode=torch_compile_mode,
+                )
+            )
 
     if backend_set in {"all", "cuda"}:
         if torch.cuda.is_available():
             for dtype in torch_dtypes:
-                configs.append(BackendConfig("torch", "Torch CUDA", "cuda", dtype))
+                label = "Torch CUDA torch.compile" if torch_compile else "Torch CUDA"
+                configs.append(
+                    BackendConfig(
+                        "torch",
+                        label,
+                        "cuda",
+                        dtype,
+                        compiled=torch_compile,
+                        compile_mode=torch_compile_mode,
+                    )
+                )
         else:
             for dtype in torch_dtypes:
                 manifest.append(
@@ -402,6 +482,28 @@ def _backend_configs(
                     )
                 )
     return configs, manifest
+
+
+def _compile_forward_callable(run: Callable[..., Any], config: BackendConfig) -> Callable[..., Any]:
+    if config.backend != "torch" or not config.compiled:
+        return run
+    torch = _torch_module()
+    if torch is None or not hasattr(torch, "compile"):
+        raise RuntimeError("torch.compile is unavailable in this PyTorch installation")
+    if config.compile_mode == "default":
+        return torch.compile(run)
+    return torch.compile(run, mode=config.compile_mode)
+
+
+def _torch_compile_skip_reason(case: RtCase, config: BackendConfig) -> str:
+    if not config.compiled:
+        return ""
+    if case.mode == "solar":
+        return (
+            "torch.compile is not used for the batched solar include_fo path because "
+            "pseudo-spherical FO geometry precomputation still calls NumPy cached helpers"
+        )
+    return ""
 
 
 def _manifest_row(
@@ -526,14 +628,46 @@ def _forward_runtime_rows(
     warmups: int,
     repeats: int,
 ) -> list[dict[str, str]]:
+    skip_reason = _torch_compile_skip_reason(case, config)
+    if skip_reason:
+        return [
+            _failure_row(
+                experiment=experiment,
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                active_tau_layers=0,
+                n_grad_vars=0,
+                reason=skip_reason,
+                status="skipped",
+            )
+        ]
     if config.backend == "torch":
         kwargs, _ = _float_fields_to_torch(case.kwargs, dtype=config.dtype, device=config.device)
     else:
         kwargs = case.kwargs
     solver = _make_solver(case, config, enable_grad=False)
 
+    def forward_radiance():
+        return solver.forward(**kwargs, include_fo=True).radiance_total
+
+    try:
+        timed_forward = _compile_forward_callable(forward_radiance, config)
+    except Exception as exc:
+        return [
+            _failure_row(
+                experiment=experiment,
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                active_tau_layers=0,
+                n_grad_vars=0,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+        ]
+
     def run():
-        return solver.forward(**kwargs, include_fo=True)
+        return _RadianceOnly(timed_forward())
 
     def metrics(result):
         radiance = _extract_radiance(result)
@@ -593,11 +727,28 @@ def _profile_jacobian_runtime_rows(
 ) -> list[dict[str, str]]:
     if config.backend != "torch":
         return []
+    skip_reason = _torch_compile_skip_reason(case, config)
+    if skip_reason:
+        return [
+            _failure_row(
+                experiment="synthetic-jacobian",
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                gradient_target=gradient_target,
+                active_tau_layers=active_tau_layers,
+                n_grad_vars=case.wavelengths * active_tau_layers,
+                reason=skip_reason,
+                status="skipped",
+            )
+        ]
     active_indices = _active_layer_indices(case.layers, active_tau_layers)
+    omit = ("fo_scatter_term",) if case.mode == "solar" and gradient_field in {"ssa", "g"} else ()
     kwargs, _ = _float_fields_to_torch(
         case.kwargs,
         dtype=config.dtype,
         device=config.device,
+        omit=omit,
     )
     torch = _torch_module()
     if torch is None:  # pragma: no cover
@@ -609,27 +760,47 @@ def _profile_jacobian_runtime_rows(
     active_field = field_base[:, active_index_t].detach().clone().requires_grad_(True)
     solver = _make_solver(case, config, enable_grad=True)
 
-    def make_field():
+    def make_field(field):
         if active_tau_layers == case.layers:
-            return active_field
-        field = field_base.clone()
-        field[:, active_index_t] = active_field
-        return field
+            return field
+        expanded = field_base.clone()
+        expanded[:, active_index_t] = field
+        return expanded
+
+    def forward_radiance(field):
+        local_kwargs = dict(kwargs)
+        local_kwargs[gradient_field] = make_field(field)
+        return solver.forward(**local_kwargs, include_fo=True).radiance_total
+
+    try:
+        timed_forward = _compile_forward_callable(forward_radiance, config)
+    except Exception as exc:
+        return [
+            _failure_row(
+                experiment="synthetic-jacobian",
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                gradient_target=gradient_target,
+                active_tau_layers=active_tau_layers,
+                n_grad_vars=case.wavelengths * active_tau_layers,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+        ]
 
     def run_once(*, measure: bool) -> dict[str, float | int | None]:
         active_field.grad = None
-        kwargs[gradient_field] = make_field()
         if measure:
             _reset_peak_memory(config)
             _sync_if_cuda(config)
             total_start = time.perf_counter()
             forward_start = total_start
-        result = solver.forward(**kwargs, include_fo=True)
+        radiance_total = timed_forward(active_field)
         if measure:
             _sync_if_cuda(config)
             forward_seconds = time.perf_counter() - forward_start
             backward_start = time.perf_counter()
-        loss = result.radiance_total.sum()
+        loss = radiance_total.sum()
         loss.backward()
         if measure:
             _sync_if_cuda(config)
@@ -640,7 +811,7 @@ def _profile_jacobian_runtime_rows(
             forward_seconds = None
             backward_seconds = None
             seconds = None
-        radiance = _extract_radiance(result)
+        radiance = np.asarray(to_numpy(radiance_total), dtype=float)
         if active_field.grad is None:
             raise RuntimeError(f"expected {gradient_target} gradient was not populated")
         grad = active_field.grad.detach()
@@ -739,6 +910,27 @@ def _omega_jacobian_runtime_rows(
     )
 
 
+def _g_jacobian_runtime_rows(
+    *,
+    case: RtCase,
+    config: BackendConfig,
+    sweep_axis: str,
+    active_tau_layers: int,
+    warmups: int,
+    repeats: int,
+) -> list[dict[str, str]]:
+    return _profile_jacobian_runtime_rows(
+        case=case,
+        config=config,
+        sweep_axis=sweep_axis,
+        gradient_field="g",
+        gradient_target="g",
+        active_tau_layers=active_tau_layers,
+        warmups=warmups,
+        repeats=repeats,
+    )
+
+
 def _surface_albedo_jacobian_runtime_rows(
     *,
     case: RtCase,
@@ -749,6 +941,21 @@ def _surface_albedo_jacobian_runtime_rows(
 ) -> list[dict[str, str]]:
     if config.backend != "torch":
         return []
+    skip_reason = _torch_compile_skip_reason(case, config)
+    if skip_reason:
+        return [
+            _failure_row(
+                experiment="synthetic-jacobian",
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                gradient_target="surface_albedo",
+                active_tau_layers=0,
+                n_grad_vars=case.wavelengths,
+                reason=skip_reason,
+                status="skipped",
+            )
+        ]
     kwargs, tracked = _float_fields_to_torch(
         case.kwargs,
         dtype=config.dtype,
@@ -761,6 +968,27 @@ def _surface_albedo_jacobian_runtime_rows(
     albedo = tracked["albedo"]
     solver = _make_solver(case, config, enable_grad=True)
 
+    def forward_radiance(albedo_value):
+        local_kwargs = dict(kwargs)
+        local_kwargs["albedo"] = albedo_value
+        return solver.forward(**local_kwargs, include_fo=True).radiance_total
+
+    try:
+        timed_forward = _compile_forward_callable(forward_radiance, config)
+    except Exception as exc:
+        return [
+            _failure_row(
+                experiment="synthetic-jacobian",
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                gradient_target="surface_albedo",
+                active_tau_layers=0,
+                n_grad_vars=case.wavelengths,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+        ]
+
     def run_once(*, measure: bool) -> dict[str, float | int | None]:
         albedo.grad = None
         if measure:
@@ -768,12 +996,12 @@ def _surface_albedo_jacobian_runtime_rows(
             _sync_if_cuda(config)
             total_start = time.perf_counter()
             forward_start = total_start
-        result = solver.forward(**kwargs, include_fo=True)
+        radiance_total = timed_forward(albedo)
         if measure:
             _sync_if_cuda(config)
             forward_seconds = time.perf_counter() - forward_start
             backward_start = time.perf_counter()
-        loss = result.radiance_total.sum()
+        loss = radiance_total.sum()
         loss.backward()
         if measure:
             _sync_if_cuda(config)
@@ -784,7 +1012,7 @@ def _surface_albedo_jacobian_runtime_rows(
             forward_seconds = None
             backward_seconds = None
             seconds = None
-        radiance = _extract_radiance(result)
+        radiance = np.asarray(to_numpy(radiance_total), dtype=float)
         if albedo.grad is None:
             raise RuntimeError("expected surface albedo gradient was not populated")
         grad = albedo.grad.detach()
@@ -841,6 +1069,144 @@ def _surface_albedo_jacobian_runtime_rows(
     ]
 
 
+def _surface_emissivity_jacobian_runtime_rows(
+    *,
+    case: RtCase,
+    config: BackendConfig,
+    sweep_axis: str,
+    warmups: int,
+    repeats: int,
+) -> list[dict[str, str]]:
+    if config.backend != "torch" or "emissivity" not in case.kwargs:
+        return []
+    skip_reason = _torch_compile_skip_reason(case, config)
+    if skip_reason:
+        return [
+            _failure_row(
+                experiment="synthetic-jacobian",
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                gradient_target="surface_emissivity",
+                active_tau_layers=0,
+                n_grad_vars=case.wavelengths,
+                reason=skip_reason,
+                status="skipped",
+            )
+        ]
+    kwargs, tracked = _float_fields_to_torch(
+        case.kwargs,
+        dtype=config.dtype,
+        device=config.device,
+        requires_grad=("emissivity",),
+    )
+    torch = _torch_module()
+    if torch is None:  # pragma: no cover
+        raise RuntimeError("PyTorch is not installed")
+    emissivity = tracked["emissivity"]
+    solver = _make_solver(case, config, enable_grad=True)
+
+    def forward_radiance(emissivity_value):
+        local_kwargs = dict(kwargs)
+        local_kwargs["emissivity"] = emissivity_value
+        return solver.forward(**local_kwargs, include_fo=True).radiance_total
+
+    try:
+        timed_forward = _compile_forward_callable(forward_radiance, config)
+    except Exception as exc:
+        return [
+            _failure_row(
+                experiment="synthetic-jacobian",
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                gradient_target="surface_emissivity",
+                active_tau_layers=0,
+                n_grad_vars=case.wavelengths,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+        ]
+
+    def run_once(*, measure: bool) -> dict[str, float | int | None]:
+        emissivity.grad = None
+        if measure:
+            _reset_peak_memory(config)
+            _sync_if_cuda(config)
+            total_start = time.perf_counter()
+            forward_start = total_start
+        radiance_total = timed_forward(emissivity)
+        if measure:
+            _sync_if_cuda(config)
+            forward_seconds = time.perf_counter() - forward_start
+            backward_start = time.perf_counter()
+        loss = radiance_total.sum()
+        loss.backward()
+        if measure:
+            _sync_if_cuda(config)
+            backward_seconds = time.perf_counter() - backward_start
+            seconds = time.perf_counter() - total_start
+        else:
+            _sync_if_cuda(config)
+            forward_seconds = None
+            backward_seconds = None
+            seconds = None
+        radiance = np.asarray(to_numpy(radiance_total), dtype=float)
+        if emissivity.grad is None:
+            raise RuntimeError("expected surface emissivity gradient was not populated")
+        grad = emissivity.grad.detach()
+        if not bool(grad.isfinite().all().item()):
+            raise RuntimeError("surface emissivity gradient contains non-finite values")
+        grad_checksum = float(grad.sum().detach().cpu())
+        grad_l2 = math.sqrt(float((grad * grad).sum().detach().cpu()))
+        return {
+            "seconds": seconds,
+            "forward_seconds": forward_seconds,
+            "backward_seconds": backward_seconds,
+            "cuda_peak_bytes": _peak_memory(config) if measure else None,
+            "checksum": _checksum(radiance),
+            "grad_checksum": grad_checksum,
+            "grad_l2": grad_l2,
+            "max_abs_diff": None,
+            "max_rel_diff_pct": None,
+        }
+
+    n_grad_vars = case.wavelengths
+    try:
+        for _ in range(warmups):
+            run_once(measure=False)
+        timings = []
+        for repeat in range(repeats):
+            timing = run_once(measure=True)
+            timing["repeat_index"] = repeat
+            timings.append(timing)
+    except Exception as exc:
+        return [
+            _failure_row(
+                experiment="synthetic-jacobian",
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                gradient_target="surface_emissivity",
+                active_tau_layers=0,
+                n_grad_vars=n_grad_vars,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+        ]
+    return [
+        _raw_row(
+            experiment="synthetic-jacobian",
+            case=case,
+            config=config,
+            sweep_axis=sweep_axis,
+            gradient_target="surface_emissivity",
+            active_tau_layers=0,
+            n_grad_vars=n_grad_vars,
+            timing=timing,
+        )
+        for timing in timings
+    ]
+
+
 def _raw_row(
     *,
     experiment: str,
@@ -883,6 +1249,7 @@ def _failure_row(
     n_grad_vars: int,
     reason: str,
     gradient_target: str = "",
+    status: str = "failed",
 ) -> dict[str, str]:
     row = {
         "experiment": experiment,
@@ -908,7 +1275,7 @@ def _failure_row(
         "grad_l2": "",
         "max_abs_diff": "",
         "max_rel_diff_pct": "",
-        "status": "failed",
+        "status": status,
         "skip_reason": reason,
     }
     return {field: _csv_value(row.get(field)) for field in RAW_FIELDS}
@@ -972,7 +1339,11 @@ def _jacobian_specs(
     specs.extend(
         (base_wavelengths, base_layers, count, "omega_grad_vars", "omega") for count in omega_counts
     )
+    specs.extend(
+        (base_wavelengths, base_layers, count, "g_grad_vars", "g") for count in omega_counts
+    )
     specs.append((base_wavelengths, base_layers, 0, "surface_albedo", "surface_albedo"))
+    specs.append((base_wavelengths, base_layers, 0, "surface_emissivity", "surface_emissivity"))
     return specs
 
 
@@ -1068,7 +1439,7 @@ def _summarize(raw_rows: list[dict[str, str]]) -> list[dict[str, str]]:
             row["active_tau_layers"],
         ): float(row["best_s"])
         for row in summaries
-        if row["backend"] == "Torch CPU"
+        if row["backend"].startswith("Torch CPU")
     }
     for row in summaries:
         key = (
@@ -1130,6 +1501,12 @@ def _metadata_rows(created_utc: str, args: argparse.Namespace) -> list[dict[str,
         _manifest_row(created_utc, kind="metadata", value=f"preset={args.preset}"),
         _manifest_row(created_utc, kind="metadata", value=f"warmups={args.warmups}"),
         _manifest_row(created_utc, kind="metadata", value=f"repeats={args.repeats}"),
+        _manifest_row(created_utc, kind="metadata", value=f"torch_compile={args.torch_compile}"),
+        _manifest_row(
+            created_utc,
+            kind="metadata",
+            value=f"torch_compile_mode={args.torch_compile_mode}",
+        ),
     ]
     if torch is None:
         rows.append(_manifest_row(created_utc, kind="metadata", value="torch=unavailable"))
@@ -1207,6 +1584,8 @@ def run_benchmarks(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         torch_dtypes=torch_dtypes,
         include_numpy=True,
         include_torch=True,
+        torch_compile=args.torch_compile,
+        torch_compile_mode=args.torch_compile_mode,
         created_utc=created_utc,
     )
     manifest_rows.extend(manifest)
@@ -1285,6 +1664,8 @@ def run_benchmarks(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             torch_dtypes=torch_dtypes,
             include_numpy=False,
             include_torch=True,
+            torch_compile=args.torch_compile,
+            torch_compile_mode=args.torch_compile_mode,
             created_utc=created_utc,
         )
         manifest_rows.extend(jac_manifest)
@@ -1310,8 +1691,25 @@ def run_benchmarks(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                             warmups=args.warmups,
                             repeats=args.repeats,
                         )
+                    elif gradient_target == "surface_emissivity":
+                        rows = _surface_emissivity_jacobian_runtime_rows(
+                            case=case,
+                            config=config,
+                            sweep_axis=sweep_axis,
+                            warmups=args.warmups,
+                            repeats=args.repeats,
+                        )
                     elif gradient_target == "omega":
                         rows = _omega_jacobian_runtime_rows(
+                            case=case,
+                            config=config,
+                            sweep_axis=sweep_axis,
+                            active_tau_layers=active_tau_layers,
+                            warmups=args.warmups,
+                            repeats=args.repeats,
+                        )
+                    elif gradient_target == "g":
+                        rows = _g_jacobian_runtime_rows(
                             case=case,
                             config=config,
                             sweep_axis=sweep_axis,
@@ -1364,6 +1762,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend-set", choices=("all", "cpu", "numpy", "cuda"), default="all")
     parser.add_argument("--torch-dtypes", default="float64")
     parser.add_argument("--torch-threads", type=int, default=1)
+    parser.add_argument(
+        "--torch-compile",
+        action="store_true",
+        help=(
+            "Run torch benchmark rows through torch.compile. The output backend label is "
+            "tagged with 'torch.compile'; eager mode remains the default."
+        ),
+    )
+    parser.add_argument(
+        "--torch-compile-mode",
+        choices=("default", "reduce-overhead", "max-autotune"),
+        default="reduce-overhead",
+        help="Compilation mode passed to torch.compile when --torch-compile is set.",
+    )
     parser.add_argument("--layer-counts", default=None)
     parser.add_argument("--wavelength-counts", default=None)
     parser.add_argument(
@@ -1381,8 +1793,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--jacobian-targets",
-        default="tau,omega,surface_albedo",
-        help="Comma-separated synthetic Jacobian targets: tau, omega/ssa, surface_albedo.",
+        default="tau,omega,g,surface_albedo,surface_emissivity",
+        help=(
+            "Comma-separated synthetic Jacobian targets: tau, omega/ssa, g/phase-shape, "
+            "surface_albedo, surface_emissivity."
+        ),
     )
     parser.add_argument("--base-layers", type=int, default=None)
     parser.add_argument("--base-wavelengths", type=int, default=None)
