@@ -7,6 +7,15 @@ from .backend import _load_torch
 torch = _load_torch()
 
 
+class _MissingTorchAutogradFunction:
+    @classmethod
+    def apply(cls, *args, **kwargs):
+        raise RuntimeError("PyTorch BVP autograd requires torch to be installed")
+
+
+_TorchAutogradFunction = _MissingTorchAutogradFunction if torch is None else torch.autograd.Function
+
+
 def _canonical_torch_bvp_engine(engine: str) -> str:
     """Normalizes the public torch BVP engine names."""
     normalized = engine.lower()
@@ -508,7 +517,7 @@ def _transpose_block_tridiagonal_coefficients_torch(lower, diag, upper):
     return lower_t, diag_t, upper_t
 
 
-class _ThermalBvpAutogradFn(torch.autograd.Function):
+class _ThermalBvpAutogradFn(_TorchAutogradFunction):
     """Custom VJP for the fast thermal pentadiagonal BVP solve."""
 
     @staticmethod
@@ -756,6 +765,249 @@ class _ThermalBvpAutogradFn(torch.autograd.Function):
         return (*grads, None, None)
 
 
+class _SolarObservationBvpAutogradFn(_TorchAutogradFunction):
+    """Custom VJP for the fast solar-observation pentadiagonal BVP solve."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        albedo,
+        direct_beam,
+        xpos1,
+        xpos2,
+        eigentrans,
+        wupper0,
+        wupper1,
+        wlower0,
+        wlower1,
+        surface_factor,
+        stream_value,
+    ):
+        lcon, mcon = _solve_pentadiagonal_bvp_batch_torch(
+            albedo=albedo,
+            bottom_source=direct_beam,
+            surface_factor=surface_factor,
+            stream_value=stream_value,
+            xpos1=xpos1,
+            xpos2=xpos2,
+            eigentrans=eigentrans,
+            wupper=(wupper0, wupper1),
+            wlower=(wlower0, wlower1),
+        )
+        bad_rows = ~(torch.isfinite(lcon).all(dim=1) & torch.isfinite(mcon).all(dim=1))
+        if bool(bad_rows.any()):
+            lcon_bad, mcon_bad = _solve_dense_bvp_batch_torch(
+                albedo=albedo[bad_rows],
+                bottom_source=direct_beam[bad_rows],
+                surface_factor=surface_factor,
+                stream_value=stream_value,
+                xpos1=xpos1[bad_rows],
+                xpos2=xpos2[bad_rows],
+                eigentrans=eigentrans[bad_rows],
+                wupper=(wupper0[bad_rows], wupper1[bad_rows]),
+                wlower=(wlower0[bad_rows], wlower1[bad_rows]),
+            )
+            lcon = lcon.clone()
+            mcon = mcon.clone()
+            lcon[bad_rows] = lcon_bad
+            mcon[bad_rows] = mcon_bad
+        ctx.surface_factor = float(surface_factor)
+        ctx.stream_value = float(stream_value)
+        ctx.bad_rows = bad_rows
+        ctx.save_for_backward(
+            albedo,
+            direct_beam,
+            xpos1,
+            xpos2,
+            eigentrans,
+            wupper0,
+            wupper1,
+            wlower0,
+            wlower1,
+            lcon,
+            mcon,
+        )
+        return lcon, mcon
+
+    @staticmethod
+    def backward(ctx, grad_lcon, grad_mcon):
+        (
+            albedo,
+            direct_beam,
+            xpos1,
+            xpos2,
+            eigentrans,
+            wupper0,
+            wupper1,
+            wlower0,
+            wlower1,
+            lcon,
+            mcon,
+        ) = ctx.saved_tensors
+        prepared_values = []
+
+        def _prep(value, slot):
+            if not ctx.needs_input_grad[slot]:
+                prepared_values.append((value.detach(), False))
+                return prepared_values[-1][0]
+            prepared = value.detach().requires_grad_(True)
+            prepared_values.append((prepared, True))
+            return prepared
+
+        with torch.enable_grad():
+            albedo = _prep(albedo, 0)
+            direct_beam = _prep(direct_beam, 1)
+            xpos1 = _prep(xpos1, 2)
+            xpos2 = _prep(xpos2, 3)
+            eigentrans = _prep(eigentrans, 4)
+            wupper0 = _prep(wupper0, 5)
+            wupper1 = _prep(wupper1, 6)
+            wlower0 = _prep(wlower0, 7)
+            wlower1 = _prep(wlower1, 8)
+
+            mat1, mat2, mat3, mat4, mat5, rhs = _build_pentadiagonal_system_torch(
+                albedo=albedo,
+                bottom_source=direct_beam,
+                surface_factor=ctx.surface_factor,
+                stream_value=ctx.stream_value,
+                xpos1=xpos1,
+                xpos2=xpos2,
+                eigentrans=eigentrans,
+                wupper=(wupper0, wupper1),
+                wlower=(wlower0, wlower1),
+            )
+
+        solution = torch.empty((mat1.shape[0], mat1.shape[1]), dtype=lcon.dtype, device=lcon.device)
+        solution[:, 0::2] = lcon
+        solution[:, 1::2] = mcon
+        grad_solution = torch.empty_like(solution)
+        grad_solution[:, 0::2] = grad_lcon
+        grad_solution[:, 1::2] = grad_mcon
+        mat1_t, mat2_t, mat3_t, mat4_t, mat5_t = _transpose_pentadiagonal_system_torch(
+            mat1.detach(),
+            mat2.detach(),
+            mat3.detach(),
+            mat4.detach(),
+            mat5.detach(),
+        )
+        bad = (
+            _detect_singular_pentadiagonal_rows_torch(
+                albedo=albedo.detach(),
+                surface_factor=ctx.surface_factor,
+                stream_value=ctx.stream_value,
+                xpos1=xpos1.detach(),
+                xpos2=xpos2.detach(),
+                eigentrans=eigentrans.detach(),
+            )
+            | ctx.bad_rows
+        )
+        if bool(bad.any()):
+            adjoint = torch.empty_like(grad_solution)
+            good = ~bad
+            if bool(good.any()):
+                adjoint[good] = _solve_pentadiagonal_coefficients_torch(
+                    mat1_t[good],
+                    mat2_t[good],
+                    mat3_t[good],
+                    mat4_t[good],
+                    mat5_t[good],
+                    grad_solution[good],
+                )
+            if bool(bad.any()):
+                lower, diag, upper, _ = _build_block_tridiagonal_system_torch(
+                    albedo=albedo.detach()[bad],
+                    bottom_source=direct_beam.detach()[bad],
+                    surface_factor=ctx.surface_factor,
+                    stream_value=ctx.stream_value,
+                    xpos1=xpos1.detach()[bad],
+                    xpos2=xpos2.detach()[bad],
+                    eigentrans=eigentrans.detach()[bad],
+                    wupper=(wupper0.detach()[bad], wupper1.detach()[bad]),
+                    wlower=(wlower0.detach()[bad], wlower1.detach()[bad]),
+                )
+                lower_t, diag_t, upper_t = _transpose_block_tridiagonal_coefficients_torch(
+                    lower, diag, upper
+                )
+                adjoint[bad] = _solve_dense_block_tridiagonal_coefficients_torch(
+                    lower_t,
+                    diag_t,
+                    upper_t,
+                    grad_solution[bad].reshape(-1, grad_solution.shape[1] // 2, 2),
+                ).reshape(-1, grad_solution.shape[1])
+        else:
+            adjoint = _solve_pentadiagonal_coefficients_torch(
+                mat1_t,
+                mat2_t,
+                mat3_t,
+                mat4_t,
+                mat5_t,
+                grad_solution,
+            )
+        adjoint_bad = ~torch.isfinite(adjoint).all(dim=1)
+        if bool(adjoint_bad.any()):
+            lower, diag, upper, _ = _build_block_tridiagonal_system_torch(
+                albedo=albedo.detach()[adjoint_bad],
+                bottom_source=direct_beam.detach()[adjoint_bad],
+                surface_factor=ctx.surface_factor,
+                stream_value=ctx.stream_value,
+                xpos1=xpos1.detach()[adjoint_bad],
+                xpos2=xpos2.detach()[adjoint_bad],
+                eigentrans=eigentrans.detach()[adjoint_bad],
+                wupper=(wupper0.detach()[adjoint_bad], wupper1.detach()[adjoint_bad]),
+                wlower=(wlower0.detach()[adjoint_bad], wlower1.detach()[adjoint_bad]),
+            )
+            lower_t, diag_t, upper_t = _transpose_block_tridiagonal_coefficients_torch(
+                lower, diag, upper
+            )
+            adjoint[adjoint_bad] = _solve_dense_block_tridiagonal_coefficients_torch(
+                lower_t,
+                diag_t,
+                upper_t,
+                grad_solution[adjoint_bad].reshape(-1, grad_solution.shape[1] // 2, 2),
+            ).reshape(-1, grad_solution.shape[1])
+
+        grad_rhs = adjoint
+        grad_mat1 = torch.zeros_like(mat1)
+        grad_mat2 = torch.zeros_like(mat2)
+        grad_mat3 = -adjoint * solution
+        grad_mat4 = torch.zeros_like(mat4)
+        grad_mat5 = torch.zeros_like(mat5)
+        grad_mat2[:, 1:] = -adjoint[:, 1:] * solution[:, :-1]
+        grad_mat4[:, :-1] = -adjoint[:, :-1] * solution[:, 1:]
+        grad_mat1[:, 2:] = -adjoint[:, 2:] * solution[:, :-2]
+        grad_mat5[:, :-2] = -adjoint[:, :-2] * solution[:, 2:]
+
+        grad_inputs = tuple(value for value, needed in prepared_values if needed)
+        outputs = []
+        grad_outputs = []
+        for output, grad_output in (
+            (mat1, grad_mat1),
+            (mat2, grad_mat2),
+            (mat3, grad_mat3),
+            (mat4, grad_mat4),
+            (mat5, grad_mat5),
+            (rhs, grad_rhs),
+        ):
+            if output.requires_grad:
+                outputs.append(output)
+                grad_outputs.append(grad_output)
+        raw_grads = torch.autograd.grad(
+            outputs=tuple(outputs),
+            inputs=grad_inputs,
+            grad_outputs=tuple(grad_outputs),
+            allow_unused=True,
+        )
+        grads = []
+        index = 0
+        for _value, needed in prepared_values:
+            if needed:
+                grads.append(raw_grads[index])
+                index += 1
+            else:
+                grads.append(None)
+        return (*grads, None, None)
+
+
 def _solve_pentadiagonal_bvp_batch_torch(
     *,
     albedo,
@@ -941,6 +1193,18 @@ def solve_solar_observation_bvp_batch_torch(
     """Solves batched solar-observation BVP systems."""
     output_device = xpos1.device
     output_dtype = xpos1.dtype
+    needs_grad = any(
+        torch.is_tensor(value) and bool(value.requires_grad)
+        for value in (
+            albedo,
+            direct_beam,
+            xpos1,
+            xpos2,
+            eigentrans,
+            *wupper,
+            *wlower,
+        )
+    )
     if solve_device is not None or solve_dtype is not None:
         albedo_s = _move_value_for_solve(albedo, solve_device=solve_device, solve_dtype=solve_dtype)
         direct_beam_s = _move_value_for_solve(
@@ -953,23 +1217,66 @@ def solve_solar_observation_bvp_batch_torch(
         )
         wupper_s = _move_value_for_solve(wupper, solve_device=solve_device, solve_dtype=solve_dtype)
         wlower_s = _move_value_for_solve(wlower, solve_device=solve_device, solve_dtype=solve_dtype)
-        lcon, mcon = _solve_pentadiagonal_bvp_batch_torch(
-            albedo=albedo_s,
-            bottom_source=direct_beam_s,
-            surface_factor=surface_factor,
-            stream_value=stream_value,
-            xpos1=xpos1_s,
-            xpos2=xpos2_s,
-            eigentrans=eigentrans_s,
-            wupper=wupper_s,
-            wlower=wlower_s,
+        batch = xpos1_s.shape[0]
+        albedo_s = _broadcast_bvp_batch_vector(
+            albedo_s, batch=batch, dtype=xpos1_s.dtype, device=xpos1_s.device
         )
+        direct_beam_s = _broadcast_bvp_batch_vector(
+            direct_beam_s, batch=batch, dtype=xpos1_s.dtype, device=xpos1_s.device
+        )
+        if needs_grad:
+            lcon, mcon = _SolarObservationBvpAutogradFn.apply(
+                albedo_s,
+                direct_beam_s,
+                xpos1_s,
+                xpos2_s,
+                eigentrans_s,
+                wupper_s[0],
+                wupper_s[1],
+                wlower_s[0],
+                wlower_s[1],
+                surface_factor,
+                stream_value,
+            )
+        else:
+            lcon, mcon = _solve_pentadiagonal_bvp_batch_torch(
+                albedo=albedo_s,
+                bottom_source=direct_beam_s,
+                surface_factor=surface_factor,
+                stream_value=stream_value,
+                xpos1=xpos1_s,
+                xpos2=xpos2_s,
+                eigentrans=eigentrans_s,
+                wupper=wupper_s,
+                wlower=wlower_s,
+            )
         return lcon.to(device=output_device, dtype=output_dtype), mcon.to(
             device=output_device, dtype=output_dtype
         )
+    batch = xpos1.shape[0]
+    albedo_s = _broadcast_bvp_batch_vector(
+        albedo, batch=batch, dtype=xpos1.dtype, device=xpos1.device
+    )
+    direct_beam_s = _broadcast_bvp_batch_vector(
+        direct_beam, batch=batch, dtype=xpos1.dtype, device=xpos1.device
+    )
+    if needs_grad:
+        return _SolarObservationBvpAutogradFn.apply(
+            albedo_s,
+            direct_beam_s,
+            xpos1,
+            xpos2,
+            eigentrans,
+            wupper[0],
+            wupper[1],
+            wlower[0],
+            wlower[1],
+            surface_factor,
+            stream_value,
+        )
     return _solve_pentadiagonal_bvp_batch_torch(
-        albedo=albedo,
-        bottom_source=direct_beam,
+        albedo=albedo_s,
+        bottom_source=direct_beam_s,
         surface_factor=surface_factor,
         stream_value=stream_value,
         xpos1=xpos1,
