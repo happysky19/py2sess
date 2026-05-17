@@ -7,6 +7,15 @@ from .backend import _load_torch
 torch = _load_torch()
 
 
+class _MissingTorchAutogradFunction:
+    @classmethod
+    def apply(cls, *args, **kwargs):
+        raise RuntimeError("PyTorch BVP autograd requires torch to be installed")
+
+
+_TorchAutogradFunction = _MissingTorchAutogradFunction if torch is None else torch.autograd.Function
+
+
 def _canonical_torch_bvp_engine(engine: str) -> str:
     """Normalizes the public torch BVP engine names."""
     normalized = engine.lower()
@@ -508,7 +517,7 @@ def _transpose_block_tridiagonal_coefficients_torch(lower, diag, upper):
     return lower_t, diag_t, upper_t
 
 
-class _ThermalBvpAutogradFn(torch.autograd.Function):
+class _ThermalBvpAutogradFn(_TorchAutogradFunction):
     """Custom VJP for the fast thermal pentadiagonal BVP solve."""
 
     @staticmethod
@@ -756,7 +765,7 @@ class _ThermalBvpAutogradFn(torch.autograd.Function):
         return (*grads, None, None)
 
 
-class _SolarObservationBvpAutogradFn(torch.autograd.Function):
+class _SolarObservationBvpAutogradFn(_TorchAutogradFunction):
     """Custom VJP for the fast solar-observation pentadiagonal BVP solve."""
 
     @staticmethod

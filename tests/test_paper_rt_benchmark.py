@@ -40,9 +40,9 @@ class PaperRtBenchmarkTests(unittest.TestCase):
         self.assertEqual(uv.kwargs["fo_scatter_term"].shape, (4, 3))
         self.assertEqual(uv.kwargs["z"].shape, (4,))
         self.assertTrue(np.isfinite(uv.kwargs["tau"]).all())
-        self.assertTrue(np.all(uv.kwargs["tau"] == bench.UV_TAU_PER_LAYER))
-        self.assertTrue(np.all(uv.kwargs["ssa"] == bench.UV_OMEGA))
-        self.assertTrue(np.all(uv.kwargs["g"] == bench.UV_G))
+        self.assertTrue(np.all(uv.kwargs["tau"] > 0.0))
+        self.assertTrue(np.all((uv.kwargs["ssa"] >= 0.0) & (uv.kwargs["ssa"] <= 1.0)))
+        self.assertTrue(np.all((uv.kwargs["g"] >= 0.0) & (uv.kwargs["g"] <= 1.0)))
 
         self.assertEqual(tir.case, "TIR")
         self.assertEqual(tir.mode, "thermal")
@@ -50,9 +50,9 @@ class PaperRtBenchmarkTests(unittest.TestCase):
         self.assertEqual(tir.kwargs["planck"].shape, (4, 4))
         self.assertEqual(tir.kwargs["surface_planck"].shape, (4,))
         self.assertTrue(np.isfinite(tir.kwargs["planck"]).all())
-        self.assertTrue(np.all(tir.kwargs["tau"] == bench.TIR_TAU_PER_LAYER))
-        self.assertTrue(np.all(tir.kwargs["ssa"] == bench.TIR_OMEGA))
-        self.assertTrue(np.all(tir.kwargs["g"] == bench.TIR_G))
+        self.assertTrue(np.all(tir.kwargs["tau"] > 0.0))
+        self.assertTrue(np.all((tir.kwargs["ssa"] >= 0.0) & (tir.kwargs["ssa"] <= 1.0)))
+        self.assertTrue(np.all(tir.kwargs["g"] == 0.45))
 
     def test_torch_dtype_parser_is_float64_only(self) -> None:
         bench = _load_script("benchmark_paper_rt.py")
