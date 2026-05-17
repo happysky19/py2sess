@@ -96,6 +96,57 @@ class ApiTests(unittest.TestCase):
         np.testing.assert_allclose(thermal_result.radiance, np.array([0.9]), atol=1.0e-12)
         np.testing.assert_allclose(thermal_result.radiance_profile, np.full((1, 4), 0.9))
 
+    def test_scalar_brdf_direct_surface_reflection_matches_lambertian(self) -> None:
+        solver = TwoStreamEss(TwoStreamEssOptions(nlyr=1, mode="solar", brdf_surface=True))
+        result = solver.forward(
+            tau=np.zeros(1),
+            ssa=np.zeros(1),
+            g=np.zeros(1),
+            z=np.array([1.0, 0.0]),
+            angles=[30.0, 20.0, 10.0],
+            albedo=0.0,
+            brdf={"kernel_specs": [{"which_brdf": 1, "factor": 0.2}]},
+            include_fo=True,
+        )
+        expected = np.cos(np.deg2rad(30.0)) * 0.2 / np.pi
+        np.testing.assert_allclose(result.radiance_total, np.array([expected]), atol=1.0e-12)
+
+    def test_batched_brdf_lambertian_matches_batched_albedo(self) -> None:
+        tau = np.array([[1.0e-4, 2.0e-4], [0.01, 0.02]], dtype=float)
+        zeros = np.zeros_like(tau)
+        z = np.array([2.0, 1.0, 0.0])
+        angles = [30.0, 20.0, 10.0]
+        plain = TwoStreamEss(TwoStreamEssOptions(nlyr=2, mode="solar")).forward(
+            tau=tau,
+            ssa=zeros,
+            g=zeros,
+            z=z,
+            angles=angles,
+            albedo=np.array([0.2, 0.3]),
+            delta_m_truncation_factor=zeros,
+            include_fo=True,
+        )
+        brdf = {
+            "brdf_f_0": np.array([[[0.2, 0.0]], [[0.3, 0.0]]]),
+            "brdf_f": np.array([[0.2, 0.0], [0.3, 0.0]]),
+            "ubrdf_f": np.array([[[0.2, 0.0]], [[0.3, 0.0]]]),
+            "direct_brf": np.array([[0.2], [0.3]]),
+        }
+        explicit = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=2, mode="solar", brdf_surface=True)
+        ).forward(
+            tau=tau,
+            ssa=zeros,
+            g=zeros,
+            z=z,
+            angles=angles,
+            albedo=0.0,
+            brdf=brdf,
+            delta_m_truncation_factor=zeros,
+            include_fo=True,
+        )
+        np.testing.assert_allclose(explicit.radiance_total, plain.radiance_total)
+
     def test_batched_torch_forward_accepts_transparent_atmosphere(self) -> None:
         if not has_torch():
             self.skipTest("torch not installed")

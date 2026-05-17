@@ -27,6 +27,7 @@ from .optical.delta_m import (
     default_delta_m_truncation_factor,
     validate_delta_m_truncation_factor,
 )
+from .optical.brdf_solar_obs import solar_obs_brdf_from_kernels
 from .rtsolver.preprocess import PreparedInputs, prepare_inputs
 from .rtsolver.solver import solve_optimized_solar_obs
 
@@ -676,6 +677,60 @@ class TwoStreamEss:
             raise ValueError(f"{name} must be scalar or broadcastable to {batch_shape}") from exc
         TwoStreamEss._require_finite(name, broadcast)
         return np.ascontiguousarray(broadcast.reshape(-1), dtype=float)
+
+    @staticmethod
+    def _broadcast_batch_brdf(
+        brdf: Any,
+        *,
+        batch_shape: tuple[int, ...],
+        n_geoms: int,
+        user_obsgeoms: np.ndarray,
+        stream_value: float,
+    ) -> dict[str, np.ndarray | None]:
+        """Broadcasts solar BRDF coefficients to flattened spectral batch rows."""
+        if not isinstance(brdf, dict):
+            raise ValueError("brdf must be a mapping for batched forward")
+        if "kernel_specs" in brdf:
+            coeffs = solar_obs_brdf_from_kernels(
+                kernel_specs=list(brdf["kernel_specs"]),
+                user_obsgeoms=user_obsgeoms,
+                stream_value=stream_value,
+                n_geoms=n_geoms,
+            )
+            raw = {
+                "brdf_f_0": coeffs.brdf_f_0,
+                "brdf_f": coeffs.brdf_f,
+                "ubrdf_f": coeffs.ubrdf_f,
+                "direct_brf": coeffs.direct_brf,
+            }
+        else:
+            raw = brdf
+
+        def broadcast_coeff(field: str, tail_shape: tuple[int, ...]) -> np.ndarray | None:
+            if field not in raw:
+                return None
+            arr = np.asarray(to_numpy(raw[field]), dtype=float)
+            target = batch_shape + tail_shape
+            try:
+                broadcast = np.broadcast_to(arr, target)
+            except ValueError as exc:
+                raise ValueError(
+                    f"brdf['{field}'] must have shape {target} or {tail_shape}"
+                ) from exc
+            TwoStreamEss._require_finite(f"brdf['{field}']", broadcast)
+            return np.ascontiguousarray(broadcast.reshape((-1,) + tail_shape), dtype=float)
+
+        brdf_f_0 = broadcast_coeff("brdf_f_0", (n_geoms, 2))
+        brdf_f = broadcast_coeff("brdf_f", (2,))
+        ubrdf_f = broadcast_coeff("ubrdf_f", (n_geoms, 2))
+        if brdf_f_0 is None or brdf_f is None or ubrdf_f is None:
+            raise ValueError("brdf must provide 'brdf_f_0', 'brdf_f', and 'ubrdf_f'")
+        return {
+            "brdf_f_0": brdf_f_0,
+            "brdf_f": brdf_f,
+            "ubrdf_f": ubrdf_f,
+            "direct_brf": broadcast_coeff("direct_brf", (n_geoms,)),
+        }
 
     @staticmethod
     def _thermal_angles(value: Any) -> np.ndarray:
@@ -1866,12 +1921,16 @@ class TwoStreamEss:
             raise ValueError(
                 "batched forward currently supports the default upwelling TOA endpoint only"
             )
-        if brdf is not None or surface_leaving is not None:
-            raise ValueError("batched forward does not support brdf or surface_leaving inputs")
-        if self.options.brdf_surface or self.options.surface_leaving:
-            raise ValueError(
-                "batched forward does not support brdf_surface or surface_leaving options"
-            )
+        if surface_leaving is not None or self.options.surface_leaving:
+            raise ValueError("batched forward does not support surface_leaving inputs")
+        if brdf is not None and not self.options.brdf_surface:
+            raise ValueError("batched BRDF input requires brdf_surface=True")
+        if self.options.brdf_surface and brdf is None:
+            raise ValueError("brdf_surface=True requires brdf coefficients")
+        if self.options.brdf_surface and (
+            self.options.backend != "numpy" or self._source_mode != "solar_obs"
+        ):
+            raise ValueError("batched BRDF forward currently supports NumPy solar mode only")
         if self.options.backend == "torch":
             if self._source_mode == "solar_obs":
                 return self._forward_solar_obs_batched_torch(
@@ -1900,6 +1959,7 @@ class TwoStreamEss:
             return self._forward_solar_obs_batched_numpy(
                 mapped=mapped,
                 albedo=albedo,
+                brdf=brdf,
                 earth_radius=earth_radius,
                 include_fo=include_fo,
                 fo_n_moments=fo_n_moments,
@@ -1924,6 +1984,7 @@ class TwoStreamEss:
         *,
         mapped: dict[str, Any],
         albedo: Any,
+        brdf: Any | None,
         earth_radius: float,
         include_fo: bool,
         fo_n_moments: int,
@@ -1976,9 +2037,25 @@ class TwoStreamEss:
             flux_factor=1.0,
             albedo=0.0,
             d2s_scaling=np.zeros(n_layers, dtype=float),
+            brdf=(
+                {"kernel_specs": [{"which_brdf": 1, "factor": 0.0}]}
+                if self.options.brdf_surface
+                else None
+            ),
             earth_radius=earth_radius,
         )
         geometry = prepared.geometry
+        brdf_rows = None
+        if self.options.brdf_surface:
+            brdf_rows = self._broadcast_batch_brdf(
+                brdf,
+                batch_shape=batch_shape,
+                n_geoms=prepared.user_obsgeoms.shape[0],
+                user_obsgeoms=prepared.user_obsgeoms,
+                stream_value=prepared.stream_value,
+            )
+            if include_fo and brdf_rows["direct_brf"] is None:
+                raise ValueError("BRDF include_fo requires brdf['direct_brf']")
         want_profiles = self.options.output_levels
         scatter_input = fo_scatter_term
         if include_fo and scatter_input is None:
@@ -2036,6 +2113,17 @@ class TwoStreamEss:
                     scaling=scaling[row_slice],
                     albedo=albedo_rows[row_slice],
                     flux_factor=fbeam_rows[row_slice],
+                    brdf_f_0=(
+                        None
+                        if brdf_rows is None
+                        else brdf_rows["brdf_f_0"][row_slice, geom_index, :]
+                    ),
+                    brdf_f=(None if brdf_rows is None else brdf_rows["brdf_f"][row_slice, :]),
+                    ubrdf_f=(
+                        None
+                        if brdf_rows is None
+                        else brdf_rows["ubrdf_f"][row_slice, geom_index, :]
+                    ),
                     stream_value=prepared.stream_value,
                     chapman=chapman,
                     x0=float(geometry.x0[geom_index]),
@@ -2063,6 +2151,11 @@ class TwoStreamEss:
                         flux_factor=fbeam_rows[row_slice],
                         exact_scatter=scatter[row_slice],
                         precomputed=precomputed,
+                        direct_surface_reflectance=(
+                            None
+                            if brdf_rows is None
+                            else brdf_rows["direct_brf"][row_slice, geom_index]
+                        ),
                         return_profile=want_profiles,
                     )
                     if want_profiles:
@@ -3279,6 +3372,7 @@ class TwoStreamEss:
             return solve_fo_solar_obs(
                 fo_prepared,
                 do_plane_parallel=self.options.plane_parallel,
+                do_brdf_surface=self.options.brdf_surface,
                 geometry_mode=fo_geometry_mode,
                 n_moments=fo_n_moments,
                 nfine=fo_nfine,
@@ -3796,6 +3890,7 @@ class TwoStreamEss:
             result = solve_fo_solar_obs(
                 prepared,
                 do_plane_parallel=self.options.plane_parallel,
+                do_brdf_surface=self.options.brdf_surface,
                 geometry_mode=fo_geometry_mode,
                 n_moments=n_moments,
                 nfine=nfine,
@@ -3951,6 +4046,7 @@ class TwoStreamEss:
         result = solve_fo_solar_obs(
             prepared,
             do_plane_parallel=self.options.plane_parallel,
+            do_brdf_surface=self.options.brdf_surface,
             geometry_mode=fo_geometry_mode,
             n_moments=n_moments,
             nfine=nfine,

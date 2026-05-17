@@ -24,6 +24,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
+  "h5py",
   "numpy",
   "PyYAML",
   "scipy",

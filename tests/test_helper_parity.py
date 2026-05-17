@@ -8,7 +8,7 @@ import numpy as np
 from py2sess.reference_cases import load_tir_benchmark_case, load_uv_benchmark_case
 from py2sess.rtsolver.geometry import auxgeom_solar_obs, chapman_factors
 from py2sess.optical.brdf_solar_obs import _ross_kernel as _solar_ross_kernel
-from py2sess.optical.brdf_solar_obs import solar_obs_brdf_from_kernels
+from py2sess.optical.brdf_solar_obs import RPV_IDX, solar_obs_brdf_from_kernels
 from py2sess.optical.brdf_thermal import _ross_kernel as _thermal_ross_kernel
 from py2sess.optical.brdf_thermal import thermal_brdf_from_kernels
 from py2sess.optical.delta_m import (
@@ -184,6 +184,54 @@ class HelperParityTests(unittest.TestCase):
                 ],
                 dtype=float,
             ),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            coeffs.direct_brf,
+            np.array([0.1933570413448491, 0.4936768261591314], dtype=float),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+
+    def test_solar_rpv_brdf_kernel_generation_regression(self) -> None:
+        coeffs = solar_obs_brdf_from_kernels(
+            kernel_specs=[
+                {
+                    "which_brdf": RPV_IDX,
+                    "factor": 1.0,
+                    "hotspot": 0.05,
+                    "asymmetry": -0.1,
+                    "anisotropy": 0.75,
+                    "normalization": 20.0,
+                    "nstreams_brdf": 8,
+                }
+            ],
+            user_obsgeoms=np.array([[52.949039459228516, 29.45741844177246, 171.546997]]),
+            stream_value=1.0 / math.sqrt(3.0),
+            n_geoms=1,
+        )
+        np.testing.assert_allclose(
+            coeffs.brdf_f_0,
+            np.array([[0.09772102209722655, 0.03469814597826742]], dtype=float),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            coeffs.brdf_f,
+            np.array([0.09861396369357014, 0.03566595987836586], dtype=float),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            coeffs.ubrdf_f,
+            np.array([[0.0872029553444809, 0.01731264221789186]], dtype=float),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            coeffs.direct_brf,
+            np.array([0.07203537333245799], dtype=float),
             rtol=0.0,
             atol=1.0e-12,
         )
