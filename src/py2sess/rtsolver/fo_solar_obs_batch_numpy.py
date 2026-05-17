@@ -75,6 +75,18 @@ def _ensure_c_contiguous(values: np.ndarray, *, dtype) -> np.ndarray:
     return np.ascontiguousarray(np.asarray(values, dtype=dtype))
 
 
+def _direct_surface_reflectance_array(values: np.ndarray, batch_size: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    if arr.size != batch_size:
+        raise ValueError(
+            "direct_surface_reflectance must have one finite value per spectral batch row"
+        )
+    arr = arr.reshape(batch_size)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("direct_surface_reflectance must contain only finite values")
+    return arr
+
+
 def _numba_fo_enabled(batch_size: int) -> bool:
     """Returns whether the optional Numba UV FO kernel should be enabled."""
     flag = os.environ.get("PY2SESS_NUMBA_FO", "auto").lower()
@@ -269,7 +281,7 @@ def solve_fo_solar_obs_eps_batch_numpy(
     surface_reflectance = (
         np.asarray(albedo, dtype=float)
         if direct_surface_reflectance is None
-        else np.asarray(direct_surface_reflectance, dtype=float)
+        else _direct_surface_reflectance_array(direct_surface_reflectance, tau_scaled.shape[0])
     )
     total_tau = extinction[:, : precomputed.ntrav_nl] @ precomputed.sunpathsnl
     attenuation_nl = _exp_cutoff_owned(total_tau)

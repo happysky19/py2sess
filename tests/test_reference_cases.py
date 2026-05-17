@@ -348,6 +348,45 @@ class ReferenceCaseTests(unittest.TestCase):
         _assert_max_rel(self, fo, case.ref_fo, 3.0e-6)
         _assert_max_rel(self, two_stream + fo, case.ref_total, 3.0e-6)
 
+    def test_uv_fo_direct_surface_reflectance_validates_batch_shape(self) -> None:
+        case = load_uv_benchmark_case()
+        rows = 4
+        fo_precomputed = fo_solar_obs_batch_precompute(
+            user_obsgeom=case.user_obsgeom,
+            heights=case.heights,
+            earth_radius=6371.0,
+            nfine=3,
+        )
+        common = dict(
+            tau=case.tau[:rows],
+            omega=case.omega[:rows],
+            scaling=case.scaling[:rows],
+            albedo=case.albedo[:rows],
+            flux_factor=case.flux_factor[:rows],
+            exact_scatter=case.fo_exact_scatter[:rows],
+            precomputed=fo_precomputed,
+        )
+
+        flat = solve_fo_solar_obs_eps_batch_numpy(
+            **common,
+            direct_surface_reflectance=case.albedo[:rows],
+        )
+        column = solve_fo_solar_obs_eps_batch_numpy(
+            **common,
+            direct_surface_reflectance=case.albedo[:rows, np.newaxis],
+        )
+        np.testing.assert_allclose(column, flat)
+
+        with self.assertRaisesRegex(ValueError, "direct_surface_reflectance"):
+            solve_fo_solar_obs_eps_batch_numpy(
+                **common,
+                direct_surface_reflectance=np.ones((rows, 2), dtype=float),
+            )
+        bad = case.albedo[:rows].copy()
+        bad[0] = np.nan
+        with self.assertRaisesRegex(ValueError, "direct_surface_reflectance"):
+            solve_fo_solar_obs_eps_batch_numpy(**common, direct_surface_reflectance=bad)
+
     def test_public_forward_uv_fixture_matches_batch_kernel(self) -> None:
         case = load_uv_benchmark_case()
         phase, scatter = _generated_uv_phase(case)

@@ -83,6 +83,31 @@ class PaperRtBenchmarkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bench._active_layer_indices(3, 4)
 
+    def test_oco_replay_spectrum_filter_allows_zero_sample_index(self) -> None:
+        selector = _load_script("prepare_oco3_threeband_replay_cases.py")
+        measured = np.array([1.0, 2.0], dtype=float)
+        modeled = np.array([1.1, 2.1], dtype=float)
+        wavelength = np.array([0.76, 0.77], dtype=float)
+
+        self.assertTrue(
+            selector._finite_positive_valid_spectrum(
+                measured,
+                modeled,
+                wavelength,
+                np.array([0, 1], dtype=int),
+                2,
+            )
+        )
+        self.assertFalse(
+            selector._finite_positive_valid_spectrum(
+                measured,
+                modeled,
+                wavelength,
+                np.array([-1, 1], dtype=int),
+                2,
+            )
+        )
+
     def test_paper_preset_uses_50k_representative_wavelengths(self) -> None:
         bench = _load_script("benchmark_paper_rt.py")
         self.assertEqual(bench.DEFAULT_BASE_WAVELENGTHS, 50000)

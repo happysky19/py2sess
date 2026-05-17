@@ -1254,27 +1254,6 @@ def _surface_albedo_jacobian_runtime_rows(
             )
         ]
 
-    def forward_radiance(albedo_value):
-        local_kwargs = dict(kwargs)
-        local_kwargs["albedo"] = albedo_value
-        return solver.forward(**local_kwargs, include_fo=True).radiance_total
-
-    try:
-        timed_forward = _compile_forward_callable(forward_radiance, config)
-    except Exception as exc:
-        return [
-            _failure_row(
-                experiment="synthetic-jacobian",
-                case=case,
-                config=config,
-                sweep_axis=sweep_axis,
-                gradient_target="surface_albedo",
-                active_tau_layers=0,
-                n_grad_vars=case.wavelengths,
-                reason=f"{type(exc).__name__}: {exc}",
-            )
-        ]
-
     def run_once(*, measure: bool) -> dict[str, float | int | None]:
         albedo.grad = None
         if measure:

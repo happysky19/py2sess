@@ -44,6 +44,27 @@ class SolarReferenceTests(unittest.TestCase):
 
         np.testing.assert_allclose(values, [0.20, 0.60, 1.00])
 
+    def test_toon_reference_accepts_scalar_wavelength(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "solar.out"
+            path.write_text(
+                "\n".join(
+                    [
+                        "           2           2",
+                        " solar_test.out",
+                        " Wavenumber  Transmittance",
+                        " 1000.00 0.20",
+                        " 2000.00 0.60",
+                        "",
+                    ]
+                )
+            )
+
+            values = ToonSolarReference.from_file(path).at_wavelength_um(5.0)
+
+        self.assertEqual(values.shape, (1,))
+        np.testing.assert_allclose(values, [0.60])
+
     def test_toon_reference_can_be_reused_without_reloading_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "solar.out"
@@ -92,6 +113,15 @@ class SolarReferenceTests(unittest.TestCase):
         self.assertAlmostEqual(float(ratio[1]), 1.0)
         self.assertGreater(float(ratio[0]), 1.0)
         self.assertLess(float(ratio[2]), 1.0)
+
+    def test_planck_helpers_accept_scalar_wavelength(self) -> None:
+        ratio = solar_planck_continuum_ratio(1.615, reference_wavelength_um=1.615)
+        irradiance = solar_planck_irradiance_w_m2_um(1.615)
+
+        self.assertEqual(ratio.shape, (1,))
+        self.assertEqual(irradiance.shape, (1,))
+        self.assertAlmostEqual(float(ratio[0]), 1.0)
+        self.assertGreater(float(irradiance[0]), 0.0)
 
     def test_planck_continuum_ratio_matches_wavelength_planck_function(self) -> None:
         wavelengths = np.array([0.755, 0.77, 1.60, 1.615, 2.05, 2.06, 2.08])

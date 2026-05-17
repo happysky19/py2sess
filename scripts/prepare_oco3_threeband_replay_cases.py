@@ -68,8 +68,13 @@ def _finite_positive_valid_spectrum(
     if ncolors <= 0:
         return False
     valid = slice(0, int(ncolors))
-    arrays = (measured[valid], modeled[valid], wavelength[valid], sample_index[valid])
-    return all(np.isfinite(arr).all() for arr in arrays) and all((arr > 0).all() for arr in arrays)
+    spectral_arrays = (measured[valid], modeled[valid], wavelength[valid])
+    samples = sample_index[valid]
+    return (
+        all(np.isfinite(arr).all() for arr in (*spectral_arrays, samples))
+        and all((arr > 0).all() for arr in spectral_arrays)
+        and (samples >= 0).all()
+    )
 
 
 def _select_candidate_indices(

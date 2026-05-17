@@ -253,6 +253,8 @@ def solar_planck_irradiance_w_m2_um(
 
 def _finite_1d(name: str, values) -> np.ndarray:
     arr = np.asarray(values, dtype=float)
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
     if arr.ndim != 1 or not np.all(np.isfinite(arr)):
         raise ValueError(f"{name} must be a finite one-dimensional array")
     return arr
