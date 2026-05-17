@@ -17,6 +17,12 @@ from py2sess.rtsolver.backend import has_torch
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _skip_unless_files_exist(testcase: unittest.TestCase, *paths: Path) -> None:
+    missing = [path.relative_to(ROOT).as_posix() for path in paths if not path.exists()]
+    if missing:
+        testcase.skipTest(f"paper generated asset is not present: {missing[0]}")
+
+
 def _load_script(name: str):
     path = ROOT / "scripts" / name
     spec = importlib.util.spec_from_file_location(path.stem, path)
@@ -54,7 +60,7 @@ class PaperRtBenchmarkTests(unittest.TestCase):
         self.assertTrue(np.all(tir.kwargs["tau"] > 0.0))
         self.assertGreater(float(np.ptp(tir.kwargs["tau"])), 0.0)
         self.assertTrue(np.all((tir.kwargs["ssa"] >= 0.0) & (tir.kwargs["ssa"] <= 1.0)))
-        self.assertTrue(np.all((tir.kwargs["g"] >= 0.0) & (tir.kwargs["g"] < 1.0)))
+        self.assertTrue(np.all(tir.kwargs["g"] == 0.45))
 
     def test_torch_dtype_parser_is_float64_only(self) -> None:
         bench = _load_script("benchmark_paper_rt.py")
@@ -305,7 +311,10 @@ class PaperRtBenchmarkTests(unittest.TestCase):
             with summary_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertTrue(rows)
-            self.assertTrue({row["backend"] for row in rows}.issuperset({"NumPy", "Torch CPU"}))
+            expected_backends = {"NumPy"}
+            if has_torch():
+                expected_backends.add("Torch CPU")
+            self.assertTrue({row["backend"] for row in rows}.issuperset(expected_backends))
             self.assertTrue(all(int(row["n_repeats"]) == 2 for row in rows))
             self.assertTrue(all(int(row["levels"]) == int(row["layers"]) + 1 for row in rows))
 
@@ -339,7 +348,9 @@ class PaperRtBenchmarkTests(unittest.TestCase):
 
     def test_jacobian_overhead_export_has_selected_figure_rows(self) -> None:
         exporter = _load_script("export_jacobian_overhead_summary.py")
-        rows = exporter.build_rows(ROOT / "docs" / "assets" / "paper_rt_all_timing_summary.csv")
+        summary_csv = ROOT / "docs" / "assets" / "paper_rt_all_timing_summary.csv"
+        _skip_unless_files_exist(self, summary_csv)
+        rows = exporter.build_rows(summary_csv)
 
         self.assertTrue(rows)
         selected = [row for row in rows if row["selected_for_figure"] == "true"]
@@ -419,22 +430,28 @@ class PaperRtBenchmarkTests(unittest.TestCase):
         if not paper.exists():
             self.skipTest("paper draft is not present")
         audit = _load_script("audit_paper_rt_claims.py")
+        paper_assets = (
+            ROOT / "docs" / "assets" / "full_spectrum_paper_summary.csv",
+            ROOT / "docs" / "assets" / "full_spectrum_spectrum_comparison.csv",
+            ROOT / "docs" / "assets" / "jacobian_gradient_validation_summary.csv",
+            ROOT / "docs" / "assets" / "paper_rt_synthetic_jacobian_overhead_summary.csv",
+            ROOT / "docs" / "assets" / "paper_rt_all_timing_summary.csv",
+        )
+        _skip_unless_files_exist(self, *paper_assets)
 
         missing = audit.audit(
             paper_tex=paper,
-            full_summary_csv=ROOT / "docs" / "assets" / "full_spectrum_paper_summary.csv",
-            spectrum_csv=ROOT / "docs" / "assets" / "full_spectrum_spectrum_comparison.csv",
-            validation_csv=ROOT / "docs" / "assets" / "jacobian_gradient_validation_summary.csv",
-            overhead_csv=ROOT
-            / "docs"
-            / "assets"
-            / "paper_rt_synthetic_jacobian_overhead_summary.csv",
-            combined_summary_csv=ROOT / "docs" / "assets" / "paper_rt_all_timing_summary.csv",
+            full_summary_csv=paper_assets[0],
+            spectrum_csv=paper_assets[1],
+            validation_csv=paper_assets[2],
+            overhead_csv=paper_assets[3],
+            combined_summary_csv=paper_assets[4],
         )
         self.assertEqual(missing, [])
 
     def test_paper_artifact_manifest_has_hashes(self) -> None:
         manifest = _load_script("generate_paper_artifact_manifest.py")
+        _skip_unless_files_exist(self, *(ROOT / path for path in manifest.DEFAULT_PATHS))
         rows = manifest.build_rows()
 
         self.assertEqual(len(rows), len(manifest.DEFAULT_PATHS))
@@ -480,6 +497,7 @@ class PaperRtBenchmarkTests(unittest.TestCase):
 
     def test_paper_archive_manifest_has_tracked_assets_by_default(self) -> None:
         archive = _load_script("prepare_paper_archive_manifest.py")
+        _skip_unless_files_exist(self, *(ROOT / path for path in archive.TRACKED_ARCHIVE_INPUTS))
         rows = archive.build_rows()
 
         self.assertTrue(rows)
@@ -546,10 +564,14 @@ class PaperRtBenchmarkTests(unittest.TestCase):
             self.skipTest("matplotlib is required for plot smoke tests")
 
         paper_plot = _load_script("plot_paper_rt_benchmarks.py")
+        synthetic_summary = ROOT / "docs" / "assets" / "paper_rt_all_timing_summary.csv"
+        full_summary = ROOT / "docs" / "assets" / "full_spectrum_paper_summary.csv"
+        spectrum_csv = ROOT / "docs" / "assets" / "full_spectrum_spectrum_comparison.csv"
+        _skip_unless_files_exist(self, synthetic_summary, full_summary, spectrum_csv)
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir) / "synthetic"
             outputs = paper_plot.plot(
-                ROOT / "docs" / "assets" / "paper_rt_all_timing_summary.csv",
+                synthetic_summary,
                 output_dir,
                 ("png", "eps"),
             )
@@ -571,9 +593,9 @@ class PaperRtBenchmarkTests(unittest.TestCase):
                     sys.executable,
                     str(ROOT / "scripts" / "plot_full_spectrum_rt_benchmarks.py"),
                     "--summary",
-                    str(ROOT / "docs" / "assets" / "full_spectrum_paper_summary.csv"),
+                    str(full_summary),
                     "--spectrum-csv",
-                    str(ROOT / "docs" / "assets" / "full_spectrum_spectrum_comparison.csv"),
+                    str(spectrum_csv),
                     "--output-dir",
                     str(output_dir),
                     "--formats",

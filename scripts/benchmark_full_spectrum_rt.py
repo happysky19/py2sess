@@ -147,6 +147,8 @@ class BackendConfig:
     label: str
     device: str
     dtype: str
+    compiled: bool = False
+    compile_mode: str = "reduce-overhead"
 
 
 @dataclass(frozen=True)
@@ -243,6 +245,8 @@ def _backend_configs(
     backend_set: str,
     torch_dtypes: tuple[str, ...],
     *,
+    torch_compile: bool,
+    torch_compile_mode: str,
     created_utc: str,
 ) -> tuple[list[BackendConfig], list[dict[str, str]]]:
     configs: list[BackendConfig] = []
@@ -267,11 +271,31 @@ def _backend_configs(
         return configs, manifest
     if backend_set in {"all", "cpu"}:
         for dtype in torch_dtypes:
-            configs.append(BackendConfig("torch", "Torch CPU", "cpu", dtype))
+            label = "Torch CPU torch.compile" if torch_compile else "Torch CPU"
+            configs.append(
+                BackendConfig(
+                    "torch",
+                    label,
+                    "cpu",
+                    dtype,
+                    compiled=torch_compile,
+                    compile_mode=torch_compile_mode,
+                )
+            )
     if backend_set in {"all", "cuda"}:
         if torch.cuda.is_available():
             for dtype in torch_dtypes:
-                configs.append(BackendConfig("torch", "Torch CUDA", "cuda", dtype))
+                label = "Torch CUDA torch.compile" if torch_compile else "Torch CUDA"
+                configs.append(
+                    BackendConfig(
+                        "torch",
+                        label,
+                        "cuda",
+                        dtype,
+                        compiled=torch_compile,
+                        compile_mode=torch_compile_mode,
+                    )
+                )
         else:
             for dtype in torch_dtypes:
                 manifest.append(
@@ -497,8 +521,45 @@ def _tensor(value: Any, *, dtype: Any, device: Any):
     return torch.as_tensor(value, dtype=dtype, device=device)
 
 
+def _torch_fo_solar_precompute(precomputed: Any, *, dtype: Any, device: Any) -> Any:
+    fields = {
+        "inv_layer_thickness": _tensor(precomputed.inv_layer_thickness, dtype=dtype, device=device),
+        "do_nadir": precomputed.do_nadir,
+        "mu0": precomputed.mu0,
+        "ntrav_nl": precomputed.ntrav_nl,
+        "sunpathsnl": _tensor(precomputed.sunpathsnl, dtype=dtype, device=device),
+        "cota": _tensor(precomputed.cota, dtype=dtype, device=device),
+        "cotfine": _tensor(precomputed.cotfine, dtype=dtype, device=device),
+        "csqfine": _tensor(precomputed.csqfine, dtype=dtype, device=device),
+        "wfine": _tensor(precomputed.wfine, dtype=dtype, device=device),
+        "nfinedivs": precomputed.nfinedivs,
+        "rayconv": precomputed.rayconv,
+        "xfine": _tensor(precomputed.xfine, dtype=dtype, device=device),
+        "sunpathsfine": _tensor(precomputed.sunpathsfine, dtype=dtype, device=device),
+        "ntraversefine": precomputed.ntraversefine,
+        "fine_path_matrix": (
+            None
+            if precomputed.fine_path_matrix is None
+            else _tensor(precomputed.fine_path_matrix, dtype=dtype, device=device)
+        ),
+        "fine_column_index": precomputed.fine_column_index,
+    }
+    return SimpleNamespace(**fields)
+
+
+def _compile_torch_callable(func: Callable[..., Any], config: BackendConfig) -> Callable[..., Any]:
+    if config.backend != "torch" or not config.compiled:
+        return func
+    torch = _torch_module()
+    if torch is None or not hasattr(torch, "compile"):
+        raise RuntimeError("torch.compile is unavailable in this PyTorch installation")
+    if config.compile_mode == "default":
+        return torch.compile(func)
+    return torch.compile(func, mode=config.compile_mode)
+
+
 def _timed_torch_call(
-    ctx_device: Any, func: Callable[..., Any], **kwargs: Any
+    ctx_device: Any, func: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> tuple[Any, float]:
     torch = _torch_module()
     if torch is None:
@@ -506,7 +567,7 @@ def _timed_torch_call(
     if ctx_device.type == "cuda":
         torch.cuda.synchronize(ctx_device)
     start = time.perf_counter()
-    result = func(**kwargs)
+    result = func(*args, **kwargs)
     if ctx_device.type == "cuda":
         torch.cuda.synchronize(ctx_device)
     return result, time.perf_counter() - start
@@ -586,10 +647,50 @@ def _run_torch_solar_components_once(
         earth_radius=6371.0,
         nfine=3,
     )
+    fo_precomputed_t = _torch_fo_solar_precompute(fo_precomputed, dtype=dtype, device=device)
     chapman_t = _tensor(chapman, dtype=dtype, device=device)
-    pxsq_t = _tensor(pxsq, dtype=dtype, device=device)
-    px0x_t = _tensor(px0x[0], dtype=dtype, device=device)
+    pxsq_values = tuple(float(item) for item in np.asarray(pxsq, dtype=float).reshape(-1))
+    px0x_values = tuple(float(item) for item in np.asarray(px0x[0], dtype=float).reshape(-1))
     bundle = dict(kwargs)
+
+    def fo_kernel(tau, omega, scaling, albedo, fbeam, exact_scatter):
+        return solve_fo_solar_obs_eps_batch_torch(
+            tau=tau,
+            omega=omega,
+            scaling=scaling,
+            albedo=albedo,
+            flux_factor=fbeam,
+            exact_scatter=exact_scatter,
+            precomputed=fo_precomputed_t,
+            dtype=dtype,
+            device=device,
+        )
+
+    def two_stream_kernel(tau, omega, asymm, scaling, albedo, fbeam):
+        return solve_solar_obs_batch_torch(
+            tau=tau,
+            omega=omega,
+            asymm=asymm,
+            scaling=scaling,
+            albedo=albedo,
+            flux_factor=fbeam,
+            stream_value=stream,
+            chapman=chapman_t,
+            x0=scalar_value(x0),
+            user_stream=scalar_value(user_stream),
+            user_secant=1.0 / scalar_value(user_stream),
+            azmfac=scalar_value(azmfac),
+            px11=px11,
+            pxsq=pxsq_values,
+            px0x=px0x_values,
+            ulp=scalar_value(ulp),
+            dtype=dtype,
+            device=device,
+            bvp_engine=bvp_engine,
+        )
+
+    fo_kernel = _compile_torch_callable(fo_kernel, config)
+    two_stream_kernel = _compile_torch_callable(two_stream_kernel, config)
     fo_seconds = 0.0
     two_stream_seconds = 0.0
     total_parts = []
@@ -605,40 +706,24 @@ def _run_torch_solar_components_once(
             fbeam = _tensor(chunk["fbeam"], dtype=dtype, device=device)
             fo, elapsed = _timed_torch_call(
                 device,
-                solve_fo_solar_obs_eps_batch_torch,
-                tau=tau,
-                omega=omega,
-                scaling=scaling,
-                albedo=albedo,
-                flux_factor=fbeam,
-                exact_scatter=_tensor(chunk["fo_scatter_term"], dtype=dtype, device=device),
-                precomputed=fo_precomputed,
-                dtype=dtype,
-                device=device,
+                fo_kernel,
+                tau,
+                omega,
+                scaling,
+                albedo,
+                fbeam,
+                _tensor(chunk["fo_scatter_term"], dtype=dtype, device=device),
             )
             fo_seconds += elapsed
             two_stream, elapsed = _timed_torch_call(
                 device,
-                solve_solar_obs_batch_torch,
-                tau=tau,
-                omega=omega,
-                asymm=_tensor(chunk["g"], dtype=dtype, device=device),
-                scaling=scaling,
-                albedo=albedo,
-                flux_factor=fbeam,
-                stream_value=stream,
-                chapman=chapman_t,
-                x0=scalar_value(x0),
-                user_stream=scalar_value(user_stream),
-                user_secant=1.0 / scalar_value(user_stream),
-                azmfac=scalar_value(azmfac),
-                px11=px11,
-                pxsq=pxsq_t,
-                px0x=px0x_t,
-                ulp=scalar_value(ulp),
-                dtype=dtype,
-                device=device,
-                bvp_engine=bvp_engine,
+                two_stream_kernel,
+                tau,
+                omega,
+                _tensor(chunk["g"], dtype=dtype, device=device),
+                scaling,
+                albedo,
+                fbeam,
             )
             two_stream_seconds += elapsed
             total_parts.append((fo + two_stream).detach().cpu().numpy())
@@ -692,6 +777,41 @@ def _run_torch_thermal_components_once(
     fo_geometry = fo_thermal_geometry_to_torch(geometry, dtype=dtype, device=device)
     heights_t = _tensor(heights, dtype=dtype, device=device)
     bundle = dict(kwargs)
+
+    def two_stream_kernel(tau, omega, asymm, scaling, planck, surfbb, emissivity, albedo):
+        return _two_stream_thermal_toa_batch(
+            tau=tau,
+            omega=omega,
+            asymm=asymm,
+            scaling=scaling,
+            thermal_bb_input=planck,
+            surfbb=surfbb,
+            emissivity=emissivity,
+            albedo=albedo,
+            stream_value=stream,
+            user_stream=user_stream,
+            pxsq=stream * stream,
+            thermal_tcutoff=1.0e-8,
+            bvp_engine=bvp_engine,
+        )
+
+    def fo_kernel(tau, omega, scaling, planck, surfbb, emissivity):
+        return _fo_thermal_toa_batch(
+            tau=tau,
+            omega=omega,
+            scaling=scaling,
+            thermal_bb_input=planck,
+            surfbb=surfbb,
+            emissivity=emissivity,
+            heights=heights_t,
+            user_angle_degrees=user_angle,
+            earth_radius=6371.0,
+            nfine=3,
+            fo_geometry=fo_geometry,
+        )
+
+    two_stream_kernel = _compile_torch_callable(two_stream_kernel, config)
+    fo_kernel = _compile_torch_callable(fo_kernel, config)
     fo_seconds = 0.0
     two_stream_seconds = 0.0
     total_parts = []
@@ -709,36 +829,26 @@ def _run_torch_thermal_components_once(
             albedo = _tensor(chunk["albedo"], dtype=dtype, device=device)
             two_stream, elapsed = _timed_torch_call(
                 device,
-                _two_stream_thermal_toa_batch,
-                tau=tau,
-                omega=omega,
-                asymm=_tensor(chunk["g"], dtype=dtype, device=device),
-                scaling=scaling,
-                thermal_bb_input=planck,
-                surfbb=surfbb,
-                emissivity=emissivity,
-                albedo=albedo,
-                stream_value=stream,
-                user_stream=user_stream,
-                pxsq=stream * stream,
-                thermal_tcutoff=1.0e-8,
-                bvp_engine=bvp_engine,
+                two_stream_kernel,
+                tau,
+                omega,
+                _tensor(chunk["g"], dtype=dtype, device=device),
+                scaling,
+                planck,
+                surfbb,
+                emissivity,
+                albedo,
             )
             two_stream_seconds += elapsed
             fo, elapsed = _timed_torch_call(
                 device,
-                _fo_thermal_toa_batch,
-                tau=tau,
-                omega=omega,
-                scaling=scaling,
-                thermal_bb_input=planck,
-                surfbb=surfbb,
-                emissivity=emissivity,
-                heights=heights_t,
-                user_angle_degrees=user_angle,
-                earth_radius=6371.0,
-                nfine=3,
-                fo_geometry=fo_geometry,
+                fo_kernel,
+                tau,
+                omega,
+                scaling,
+                planck,
+                surfbb,
+                emissivity,
             )
             fo_seconds += elapsed
             total_parts.append((fo + two_stream).detach().cpu().numpy())
@@ -1074,6 +1184,20 @@ def main() -> None:
         "--torch-bvp-engine", choices=["auto", "block", "pentadiagonal"], default="auto"
     )
     parser.add_argument(
+        "--torch-compile",
+        action="store_true",
+        help=(
+            "Compile torch component kernels with torch.compile. The backend label is "
+            "tagged with 'torch.compile'; eager mode remains the default."
+        ),
+    )
+    parser.add_argument(
+        "--torch-compile-mode",
+        choices=("default", "reduce-overhead", "max-autotune"),
+        default="reduce-overhead",
+        help="Compilation mode passed to torch.compile when --torch-compile is set.",
+    )
+    parser.add_argument(
         "--numpy-bvp-engine", choices=["auto", "block", "pentadiagonal"], default="auto"
     )
     parser.add_argument("--repeats", type=int, default=5)
@@ -1105,6 +1229,8 @@ def main() -> None:
         _manifest_row(created_utc, "platform", "python", sys.version.replace("\n", " ")),
         _manifest_row(created_utc, "platform", "machine", platform.platform()),
         _manifest_row(created_utc, "repo", "root", str(ROOT)),
+        _manifest_row(created_utc, "metadata", "torch_compile", str(args.torch_compile)),
+        _manifest_row(created_utc, "metadata", "torch_compile_mode", args.torch_compile_mode),
     ]
     raw_rows: list[dict[str, Any]] = []
 
@@ -1115,6 +1241,8 @@ def main() -> None:
         configs, backend_manifest = _backend_configs(
             args.backend_set,
             torch_dtypes,
+            torch_compile=args.torch_compile,
+            torch_compile_mode=args.torch_compile_mode,
             created_utc=created_utc,
         )
         manifest.extend(backend_manifest)

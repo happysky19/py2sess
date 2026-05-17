@@ -102,6 +102,7 @@ def _write_readme(path: Path) -> None:
         "  --systems python \\\n"
         "  --backend-set all \\\n"
         "  --torch-dtypes float64 \\\n"
+        "  --torch-compile \\\n"
         "  --repeats 5 \\\n"
         "  --output-dir outputs/full_spectrum_benchmark_colab\n"
         "```\n\n"

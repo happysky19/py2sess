@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import numpy as np
@@ -25,7 +26,23 @@ if str(SRC) not in sys.path:
 from py2sess import TwoStreamEss, TwoStreamEssOptions  # noqa: E402
 from py2sess.optical.planck import thermal_source_from_temperature_profile  # noqa: E402
 from py2sess.rtsolver.backend import has_torch, to_numpy  # noqa: E402
+from py2sess.rtsolver.fo_solar_obs_batch_numpy import (  # noqa: E402
+    fo_solar_obs_batch_precompute,
+)
+from py2sess.rtsolver.fo_solar_obs_batch_torch import (  # noqa: E402
+    solve_fo_solar_obs_eps_batch_torch,
+)
 from py2sess.rtsolver.fo_solar_obs import fo_scatter_term_henyey_greenstein  # noqa: E402
+from py2sess.rtsolver.geometry import auxgeom_solar_obs, chapman_factors  # noqa: E402
+from py2sess.rtsolver.solar_obs_batch_torch import solve_solar_obs_batch_torch  # noqa: E402
+from py2sess.rtsolver.thermal_batch_numpy import (  # noqa: E402
+    precompute_fo_thermal_geometry_numpy,
+)
+from py2sess.rtsolver.thermal_batch_torch import (  # noqa: E402
+    _fo_thermal_toa_batch,
+    _two_stream_thermal_toa_batch,
+    fo_thermal_geometry_to_torch,
+)
 from py2sess.scene import load_scene  # noqa: E402
 
 
@@ -495,14 +512,234 @@ def _compile_forward_callable(run: Callable[..., Any], config: BackendConfig) ->
     return torch.compile(run, mode=config.compile_mode)
 
 
+def _torch_dtype(dtype: str):
+    torch = _torch_module()
+    if torch is None:
+        raise RuntimeError("PyTorch is not installed")
+    return {"float64": torch.float64, "float32": torch.float32}[dtype]
+
+
+def _tensor(value: Any, *, dtype: Any, device: Any):
+    torch = _torch_module()
+    if torch is None:
+        raise RuntimeError("PyTorch is not installed")
+    return torch.as_tensor(value, dtype=dtype, device=device)
+
+
+def _torch_fo_solar_precompute(precomputed: Any, *, dtype: Any, device: Any) -> Any:
+    fields = {
+        "inv_layer_thickness": _tensor(precomputed.inv_layer_thickness, dtype=dtype, device=device),
+        "do_nadir": precomputed.do_nadir,
+        "mu0": precomputed.mu0,
+        "ntrav_nl": precomputed.ntrav_nl,
+        "sunpathsnl": _tensor(precomputed.sunpathsnl, dtype=dtype, device=device),
+        "cota": _tensor(precomputed.cota, dtype=dtype, device=device),
+        "cotfine": _tensor(precomputed.cotfine, dtype=dtype, device=device),
+        "csqfine": _tensor(precomputed.csqfine, dtype=dtype, device=device),
+        "wfine": _tensor(precomputed.wfine, dtype=dtype, device=device),
+        "nfinedivs": precomputed.nfinedivs,
+        "rayconv": precomputed.rayconv,
+        "xfine": _tensor(precomputed.xfine, dtype=dtype, device=device),
+        "sunpathsfine": _tensor(precomputed.sunpathsfine, dtype=dtype, device=device),
+        "ntraversefine": precomputed.ntraversefine,
+        "fine_path_matrix": (
+            None
+            if precomputed.fine_path_matrix is None
+            else _tensor(precomputed.fine_path_matrix, dtype=dtype, device=device)
+        ),
+        "fine_column_index": precomputed.fine_column_index,
+    }
+    return SimpleNamespace(**fields)
+
+
+def _solar_scattering_cosine(angles: np.ndarray) -> float:
+    geoms = angles.reshape(1, 3) if angles.ndim == 1 else angles
+    if geoms.shape != (1, 3):
+        raise ValueError("compiled direct solar timing supports one observation geometry")
+    sza, vza, raz = geoms[0]
+    sza_rad = np.deg2rad(sza)
+    vza_rad = np.deg2rad(vza)
+    raz_rad = np.deg2rad(raz)
+    user_mu = float(np.cos(vza_rad))
+    cosscat = -user_mu * float(np.cos(sza_rad)) + float(
+        np.sin(vza_rad) * np.sin(sza_rad) * np.cos(raz_rad)
+    )
+    if np.isclose(sza, 0.0):
+        return 0.0 if np.isclose(user_mu, 0.0) else -user_mu
+    return cosscat
+
+
+def _solar_hg_scatter_term_torch(ssa: Any, g: Any, scaling: Any, cosscat: Any) -> Any:
+    denominator = 1.0 - scaling * ssa
+    phase_denominator = 1.0 + g * g - 2.0 * g * cosscat
+    phase = (1.0 - g * g) / phase_denominator.pow(1.5)
+    return phase * (ssa / denominator)
+
+
+def _direct_torch_evaluator(
+    case: RtCase,
+    kwargs: dict[str, Any],
+    config: BackendConfig,
+    *,
+    bvp_engine: str = "auto",
+) -> Callable[[dict[str, Any]], Any]:
+    if config.backend != "torch":
+        raise RuntimeError("direct torch evaluator requires a torch backend")
+    torch = _torch_module()
+    if torch is None:
+        raise RuntimeError("PyTorch is not installed")
+    dtype = _torch_dtype(config.dtype)
+    device = torch.device(config.device)
+
+    if case.mode == "solar":
+        heights = np.asarray(case.kwargs["z"], dtype=float)
+        angles = np.asarray(case.kwargs["angles"], dtype=float)
+        geoms = angles.reshape(1, 3) if angles.ndim == 1 else angles
+        if geoms.shape != (1, 3):
+            raise ValueError("compiled direct solar timing supports one observation geometry")
+        stream = float(case.kwargs.get("stream", 1.0 / np.sqrt(3.0)))
+        sza, vza, raz = geoms[0]
+        x0 = np.array([np.cos(np.deg2rad(sza))], dtype=float)
+        user_stream = np.array([np.cos(np.deg2rad(vza))], dtype=float)
+        px11, pxsq, px0x, ulp = auxgeom_solar_obs(
+            x0=x0,
+            user_streams=user_stream,
+            stream_value=stream,
+            do_postprocessing=True,
+        )
+        chapman = chapman_factors(heights, 6371.0, float(sza))
+        azmfac = np.array([np.cos(np.deg2rad(raz))], dtype=float)
+        fo_precomputed = _torch_fo_solar_precompute(
+            fo_solar_obs_batch_precompute(
+                user_obsgeom=geoms,
+                heights=heights,
+                earth_radius=6371.0,
+                nfine=3,
+            ),
+            dtype=dtype,
+            device=device,
+        )
+        chapman_t = _tensor(chapman, dtype=dtype, device=device)
+        pxsq_values = tuple(float(item) for item in np.asarray(pxsq, dtype=float).reshape(-1))
+        px0x_values = tuple(float(item) for item in np.asarray(px0x[0], dtype=float).reshape(-1))
+        cosscat_t = _tensor(_solar_scattering_cosine(angles), dtype=dtype, device=device)
+
+        def evaluate(local_kwargs: dict[str, Any]):
+            tau = local_kwargs["tau"]
+            omega = local_kwargs["ssa"]
+            asymm = local_kwargs["g"]
+            scaling = local_kwargs["delta_m_truncation_factor"]
+            albedo = local_kwargs["albedo"]
+            fbeam = local_kwargs.get("fbeam")
+            if fbeam is None:
+                fbeam = torch.ones(tau.shape[0], dtype=tau.dtype, device=tau.device)
+            exact_scatter = local_kwargs.get("fo_scatter_term")
+            if exact_scatter is None:
+                exact_scatter = _solar_hg_scatter_term_torch(
+                    omega,
+                    asymm,
+                    scaling,
+                    cosscat_t,
+                )
+            fo = solve_fo_solar_obs_eps_batch_torch(
+                tau=tau,
+                omega=omega,
+                scaling=scaling,
+                albedo=albedo,
+                flux_factor=fbeam,
+                exact_scatter=exact_scatter,
+                precomputed=fo_precomputed,
+                dtype=dtype,
+                device=device,
+            )
+            two_stream = solve_solar_obs_batch_torch(
+                tau=tau,
+                omega=omega,
+                asymm=asymm,
+                scaling=scaling,
+                albedo=albedo,
+                flux_factor=fbeam,
+                stream_value=stream,
+                chapman=chapman_t,
+                x0=float(x0[0]),
+                user_stream=float(user_stream[0]),
+                user_secant=1.0 / float(user_stream[0]),
+                azmfac=float(azmfac[0]),
+                px11=px11,
+                pxsq=pxsq_values,
+                px0x=px0x_values,
+                ulp=float(np.asarray(ulp).reshape(-1)[0]),
+                dtype=dtype,
+                device=device,
+                bvp_engine=bvp_engine,
+            )
+            return fo + two_stream
+
+        return evaluate
+
+    if case.mode != "thermal":
+        raise ValueError(f"unsupported RT mode for direct torch evaluator: {case.mode!r}")
+
+    heights = np.asarray(case.kwargs["z"], dtype=float)
+    user_angle = float(np.asarray(case.kwargs["angles"], dtype=float).reshape(-1)[0])
+    user_stream = float(np.cos(np.deg2rad(user_angle)))
+    stream = float(case.kwargs.get("stream", 0.5))
+    geometry = precompute_fo_thermal_geometry_numpy(
+        heights=heights,
+        user_angle_degrees=user_angle,
+        earth_radius=6371.0,
+        nfine=3,
+    )
+    fo_geometry = fo_thermal_geometry_to_torch(geometry, dtype=dtype, device=device)
+    heights_t = _tensor(heights, dtype=dtype, device=device)
+
+    def evaluate(local_kwargs: dict[str, Any]):
+        tau = local_kwargs["tau"]
+        omega = local_kwargs["ssa"]
+        asymm = local_kwargs["g"]
+        scaling = local_kwargs["delta_m_truncation_factor"]
+        albedo = local_kwargs["albedo"]
+        planck = local_kwargs["planck"]
+        surfbb = local_kwargs["surface_planck"]
+        emissivity = local_kwargs.get("emissivity")
+        if emissivity is None:
+            emissivity = 1.0 - albedo
+        two_stream = _two_stream_thermal_toa_batch(
+            tau=tau,
+            omega=omega,
+            asymm=asymm,
+            scaling=scaling,
+            thermal_bb_input=planck,
+            surfbb=surfbb,
+            emissivity=emissivity,
+            albedo=albedo,
+            stream_value=stream,
+            user_stream=user_stream,
+            pxsq=stream * stream,
+            thermal_tcutoff=1.0e-8,
+            bvp_engine=bvp_engine,
+        )
+        fo = _fo_thermal_toa_batch(
+            tau=tau,
+            omega=omega,
+            scaling=scaling,
+            thermal_bb_input=planck,
+            surfbb=surfbb,
+            emissivity=emissivity,
+            heights=heights_t,
+            user_angle_degrees=user_angle,
+            earth_radius=6371.0,
+            nfine=3,
+            fo_geometry=fo_geometry,
+        )
+        return fo + two_stream
+
+    return evaluate
+
+
 def _torch_compile_skip_reason(case: RtCase, config: BackendConfig) -> str:
     if not config.compiled:
         return ""
-    if case.mode == "solar":
-        return (
-            "torch.compile is not used for the batched solar include_fo path because "
-            "pseudo-spherical FO geometry precomputation still calls NumPy cached helpers"
-        )
     return ""
 
 
@@ -646,12 +883,20 @@ def _forward_runtime_rows(
         kwargs, _ = _float_fields_to_torch(case.kwargs, dtype=config.dtype, device=config.device)
     else:
         kwargs = case.kwargs
-    solver = _make_solver(case, config, enable_grad=False)
-
-    def forward_radiance():
-        return solver.forward(**kwargs, include_fo=True).radiance_total
 
     try:
+        if config.backend == "torch" and config.compiled:
+            evaluator = _direct_torch_evaluator(case, kwargs, config)
+
+            def forward_radiance():
+                return evaluator(kwargs)
+
+        else:
+            solver = _make_solver(case, config, enable_grad=False)
+
+            def forward_radiance():
+                return solver.forward(**kwargs, include_fo=True).radiance_total
+
         timed_forward = _compile_forward_callable(forward_radiance, config)
     except Exception as exc:
         return [
@@ -758,7 +1003,6 @@ def _profile_jacobian_runtime_rows(
     field_base = kwargs[gradient_field].detach()
     active_index_t = torch.as_tensor(active_indices, dtype=torch.long, device=config.device)
     active_field = field_base[:, active_index_t].detach().clone().requires_grad_(True)
-    solver = _make_solver(case, config, enable_grad=True)
 
     def make_field(field):
         if active_tau_layers == case.layers:
@@ -767,12 +1011,23 @@ def _profile_jacobian_runtime_rows(
         expanded[:, active_index_t] = field
         return expanded
 
-    def forward_radiance(field):
-        local_kwargs = dict(kwargs)
-        local_kwargs[gradient_field] = make_field(field)
-        return solver.forward(**local_kwargs, include_fo=True).radiance_total
-
     try:
+        if config.compiled:
+            evaluator = _direct_torch_evaluator(case, kwargs, config)
+
+            def forward_radiance(field):
+                local_kwargs = dict(kwargs)
+                local_kwargs[gradient_field] = make_field(field)
+                return evaluator(local_kwargs)
+
+        else:
+            solver = _make_solver(case, config, enable_grad=True)
+
+            def forward_radiance(field):
+                local_kwargs = dict(kwargs)
+                local_kwargs[gradient_field] = make_field(field)
+                return solver.forward(**local_kwargs, include_fo=True).radiance_total
+
         timed_forward = _compile_forward_callable(forward_radiance, config)
     except Exception as exc:
         return [
@@ -966,7 +1221,38 @@ def _surface_albedo_jacobian_runtime_rows(
     if torch is None:  # pragma: no cover
         raise RuntimeError("PyTorch is not installed")
     albedo = tracked["albedo"]
-    solver = _make_solver(case, config, enable_grad=True)
+
+    try:
+        if config.compiled:
+            evaluator = _direct_torch_evaluator(case, kwargs, config)
+
+            def forward_radiance(albedo_value):
+                local_kwargs = dict(kwargs)
+                local_kwargs["albedo"] = albedo_value
+                return evaluator(local_kwargs)
+
+        else:
+            solver = _make_solver(case, config, enable_grad=True)
+
+            def forward_radiance(albedo_value):
+                local_kwargs = dict(kwargs)
+                local_kwargs["albedo"] = albedo_value
+                return solver.forward(**local_kwargs, include_fo=True).radiance_total
+
+        timed_forward = _compile_forward_callable(forward_radiance, config)
+    except Exception as exc:
+        return [
+            _failure_row(
+                experiment="synthetic-jacobian",
+                case=case,
+                config=config,
+                sweep_axis=sweep_axis,
+                gradient_target="surface_albedo",
+                active_tau_layers=0,
+                n_grad_vars=case.wavelengths,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+        ]
 
     def forward_radiance(albedo_value):
         local_kwargs = dict(kwargs)
@@ -1104,14 +1390,24 @@ def _surface_emissivity_jacobian_runtime_rows(
     if torch is None:  # pragma: no cover
         raise RuntimeError("PyTorch is not installed")
     emissivity = tracked["emissivity"]
-    solver = _make_solver(case, config, enable_grad=True)
-
-    def forward_radiance(emissivity_value):
-        local_kwargs = dict(kwargs)
-        local_kwargs["emissivity"] = emissivity_value
-        return solver.forward(**local_kwargs, include_fo=True).radiance_total
 
     try:
+        if config.compiled:
+            evaluator = _direct_torch_evaluator(case, kwargs, config)
+
+            def forward_radiance(emissivity_value):
+                local_kwargs = dict(kwargs)
+                local_kwargs["emissivity"] = emissivity_value
+                return evaluator(local_kwargs)
+
+        else:
+            solver = _make_solver(case, config, enable_grad=True)
+
+            def forward_radiance(emissivity_value):
+                local_kwargs = dict(kwargs)
+                local_kwargs["emissivity"] = emissivity_value
+                return solver.forward(**local_kwargs, include_fo=True).radiance_total
+
         timed_forward = _compile_forward_callable(forward_radiance, config)
     except Exception as exc:
         return [
