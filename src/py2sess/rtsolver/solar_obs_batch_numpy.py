@@ -453,7 +453,7 @@ def _upuser_intensity_batch(
     *,
     layer_pis_cutoff: np.ndarray,
     surface_factor: float,
-    albedo: np.ndarray,
+    surface_reflectance: np.ndarray,
     fluxmult: float,
     stream_value: float,
     delta_tau: np.ndarray,
@@ -489,7 +489,7 @@ def _upuser_intensity_batch(
         par = wlower1[:, -1]
         hom = lcon[:, -1] * xpos1[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos2[:, -1]
         idownsurf = (par + hom) * stream_value
-        cumsource = surface_factor * albedo * idownsurf
+        cumsource = surface_factor * surface_reflectance * idownsurf
     layersource = np.empty_like(lcon)
     np.multiply(lcon, u_xpos, out=layersource)
     layersource *= hmult_2
@@ -588,6 +588,9 @@ def solve_solar_obs_batch_numpy(
     scaling: np.ndarray,
     albedo: np.ndarray,
     flux_factor: np.ndarray,
+    brdf_f_0: np.ndarray | None = None,
+    brdf_f: np.ndarray | None = None,
+    ubrdf_f: np.ndarray | None = None,
     stream_value: float,
     chapman: np.ndarray,
     x0: float,
@@ -652,6 +655,19 @@ def solve_solar_obs_batch_numpy(
     if return_profile:
         total_profile = np.zeros((tau.shape[0], tau.shape[1] + 1), dtype=float)
     zero_surface = np.zeros_like(albedo)
+    do_brdf_surface = brdf_f_0 is not None or brdf_f is not None or ubrdf_f is not None
+    if do_brdf_surface:
+        if brdf_f_0 is None or brdf_f is None or ubrdf_f is None:
+            raise ValueError("brdf_f_0, brdf_f, and ubrdf_f must be provided together")
+        brdf_f_0 = np.asarray(brdf_f_0, dtype=float)
+        brdf_f = np.asarray(brdf_f, dtype=float)
+        ubrdf_f = np.asarray(ubrdf_f, dtype=float)
+        if brdf_f_0.shape != (tau.shape[0], 2):
+            raise ValueError("brdf_f_0 must have shape (n_spectral, 2)")
+        if brdf_f.shape != (tau.shape[0], 2):
+            raise ValueError("brdf_f must have shape (n_spectral, 2)")
+        if ubrdf_f.shape != (tau.shape[0], 2):
+            raise ValueError("ubrdf_f must have shape (n_spectral, 2)")
 
     for fourier in (0, 1):
         surface_factor = 2.0 if fourier == 0 else 1.0
@@ -707,12 +723,20 @@ def solve_solar_obs_batch_numpy(
             delta_tau=delta_tau,
             all_layers_active=all_layers_active,
         )
-        if fourier == 0:
+        if do_brdf_surface:
+            direct_beam = (
+                flux_factor * x0 / delta_factor / np.pi * trans_solar_beam * brdf_f_0[:, fourier]
+            )
+            bvp_albedo = brdf_f[:, fourier]
+            surface_reflectance = ubrdf_f[:, fourier]
+        elif fourier == 0:
             direct_beam = flux_factor * x0 / delta_factor / np.pi * trans_solar_beam * albedo
             bvp_albedo = albedo
+            surface_reflectance = albedo
         else:
             direct_beam = zero_surface
             bvp_albedo = zero_surface
+            surface_reflectance = zero_surface
         lcon, mcon = solve_solar_observation_bvp_batch(
             albedo=bvp_albedo,
             direct_beam=direct_beam,
@@ -728,7 +752,7 @@ def solve_solar_obs_batch_numpy(
         contribution = _upuser_intensity_batch(
             layer_pis_cutoff=layer_pis_cutoff,
             surface_factor=surface_factor,
-            albedo=bvp_albedo,
+            surface_reflectance=surface_reflectance,
             fluxmult=delta_factor,
             stream_value=stream_value,
             delta_tau=delta_tau,
@@ -753,7 +777,7 @@ def solve_solar_obs_batch_numpy(
             hmult_2=hmult_2,
             emult_up=emult_up,
             all_layers_active=all_layers_active,
-            surface_source_zero=(fourier == 1),
+            surface_source_zero=(not do_brdf_surface and fourier == 1),
             return_profile=return_profile,
         )
         if return_profile:

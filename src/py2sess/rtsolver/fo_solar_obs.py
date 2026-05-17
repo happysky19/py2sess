@@ -687,6 +687,7 @@ def solve_fo_solar_obs(
     prepared: PreparedInputs,
     *,
     do_plane_parallel: bool,
+    do_brdf_surface: bool = False,
     geometry_mode: str = "eps",
     n_moments: int = 5000,
     nfine: int = 3,
@@ -737,6 +738,11 @@ def solve_fo_solar_obs(
             raise ValueError(
                 "exact_scatter must have shape (n_layers,) or (n_layers, n_geometries)"
             )
+
+    def direct_surface_reflectance(geometry_index: int) -> float:
+        if do_brdf_surface and prepared.brdf is not None and prepared.brdf.direct_brf is not None:
+            return float(prepared.brdf.direct_brf[geometry_index])
+        return float(prepared.albedo)
 
     if do_plane_parallel:
         for v in range(ngeoms):
@@ -799,7 +805,7 @@ def solve_fo_solar_obs(
                 sources_up[n] = solutions[n]
 
             cumsource_up = 0.0
-            cumsource_db = 4.0 * mu0[v] * prepared.albedo * attenuations[-1]
+            cumsource_db = 4.0 * mu0[v] * direct_surface_reflectance(v) * attenuations[-1]
             intensity_ss_profile[v, nlayers] = flux * cumsource_up
             intensity_db_profile[v, nlayers] = flux * cumsource_db
             for n in range(nlayers - 1, -1, -1):
@@ -894,7 +900,7 @@ def solve_fo_solar_obs(
 
             flux = 0.25 * prepared.flux_factor / math.pi
             cumsource_up = 0.0
-            cumsource_db = 4.0 * mu0[v] * prepared.albedo * attenuations[-1]
+            cumsource_db = 4.0 * mu0[v] * direct_surface_reflectance(v) * attenuations[-1]
             intensity_ss_profile[v, nlayers] = flux * cumsource_up
             intensity_db_profile[v, nlayers] = flux * cumsource_db
             for n in range(nlayers - 1, -1, -1):
@@ -996,7 +1002,7 @@ def solve_fo_solar_obs(
 
         flux = 0.25 * prepared.flux_factor / math.pi
         cumsource_up = 0.0
-        cumsource_db = 4.0 * mu0[v] * prepared.albedo * attenuations_nl
+        cumsource_db = 4.0 * mu0[v] * direct_surface_reflectance(v) * attenuations_nl
         intensity_ss_profile[v, nlayers] = flux * cumsource_up
         intensity_db_profile[v, nlayers] = flux * cumsource_db
         for n in range(nlayers - 1, -1, -1):

@@ -248,6 +248,7 @@ def solve_fo_solar_obs_eps_batch_numpy(
     flux_factor: np.ndarray,
     exact_scatter: np.ndarray,
     precomputed: FoSolarObsBatchPrecompute,
+    direct_surface_reflectance: np.ndarray | None = None,
     return_profile: bool = False,
     return_components: bool = False,
 ) -> np.ndarray | FoSolarObsBatchResult:
@@ -265,6 +266,11 @@ def solve_fo_solar_obs_eps_batch_numpy(
     )
     extinction = tau_scaled * precomputed.inv_layer_thickness[np.newaxis, :]
     phase_terms = np.asarray(exact_scatter, dtype=float)
+    surface_reflectance = (
+        np.asarray(albedo, dtype=float)
+        if direct_surface_reflectance is None
+        else np.asarray(direct_surface_reflectance, dtype=float)
+    )
     total_tau = extinction[:, : precomputed.ntrav_nl] @ precomputed.sunpathsnl
     attenuation_nl = _exp_cutoff_owned(total_tau)
 
@@ -283,7 +289,7 @@ def solve_fo_solar_obs_eps_batch_numpy(
                 _ensure_c_contiguous(extinction, dtype=np.float64),
                 _ensure_c_contiguous(phase_terms, dtype=np.float64),
                 _ensure_c_contiguous(np.asarray(flux_factor, dtype=float), dtype=np.float64),
-                _ensure_c_contiguous(np.asarray(albedo, dtype=float), dtype=np.float64),
+                _ensure_c_contiguous(surface_reflectance, dtype=np.float64),
                 _ensure_c_contiguous(attenuation_nl, dtype=np.float64),
                 _ensure_c_contiguous(fine_attenuation, dtype=np.float64),
                 precomputed.cota,
@@ -298,7 +304,7 @@ def solve_fo_solar_obs_eps_batch_numpy(
 
     batch_size, nlayers = extinction.shape
     cumsource_up = np.zeros(batch_size, dtype=float)
-    cumsource_db = 4.0 * precomputed.mu0 * np.asarray(albedo, dtype=float) * attenuation_nl
+    cumsource_db = 4.0 * precomputed.mu0 * surface_reflectance * attenuation_nl
     profile_up = None
     profile_db = None
     if return_profile:

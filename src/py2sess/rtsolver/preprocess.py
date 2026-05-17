@@ -50,6 +50,7 @@ class PreparedBrdf:
     brdf_f_0: np.ndarray
     brdf_f: np.ndarray
     ubrdf_f: np.ndarray
+    direct_brf: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -334,17 +335,28 @@ def _prepare_brdf(
             brdf_f_0=np.asarray(coeffs.brdf_f_0, dtype=float),
             brdf_f=np.asarray(coeffs.brdf_f, dtype=float),
             ubrdf_f=np.asarray(coeffs.ubrdf_f, dtype=float),
+            direct_brf=np.asarray(coeffs.direct_brf, dtype=float),
         )
     brdf_f_0 = np.asarray(brdf.get("brdf_f_0"), dtype=float)
     brdf_f = np.asarray(brdf.get("brdf_f"), dtype=float)
     ubrdf_f = np.asarray(brdf.get("ubrdf_f"), dtype=float)
+    direct_brf = (
+        None if "direct_brf" not in brdf else np.asarray(brdf.get("direct_brf"), dtype=float)
+    )
     if brdf_f_0.shape != (n_geoms, 2):
         raise ValueError("brdf['brdf_f_0'] must have shape (n_geometries, 2)")
     if brdf_f.shape != (2,):
         raise ValueError("brdf['brdf_f'] must have shape (2,)")
     if ubrdf_f.shape != (n_geoms, 2):
         raise ValueError("brdf['ubrdf_f'] must have shape (n_geometries, 2)")
-    return PreparedBrdf(brdf_f_0=brdf_f_0, brdf_f=brdf_f, ubrdf_f=ubrdf_f)
+    if direct_brf is not None and direct_brf.shape != (n_geoms,):
+        raise ValueError("brdf['direct_brf'] must have shape (n_geometries,)")
+    return PreparedBrdf(
+        brdf_f_0=brdf_f_0,
+        brdf_f=brdf_f,
+        ubrdf_f=ubrdf_f,
+        direct_brf=direct_brf,
+    )
 
 
 def _prepare_surface_leaving(
@@ -479,6 +491,7 @@ def prepare_inputs(
                 brdf_f_0=np.zeros((angles.size, 2), dtype=float),
                 brdf_f=np.array([float(brdf_f), 0.0], dtype=float),
                 ubrdf_f=np.column_stack((ubrdf_f, np.zeros(angles.size, dtype=float))),
+                direct_brf=None,
             )
         return PreparedInputs(
             source_mode="thermal",

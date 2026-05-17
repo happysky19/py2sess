@@ -42,6 +42,15 @@ from .surface_leaving import (
     seawater_refractive_index,
     surface_leaving_from_water,
 )
+from .solar_reference import (
+    ASTRONOMICAL_UNIT_M,
+    IAU_NOMINAL_SOLAR_EFFECTIVE_TEMPERATURE_K,
+    IAU_NOMINAL_TOTAL_SOLAR_IRRADIANCE_W_M2,
+    OcoSolarModel,
+    ToonSolarReference,
+    solar_planck_irradiance_w_m2_um,
+    solar_planck_continuum_ratio,
+)
 
 __all__ = [
     "default_delta_m_truncation_factor",
@@ -74,6 +83,13 @@ __all__ = [
     "morcasiwat_reflectance",
     "seawater_refractive_index",
     "surface_leaving_from_water",
+    "ASTRONOMICAL_UNIT_M",
+    "IAU_NOMINAL_SOLAR_EFFECTIVE_TEMPERATURE_K",
+    "IAU_NOMINAL_TOTAL_SOLAR_IRRADIANCE_W_M2",
+    "OcoSolarModel",
+    "ToonSolarReference",
+    "solar_planck_irradiance_w_m2_um",
+    "solar_planck_continuum_ratio",
     "solar_obs_brdf_from_kernels",
     "thermal_brdf_from_kernels",
 ]

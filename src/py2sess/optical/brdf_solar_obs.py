@@ -12,6 +12,7 @@ import numpy as np
 LAMBERTIAN_IDX = 1
 ROSSTHIN_IDX = 2
 ROSSTHICK_IDX = 3
+RPV_IDX = 4
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class SolarObsBrdfResult:
     brdf_f_0: np.ndarray
     brdf_f: np.ndarray
     ubrdf_f: np.ndarray
+    direct_brf: np.ndarray
 
 
 def _gauleg_unit(n_half: int) -> tuple[np.ndarray, np.ndarray]:
@@ -46,6 +48,34 @@ def _ross_kernel(
         return func - 0.25 * pie
     func = ((0.5 * pie - ksi) * cksi + sksi) / ds1
     return func - 0.5 * pie
+
+
+def _rpv_kernel(
+    *,
+    mu_i: float,
+    mu_r: float,
+    cphi: float,
+    hotspot: float,
+    asymmetry: float,
+    anisotropy: float,
+    normalization: float,
+) -> float:
+    if mu_i <= 0.0 or mu_r <= 0.0:
+        return 0.0
+    if normalization <= 0.0:
+        raise ValueError("RPV normalization must be positive")
+    sin_i = math.sqrt(max(0.0, 1.0 - mu_i * mu_i))
+    sin_r = math.sqrt(max(0.0, 1.0 - mu_r * mu_r))
+    cos_g = max(-1.0, min(1.0, mu_i * mu_r + sin_i * sin_r * cphi))
+    minnaert = (mu_i * mu_r) ** (anisotropy - 1.0) / (mu_i + mu_r) ** (1.0 - anisotropy)
+    phase = (1.0 - asymmetry * asymmetry) / (
+        1.0 + asymmetry * asymmetry + 2.0 * asymmetry * cos_g
+    ) ** 1.5
+    tan_i = sin_i / mu_i
+    tan_r = sin_r / mu_r
+    geom = math.sqrt(max(0.0, tan_i * tan_i + tan_r * tan_r - 2.0 * tan_i * tan_r * cphi))
+    hotspot_term = 1.0 + (1.0 - hotspot) / (1.0 + geom)
+    return minnaert * phase * hotspot_term / normalization
 
 
 def solar_obs_brdf_from_kernels(
@@ -80,6 +110,7 @@ def solar_obs_brdf_from_kernels(
     brdf_f_0 = np.zeros((n_geoms, 2), dtype=float)
     brdf_f = np.zeros(2, dtype=float)
     ubrdf_f = np.zeros((n_geoms, 2), dtype=float)
+    direct_brf = np.zeros(n_geoms, dtype=float)
 
     if user_obsgeoms is None:
         user_obsgeoms = np.zeros((n_geoms, 3), dtype=float)
@@ -116,42 +147,107 @@ def solar_obs_brdf_from_kernels(
             brdf_f_0[:, 0] += factor
             brdf_f[0] += factor
             ubrdf_f[:, 0] += factor
+            direct_brf += factor
             continue
-        if which_brdf not in {ROSSTHIN_IDX, ROSSTHICK_IDX}:
+        if which_brdf not in {ROSSTHIN_IDX, ROSSTHICK_IDX, RPV_IDX}:
             raise NotImplementedError(
                 "solar observational BRDF kernel generation currently supports "
-                "Lambertian, RossThin, and RossThick only"
+                "Lambertian, RossThin, RossThick, and RPV only"
             )
-        thick = which_brdf == ROSSTHICK_IDX
         brdfunc = np.zeros(nstreams_brdf, dtype=float)
         brdfunc_0 = np.zeros((nstreams_brdf, n_geoms), dtype=float)
         user_brdfunc = np.zeros((nstreams_brdf, n_geoms), dtype=float)
-        for k in range(nstreams_brdf):
-            brdfunc[k] = _ross_kernel(
-                xi=stream_value,
-                sxi=stream_sine,
-                xj=stream_value,
-                sxj=stream_sine,
-                cphi=float(cphi[k]),
-                thick=thick,
+        if which_brdf == RPV_IDX:
+            hotspot = float(spec["hotspot"])
+            asymmetry = float(spec["asymmetry"])
+            anisotropy = float(spec["anisotropy"])
+            normalization = float(spec.get("normalization", 20.0))
+            for k in range(nstreams_brdf):
+                brdfunc[k] = _rpv_kernel(
+                    mu_i=stream_value,
+                    mu_r=stream_value,
+                    cphi=float(cphi[k]),
+                    hotspot=hotspot,
+                    asymmetry=asymmetry,
+                    anisotropy=anisotropy,
+                    normalization=normalization,
+                )
+                for ig in range(n_geoms):
+                    brdfunc_0[k, ig] = _rpv_kernel(
+                        mu_i=float(sza_cos[ig]),
+                        mu_r=stream_value,
+                        cphi=float(cphi[k]),
+                        hotspot=hotspot,
+                        asymmetry=asymmetry,
+                        anisotropy=anisotropy,
+                        normalization=normalization,
+                    )
+                    user_brdfunc[k, ig] = _rpv_kernel(
+                        mu_i=stream_value,
+                        mu_r=float(user_streams[ig]),
+                        cphi=float(cphi[k]),
+                        hotspot=hotspot,
+                        asymmetry=asymmetry,
+                        anisotropy=anisotropy,
+                        normalization=normalization,
+                    )
+            direct_brf += factor * np.array(
+                [
+                    _rpv_kernel(
+                        mu_i=float(sza_cos[ig]),
+                        mu_r=float(user_streams[ig]),
+                        cphi=math.cos(math.radians(float(user_obsgeoms[ig, 2]))),
+                        hotspot=hotspot,
+                        asymmetry=asymmetry,
+                        anisotropy=anisotropy,
+                        normalization=normalization,
+                    )
+                    for ig in range(n_geoms)
+                ],
+                dtype=float,
             )
-            for ig in range(n_geoms):
-                brdfunc_0[k, ig] = _ross_kernel(
+        else:
+            thick = which_brdf == ROSSTHICK_IDX
+            for k in range(nstreams_brdf):
+                brdfunc[k] = _ross_kernel(
                     xi=stream_value,
                     sxi=stream_sine,
-                    xj=float(sza_cos[ig]),
-                    sxj=float(sza_sin[ig]),
-                    cphi=float(cphi[k]),
-                    thick=thick,
-                )
-                user_brdfunc[k, ig] = _ross_kernel(
-                    xi=float(user_streams[ig]),
-                    sxi=float(user_sines[ig]),
                     xj=stream_value,
                     sxj=stream_sine,
                     cphi=float(cphi[k]),
                     thick=thick,
                 )
+                for ig in range(n_geoms):
+                    brdfunc_0[k, ig] = _ross_kernel(
+                        xi=stream_value,
+                        sxi=stream_sine,
+                        xj=float(sza_cos[ig]),
+                        sxj=float(sza_sin[ig]),
+                        cphi=float(cphi[k]),
+                        thick=thick,
+                    )
+                    user_brdfunc[k, ig] = _ross_kernel(
+                        xi=float(user_streams[ig]),
+                        sxi=float(user_sines[ig]),
+                        xj=stream_value,
+                        sxj=stream_sine,
+                        cphi=float(cphi[k]),
+                        thick=thick,
+                    )
+            direct_brf += factor * np.array(
+                [
+                    _ross_kernel(
+                        xi=float(user_streams[ig]),
+                        sxi=float(user_sines[ig]),
+                        xj=float(sza_cos[ig]),
+                        sxj=float(sza_sin[ig]),
+                        cphi=math.cos(math.radians(float(user_obsgeoms[ig, 2]))),
+                        thick=thick,
+                    )
+                    for ig in range(n_geoms)
+                ],
+                dtype=float,
+            )
         for m in (0, 1):
             delfac = 1.0 if m == 0 else 2.0
             azmfac = a_brdf if m == 0 else a_brdf * np.cos(m * phi)
@@ -165,4 +261,5 @@ def solar_obs_brdf_from_kernels(
         brdf_f_0=brdf_f_0,
         brdf_f=brdf_f,
         ubrdf_f=ubrdf_f,
+        direct_brf=direct_brf,
     )
