@@ -236,7 +236,10 @@ class PaperRtBenchmarkTests(unittest.TestCase):
             with summary_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertTrue(rows)
-            self.assertTrue({row["backend"] for row in rows}.issuperset({"NumPy", "Torch CPU"}))
+            expected_backends = {"NumPy"}
+            if has_torch():
+                expected_backends.add("Torch CPU")
+            self.assertTrue({row["backend"] for row in rows}.issuperset(expected_backends))
             self.assertTrue(all(int(row["n_repeats"]) == 2 for row in rows))
             self.assertTrue(all(int(row["levels"]) == int(row["layers"]) + 1 for row in rows))
 
