@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Replay OCO-3 three-band soundings with py2sess.
 
-The driver uses official posterior state fields, OCO ABSCO tables, the OCO
-solar model, L1B ILS sampling, and L1B instrument Stokes coefficients. It does
-not fit pressure, spectroscopy, wavelength, gas columns, aerosol loading, or
-surface brightness. OCO photon radiances and py2sess replay spectra are both
-reported as energy spectral radiance.
+By default, the driver uses official posterior state fields, OCO ABSCO tables,
+the OCO solar model, L1B ILS sampling, L2 posterior gaussian-log aerosol
+loading, and L1B instrument Stokes coefficients. It does not fit pressure,
+spectroscopy, wavelength, gas columns, or aerosol loading. It applies a
+continuum-constrained land BRDF weight and slope adjustment for each sounding
+and band; pass --surface-brdf-retrieval none for a strict fixed-L2-surface
+replay. OCO photon radiances and py2sess replay spectra are both reported as
+energy spectral radiance.
 
 The default polarization treatment uses the OCO L1B normalized-radiance
 convention, L = I + (m12/m11) Q + (m13/m11) U. A raw detector projection,
@@ -57,6 +60,7 @@ RPV_KERNEL_NORMALIZATION = 20.0
 # its direct_brf term is twice the OCO L2 BRDF reflectance kernel used here.
 SOLAR_OBS_DIRECT_BRF_TO_OCO_BRF = 0.5
 AEROSOL_REFERENCE_WAVELENGTH_UM = 0.76
+AEROSOL_HG_MOMENT_ORDER = 80
 PLANCK_CONSTANT_J_S = 6.62607015e-34
 SPEED_OF_LIGHT_M_S = 299792458.0
 OCO_NOISE_MAX_MS = (7.00e20, 2.45e20, 1.25e20)
@@ -226,6 +230,15 @@ class Py2sessReplayResult:
 
 
 @dataclass(frozen=True)
+class SurfaceBrdfRetrieval:
+    scale: float
+    tilt: float
+    n_points: int
+    fit_rmse_percent: float
+    status: str
+
+
+@dataclass(frozen=True)
 class StokesProjection:
     scalar_factor: float
     analyzer_q: float
@@ -304,6 +317,9 @@ def _solar_reference_lookup_wavelength(
         return wavelength, 0.0
     if solar_doppler == "l2-solar":
         velocity = float(solar_relative_velocity_m_s)
+        instrument_beta = float(los_relative_velocity_m_s) / SPEED_OF_LIGHT_M_S
+        solar_beta = velocity / SPEED_OF_LIGHT_M_S
+        return wavelength * (1.0 + instrument_beta) / (1.0 + solar_beta), velocity
     elif solar_doppler == "l2-los":
         velocity = float(los_relative_velocity_m_s)
     else:
@@ -407,6 +423,12 @@ def _aerosol_type_defaults(aerosol_type: str) -> dict[str, float]:
     )
 
 
+def _hg_phase_moments(g: float, order: int = AEROSOL_HG_MOMENT_ORDER) -> np.ndarray:
+    """Return Legendre coefficients for a Henyey-Greenstein phase function."""
+    ell = np.arange(int(order) + 1, dtype=float)
+    return (2.0 * ell + 1.0) * float(g) ** ell
+
+
 def _resolve_oco_l2fp_aerosol_file(path: Path | None) -> Path:
     if path is not None:
         return path
@@ -447,6 +469,7 @@ def _load_oco_l2fp_aerosol_property(
         or scattering.shape != wave_number.shape
         or moments.ndim != 3
         or moments.shape[0] != wave_number.size
+        or moments.shape[1] < 3
         or moments.shape[2] < 1
     ):
         raise ValueError(f"OCO L2FP aerosol group {group_name!r} has unexpected shapes")
@@ -454,7 +477,7 @@ def _load_oco_l2fp_aerosol_property(
         np.all(np.isfinite(wave_number))
         and np.all(np.isfinite(extinction))
         and np.all(np.isfinite(scattering))
-        and np.all(np.isfinite(moments[:, :3, 0]))
+        and np.all(np.isfinite(moments[:, :, 0]))
     ):
         raise ValueError(f"OCO L2FP aerosol group {group_name!r} contains non-finite data")
     if np.any(np.diff(wave_number) <= 0.0):
@@ -465,7 +488,7 @@ def _load_oco_l2fp_aerosol_property(
         wave_number_cm=wave_number,
         extinction_coefficient=extinction,
         scattering_coefficient=scattering,
-        phase_moments=moments[:, :3, 0],
+        phase_moments=moments[:, :, 0],
     )
 
 
@@ -484,7 +507,7 @@ def _interp_oco_l2fp_property(
     moments = np.column_stack(
         [
             np.interp(wave_number, source, property_table.phase_moments[:, moment])
-            for moment in range(3)
+            for moment in range(property_table.phase_moments.shape[1])
         ]
     )
     return extinction, scattering, moments
@@ -537,7 +560,7 @@ def _posterior_oco_l2fp_aerosol_inputs(
 
     extinction = np.zeros((wavelength.size, n_layers, len(active)), dtype=float)
     scattering = np.zeros_like(extinction)
-    moments = np.zeros((2, 3, len(active)), dtype=float)
+    endpoint_moment_list: list[tuple[int, np.ndarray]] = []
     total_ref_aod = 0.0
     if wavelength.size == 1:
         interp_fraction = np.zeros(wavelength.shape, dtype=float)
@@ -582,7 +605,15 @@ def _posterior_oco_l2fp_aerosol_inputs(
             extinction[:, :, out_index] = (qext / qext_ref)[:, np.newaxis] * tau_ref[np.newaxis, :]
             scattering[:, :, out_index] = (qsca / qext_ref)[:, np.newaxis] * tau_ref[np.newaxis, :]
             _, _, endpoint_moments = _interp_oco_l2fp_property(property_table, endpoint_wavelengths)
-            moments[:, :, out_index] = endpoint_moments
+            endpoint_moment_list.append((out_index, endpoint_moments))
+
+    if endpoint_moment_list:
+        n_moments = min(endpoint.shape[1] for _, endpoint in endpoint_moment_list)
+        moments = np.zeros((2, n_moments, len(active)), dtype=float)
+        for out_index, endpoint_moments in endpoint_moment_list:
+            moments[:, :, out_index] = endpoint_moments[:, :n_moments]
+    else:
+        moments = np.zeros((2, 3, len(active)), dtype=float)
 
     return AerosolInputs(
         extinction_tau=extinction,
@@ -691,16 +722,13 @@ def _posterior_aerosol_inputs(
 
     extinction = np.zeros((wavelength.size, n_layers, len(aerosol_types)), dtype=float)
     scattering = np.zeros_like(extinction)
-    moments = np.zeros((2, 3, len(aerosol_types)), dtype=float)
+    moments = np.zeros((2, AEROSOL_HG_MOMENT_ORDER + 1, len(aerosol_types)), dtype=float)
     for type_index, aerosol_type in enumerate(aerosol_types):
         defaults = _aerosol_type_defaults(aerosol_type)
         scale = (wavelength / AEROSOL_REFERENCE_WAVELENGTH_UM) ** (-defaults["angstrom"])
         extinction[:, :, type_index] = scale[:, np.newaxis] * tau_ref[np.newaxis, :, type_index]
         scattering[:, :, type_index] = extinction[:, :, type_index] * defaults["ssa"]
-        g = defaults["g"]
-        moments[:, 0, type_index] = 1.0
-        moments[:, 1, type_index] = 3.0 * g
-        moments[:, 2, type_index] = 5.0 * g * g
+        moments[:, :, type_index] = _hg_phase_moments(defaults["g"])
 
     return AerosolInputs(
         extinction_tau=extinction,
@@ -1634,6 +1662,157 @@ def _sample_continuum_level(values: np.ndarray) -> float:
     return float(np.nanmean(window))
 
 
+def _continuum_fit_mask(
+    values: np.ndarray,
+    *,
+    fraction: float,
+    min_points: int,
+) -> np.ndarray:
+    """Select high-signal detector colors for a continuum-only surface fit."""
+    radiance = np.asarray(values, dtype=float)
+    finite = np.isfinite(radiance)
+    mask = np.zeros(radiance.shape, dtype=bool)
+    finite_count = int(np.count_nonzero(finite))
+    if finite_count == 0:
+        return mask
+    n_keep = int(math.ceil(float(fraction) * finite_count))
+    n_keep = min(finite_count, max(int(min_points), n_keep))
+    finite_index = np.flatnonzero(finite)
+    ordered = finite_index[np.argsort(radiance[finite_index])]
+    mask[ordered[-n_keep:]] = True
+    return mask
+
+
+def _scale_brdf(
+    brdf: dict[str, np.ndarray] | None,
+    scale: np.ndarray | float,
+) -> dict[str, np.ndarray] | None:
+    if brdf is None:
+        return None
+    factor = np.asarray(scale, dtype=float)
+    if factor.ndim == 0:
+        return {
+            name: float(factor) * np.asarray(value, dtype=float) for name, value in brdf.items()
+        }
+    return {
+        name: factor.reshape((factor.size,) + (1,) * (np.asarray(value).ndim - 1))
+        * np.asarray(value, dtype=float)
+        for name, value in brdf.items()
+    }
+
+
+def _surface_brdf_tilt_axis(*, wavelength_um: np.ndarray, band: str) -> np.ndarray:
+    """Dimensionless in-band wavenumber axis for the BRDF weight slope."""
+    wavenumber = 1.0e4 / np.asarray(wavelength_um, dtype=float)
+    delta = wavenumber - 1.0e4 / BAND_REFERENCE_WAVELENGTH_UM[band]
+    scale = float(np.nanmax(np.abs(delta)))
+    if not np.isfinite(scale) or scale <= 0.0:
+        return np.zeros_like(delta, dtype=float)
+    return delta / scale
+
+
+def _solve_linearized_surface_brdf_scale(
+    *,
+    measured_radiance: np.ndarray,
+    base_radiance: np.ndarray,
+    probe_radiance: np.ndarray,
+    continuum_radiance: float,
+    continuum_mask: np.ndarray,
+    probe_scale: float,
+    scale_min: float,
+    scale_max: float,
+    prior_sigma: float,
+) -> SurfaceBrdfRetrieval:
+    mask = np.asarray(continuum_mask, dtype=bool)
+    n_points = int(np.count_nonzero(mask))
+    if n_points == 0:
+        return SurfaceBrdfRetrieval(1.0, 0.0, 0, math.nan, "no_continuum_points")
+
+    delta_scale = float(probe_scale) - 1.0
+    if not np.isfinite(delta_scale) or abs(delta_scale) < 1.0e-12:
+        return SurfaceBrdfRetrieval(1.0, 0.0, n_points, math.nan, "bad_probe_scale")
+
+    continuum = float(continuum_radiance)
+    if not np.isfinite(continuum) or continuum <= 0.0:
+        return SurfaceBrdfRetrieval(1.0, 0.0, n_points, math.nan, "bad_continuum")
+
+    jac = (np.asarray(probe_radiance, dtype=float) - np.asarray(base_radiance, dtype=float)) / (
+        delta_scale * continuum
+    )
+    residual = (
+        np.asarray(measured_radiance, dtype=float) - np.asarray(base_radiance, dtype=float)
+    ) / continuum
+    valid = mask & np.isfinite(jac) & np.isfinite(residual)
+    n_valid = int(np.count_nonzero(valid))
+    if n_valid == 0:
+        return SurfaceBrdfRetrieval(1.0, 0.0, 0, math.nan, "no_valid_continuum_points")
+
+    numerator = float(np.sum(jac[valid] * residual[valid]))
+    denominator = float(np.sum(jac[valid] * jac[valid]))
+    if prior_sigma > 0.0:
+        denominator += 1.0 / (float(prior_sigma) * float(prior_sigma))
+    if denominator <= 0.0 or not np.isfinite(denominator):
+        return SurfaceBrdfRetrieval(1.0, 0.0, n_valid, math.nan, "zero_surface_response")
+
+    scale = 1.0 + numerator / denominator
+    scale = float(np.clip(scale, float(scale_min), float(scale_max)))
+    linearized = np.asarray(base_radiance, dtype=float) + (
+        np.asarray(probe_radiance, dtype=float) - np.asarray(base_radiance, dtype=float)
+    ) * ((scale - 1.0) / delta_scale)
+    fit_residual = 100.0 * (linearized[valid] - np.asarray(measured_radiance)[valid]) / continuum
+    fit_rmse = float(np.sqrt(np.mean(fit_residual * fit_residual)))
+    return SurfaceBrdfRetrieval(scale, 0.0, n_valid, fit_rmse, "continuum_linearized")
+
+
+def _solve_linearized_surface_brdf_scale_and_tilt(
+    *,
+    measured_radiance: np.ndarray,
+    base_radiance: np.ndarray,
+    scale_probe_radiance: np.ndarray,
+    tilt_probe_radiance: np.ndarray,
+    continuum_radiance: float,
+    continuum_mask: np.ndarray,
+    probe_scale: float,
+    probe_tilt: float,
+    scale_min: float,
+    scale_max: float,
+    tilt_min: float,
+    tilt_max: float,
+) -> SurfaceBrdfRetrieval:
+    mask = np.asarray(continuum_mask, dtype=bool)
+    n_points = int(np.count_nonzero(mask))
+    if n_points == 0:
+        return SurfaceBrdfRetrieval(1.0, 0.0, 0, math.nan, "no_continuum_points")
+    continuum = float(continuum_radiance)
+    if not np.isfinite(continuum) or continuum <= 0.0:
+        return SurfaceBrdfRetrieval(1.0, 0.0, n_points, math.nan, "bad_continuum")
+    delta_scale = float(probe_scale) - 1.0
+    delta_tilt = float(probe_tilt)
+    if abs(delta_scale) < 1.0e-12 or abs(delta_tilt) < 1.0e-12:
+        return SurfaceBrdfRetrieval(1.0, 0.0, n_points, math.nan, "bad_probe")
+
+    base = np.asarray(base_radiance, dtype=float)
+    scale_jac = (np.asarray(scale_probe_radiance, dtype=float) - base) / (delta_scale * continuum)
+    tilt_jac = (np.asarray(tilt_probe_radiance, dtype=float) - base) / (delta_tilt * continuum)
+    residual = (np.asarray(measured_radiance, dtype=float) - base) / continuum
+    valid = mask & np.isfinite(scale_jac) & np.isfinite(tilt_jac) & np.isfinite(residual)
+    n_valid = int(np.count_nonzero(valid))
+    if n_valid < 2:
+        return SurfaceBrdfRetrieval(1.0, 0.0, n_valid, math.nan, "too_few_points")
+
+    design = np.column_stack((scale_jac[valid], tilt_jac[valid]))
+    try:
+        solution, *_ = np.linalg.lstsq(design, residual[valid], rcond=None)
+    except np.linalg.LinAlgError:
+        return SurfaceBrdfRetrieval(1.0, 0.0, n_valid, math.nan, "singular_surface_response")
+    scale = float(np.clip(1.0 + solution[0], scale_min, scale_max))
+    tilt = float(np.clip(solution[1], tilt_min, tilt_max))
+    linearized = base + (scale - 1.0) * continuum * scale_jac + tilt * continuum * tilt_jac
+    fit_residual = 100.0 * (linearized[valid] - np.asarray(measured_radiance)[valid]) / continuum
+    fit_rmse = float(np.sqrt(np.mean(fit_residual * fit_residual)))
+    return SurfaceBrdfRetrieval(scale, tilt, n_valid, fit_rmse, "continuum_linearized_slope")
+
+
 def _continuum_residual_stats(
     py_radiance: np.ndarray,
     measured_radiance: np.ndarray,
@@ -1806,15 +1985,79 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--surface-brdf-retrieval",
+        choices=("none", "continuum-linearized", "continuum-linearized-slope"),
+        default="continuum-linearized-slope",
+        help=(
+            "Continuum-constrained retrieval of a multiplicative scale on the "
+            "L2 land BRDF weight for each sounding and band. The default "
+            "'continuum-linearized-slope' also fits an in-band BRDF weight-slope "
+            "perturbation. Use 'none' for a strict fixed-L2-surface replay. "
+            "'continuum-linearized' fits high-signal continuum colors using a "
+            "finite-difference surface Jacobian around the L2 value."
+        ),
+    )
+    parser.add_argument(
+        "--surface-brdf-continuum-fraction",
+        type=float,
+        default=0.20,
+        help="Fraction of highest-radiance detector colors used for the surface BRDF fit.",
+    )
+    parser.add_argument(
+        "--surface-brdf-continuum-min-points",
+        type=int,
+        default=8,
+        help="Minimum number of detector colors used for the surface BRDF continuum fit.",
+    )
+    parser.add_argument(
+        "--surface-brdf-scale-min",
+        type=float,
+        default=0.5,
+        help="Lower bound for the retrieved multiplicative L2 BRDF weight scale.",
+    )
+    parser.add_argument(
+        "--surface-brdf-scale-max",
+        type=float,
+        default=1.5,
+        help="Upper bound for the retrieved multiplicative L2 BRDF weight scale.",
+    )
+    parser.add_argument(
+        "--surface-brdf-probe-step",
+        type=float,
+        default=0.02,
+        help="Finite-difference step for the linearized surface BRDF retrieval.",
+    )
+    parser.add_argument(
+        "--surface-brdf-prior-sigma",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional Gaussian prior sigma on the multiplicative BRDF scale. "
+            "The default 0 disables the prior."
+        ),
+    )
+    parser.add_argument(
+        "--surface-brdf-tilt-min",
+        type=float,
+        default=-0.25,
+        help="Lower bound for the BRDF weight-slope tilt parameter.",
+    )
+    parser.add_argument(
+        "--surface-brdf-tilt-max",
+        type=float,
+        default=0.25,
+        help="Upper bound for the BRDF weight-slope tilt parameter.",
+    )
+    parser.add_argument(
         "--aerosol-treatment",
         choices=("none", "l2-posterior-hg", "l2-posterior-gaussian-hg", "oco-l2fp"),
-        default="none",
+        default="l2-posterior-gaussian-hg",
         help=(
             "'none' uses gas plus Rayleigh scattering only. "
             "'l2-posterior-hg' inserts L2 posterior aerosol AOD using the "
             "official pressure subcolumns and simple HG optical defaults. "
-            "'l2-posterior-gaussian-hg' uses the L2 gaussian_log aerosol "
-            "parameters for the vertical profile. 'oco-l2fp' uses the "
+            "'l2-posterior-gaussian-hg' is the default and uses L2 gaussian_log "
+            "aerosol parameters for the vertical profile. 'oco-l2fp' uses the "
             "RtRetrievalFramework L2FP aerosol optical-property table."
         ),
     )
@@ -1859,7 +2102,8 @@ def main() -> None:
         default="l2-solar",
         help=(
             "Transform solar pseudo-transmittance lookup wavelengths with the OCO "
-            "solar relative velocity. 'l2-los' uses the line-of-sight gas velocity."
+            "solar relative velocity after undoing the instrument Doppler domain "
+            "shift. 'l2-los' is a diagnostic using only the line-of-sight gas velocity."
         ),
     )
     parser.add_argument(
@@ -1912,6 +2156,11 @@ def main() -> None:
         default=1,
         help=("Sign convention switch for the Rayleigh Q/U source."),
     )
+    parser.add_argument(
+        "--skip-plot",
+        action="store_true",
+        help="Write CSV outputs without generating the spectrum/residual figure.",
+    )
     args = parser.parse_args()
     if args.polarization_diffuse_azimuths <= 0:
         raise ValueError("--polarization-diffuse-azimuths must be positive")
@@ -1921,6 +2170,31 @@ def main() -> None:
         raise ValueError("--brdf-quadrature-streams must be a positive even integer")
     if not np.isfinite(args.ils_grid_spacing_cm_1) or args.ils_grid_spacing_cm_1 < 0.0:
         raise ValueError("--ils-grid-spacing-cm-1 must be nonnegative and finite")
+    if not (0.0 < args.surface_brdf_continuum_fraction <= 1.0):
+        raise ValueError("--surface-brdf-continuum-fraction must satisfy 0 < value <= 1")
+    if args.surface_brdf_continuum_min_points <= 0:
+        raise ValueError("--surface-brdf-continuum-min-points must be positive")
+    if (
+        not np.isfinite(args.surface_brdf_scale_min)
+        or not np.isfinite(args.surface_brdf_scale_max)
+        or args.surface_brdf_scale_min <= 0.0
+        or args.surface_brdf_scale_min >= args.surface_brdf_scale_max
+    ):
+        raise ValueError("--surface-brdf-scale-min/max must be finite positive bounds")
+    if not (args.surface_brdf_scale_min < 1.0 < args.surface_brdf_scale_max):
+        raise ValueError("--surface-brdf-scale bounds must contain 1")
+    if not np.isfinite(args.surface_brdf_probe_step) or args.surface_brdf_probe_step <= 0.0:
+        raise ValueError("--surface-brdf-probe-step must be positive and finite")
+    if 1.0 + args.surface_brdf_probe_step > args.surface_brdf_scale_max:
+        raise ValueError("--surface-brdf-probe-step must stay within --surface-brdf-scale-max")
+    if args.surface_brdf_prior_sigma < 0.0 or not np.isfinite(args.surface_brdf_prior_sigma):
+        raise ValueError("--surface-brdf-prior-sigma must be nonnegative and finite")
+    if (
+        not np.isfinite(args.surface_brdf_tilt_min)
+        or not np.isfinite(args.surface_brdf_tilt_max)
+        or args.surface_brdf_tilt_min >= args.surface_brdf_tilt_max
+    ):
+        raise ValueError("--surface-brdf-tilt-min/max must be finite ordered bounds")
     if args.eof_treatment == "oco3-static" and args.oco3_eof_file is None:
         raise FileNotFoundError(
             "--eof-treatment oco3-static requires --oco3-eof-file or RTRF_OCO3_EOF_FILE"
@@ -1998,6 +2272,7 @@ def main() -> None:
                     args.max_colors_per_band,
                 )
                 sample = sample_indexes[index, selected_colors].astype(int)
+                l1b_sample = sample - 1
                 band_index = BAND_INDEX[band]
                 solar_azimuth = float(
                     l1b["FootprintGeometry/footprint_solar_azimuth"][frame, footprint, band_index]
@@ -2034,10 +2309,10 @@ def main() -> None:
                 fo_direct_brf_factor = SOLAR_OBS_DIRECT_BRF_TO_OCO_BRF
                 center_wavelength = wavelength[index, selected_colors].astype(float)
                 delta = l1b["InstrumentHeader/ils_delta_lambda"][
-                    band_index, footprint, sample, :
+                    band_index, footprint, l1b_sample, :
                 ].astype(float)
                 response = l1b["InstrumentHeader/ils_relative_response"][
-                    band_index, footprint, sample, :
+                    band_index, footprint, l1b_sample, :
                 ].astype(float)
                 eval_wavelength, response_flat, detector_id = _build_ils_eval_grid(
                     center_wavelength_um=center_wavelength,
@@ -2236,7 +2511,7 @@ def main() -> None:
                     frame=frame,
                     footprint=footprint,
                     band=band,
-                    sample_indexes=sample,
+                    sample_indexes=l1b_sample,
                     surface_type=case.get("surface_type", ""),
                     treatment=args.eof_treatment,
                 )
@@ -2245,8 +2520,6 @@ def main() -> None:
                     if args.eof_treatment == "oco3-static"
                     else np.zeros(center_wavelength.shape, dtype=float)
                 )
-                py_detector = py_detector + fluorescence_energy + eof_energy
-                py_scalar_detector = py_detector - py_polarization_detector
                 continuum_signal = float(std[OCO_CONTINUUM_FIELD[band]][index])
                 if not np.isfinite(continuum_signal) or continuum_signal <= 0.0:
                     raise ValueError(f"bad OCO continuum signal for sounding {sid} band {band}")
@@ -2256,12 +2529,120 @@ def main() -> None:
                         BAND_REFERENCE_WAVELENGTH_UM[band],
                     )
                 )
+                fixed_detector_energy = fluorescence_energy + eof_energy
+                py_detector = py_detector + fixed_detector_energy
+                py_scalar_detector = py_detector - py_polarization_detector
+                obs_energy = _photon_to_energy_spectral_radiance(obs, center_wavelength)
+                surface_brdf_retrieval = SurfaceBrdfRetrieval(
+                    scale=1.0,
+                    tilt=0.0,
+                    n_points=0,
+                    fit_rmse_percent=math.nan,
+                    status="not_requested",
+                )
+                tilt_axis = _surface_brdf_tilt_axis(wavelength_um=eval_wavelength, band=band)
+
+                def _run_scaled_surface_detector(
+                    surface_scale: float,
+                    surface_tilt: float = 0.0,
+                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                    surface_factor = float(surface_scale) + float(surface_tilt) * tilt_axis
+                    if np.any(~np.isfinite(surface_factor)) or np.any(surface_factor <= 0.0):
+                        raise ValueError("surface BRDF scale/tilt produced non-positive weights")
+                    scaled_reflectance = surface_factor * reflectance
+                    scaled_run = _run_py2sess(
+                        wavelength_um=eval_wavelength,
+                        state=state,
+                        gas_tau=gas_tau,
+                        albedo=solver_albedo
+                        if brdf is not None
+                        else surface_factor * solver_albedo,
+                        diffuse_albedo=scaled_reflectance,
+                        brdf=_scale_brdf(brdf, surface_factor),
+                        angles=rt_angles,
+                        aerosol=aerosol,
+                        solar_reference_factor=solar_reference_factor,
+                        stokes_coefficients=stokes_coefficients,
+                        stokes_projection_mode=args.stokes_projection,
+                        polarization_correction=args.polarization_correction,
+                        polarization_sign=args.polarization_sign,
+                        polarization_diffuse_azimuths=args.polarization_diffuse_azimuths,
+                        stream_value=args.stream_value,
+                    )
+                    detector = _detector_average(
+                        scaled_run.radiance,
+                        detector_id=detector_id,
+                        response_flat=response_flat,
+                        n_detector=center_wavelength.size,
+                    )
+                    polarization_detector = _detector_average(
+                        scaled_run.polarization_correction,
+                        detector_id=detector_id,
+                        response_flat=response_flat,
+                        n_detector=center_wavelength.size,
+                    )
+                    detector = detector + fixed_detector_energy
+                    return detector, detector - polarization_detector, polarization_detector
+
+                if args.surface_brdf_retrieval in {
+                    "continuum-linearized",
+                    "continuum-linearized-slope",
+                }:
+                    probe_scale = 1.0 + args.surface_brdf_probe_step
+                    probe_detector, _, _ = _run_scaled_surface_detector(probe_scale)
+                    continuum_mask = _continuum_fit_mask(
+                        obs_energy,
+                        fraction=args.surface_brdf_continuum_fraction,
+                        min_points=args.surface_brdf_continuum_min_points,
+                    )
+                    if args.surface_brdf_retrieval == "continuum-linearized":
+                        surface_brdf_retrieval = _solve_linearized_surface_brdf_scale(
+                            measured_radiance=obs_energy,
+                            base_radiance=py_detector,
+                            probe_radiance=probe_detector,
+                            continuum_radiance=continuum_signal_energy,
+                            continuum_mask=continuum_mask,
+                            probe_scale=probe_scale,
+                            scale_min=args.surface_brdf_scale_min,
+                            scale_max=args.surface_brdf_scale_max,
+                            prior_sigma=args.surface_brdf_prior_sigma,
+                        )
+                    else:
+                        tilt_probe_detector, _, _ = _run_scaled_surface_detector(
+                            1.0,
+                            args.surface_brdf_probe_step,
+                        )
+                        surface_brdf_retrieval = _solve_linearized_surface_brdf_scale_and_tilt(
+                            measured_radiance=obs_energy,
+                            base_radiance=py_detector,
+                            scale_probe_radiance=probe_detector,
+                            tilt_probe_radiance=tilt_probe_detector,
+                            continuum_radiance=continuum_signal_energy,
+                            continuum_mask=continuum_mask,
+                            probe_scale=probe_scale,
+                            probe_tilt=args.surface_brdf_probe_step,
+                            scale_min=args.surface_brdf_scale_min,
+                            scale_max=args.surface_brdf_scale_max,
+                            tilt_min=args.surface_brdf_tilt_min,
+                            tilt_max=args.surface_brdf_tilt_max,
+                        )
+                    if surface_brdf_retrieval.status.startswith("continuum_linearized"):
+                        py_detector, py_scalar_detector, py_polarization_detector = (
+                            _run_scaled_surface_detector(
+                                surface_brdf_retrieval.scale,
+                                surface_brdf_retrieval.tilt,
+                            )
+                        )
+                final_surface_factor = (
+                    surface_brdf_retrieval.scale + surface_brdf_retrieval.tilt * tilt_axis
+                )
+                final_reflectance = final_surface_factor * reflectance
+
                 py_unit_continuum_signal = _sample_continuum_level(py_detector)
                 if not np.isfinite(py_unit_continuum_signal) or py_unit_continuum_signal <= 0.0:
                     raise ValueError(f"bad py2sess continuum signal for sounding {sid} band {band}")
                 py2sess_posthoc_scale = 1.0
                 py2sess_effective_fbeam = solar_irradiance_reference
-                obs_energy = _photon_to_energy_spectral_radiance(obs, center_wavelength)
                 py_energy = py_detector * py2sess_posthoc_scale
                 py_scalar_energy = py_scalar_detector * py2sess_posthoc_scale
                 py_polarization_energy = py_polarization_detector * py2sess_posthoc_scale
@@ -2301,9 +2682,26 @@ def main() -> None:
                         "surface_reflectance_model": args.surface_spectrum,
                         "surface_angular_model": args.surface_angular,
                         "surface_rpv_kernel": f"{rpv_kernel:.9g}",
-                        "surface_reflectance_used": f"{float(np.nanmedian(reflectance)):.9g}",
-                        "surface_reflectance_min": f"{float(np.nanmin(reflectance)):.9g}",
-                        "surface_reflectance_max": f"{float(np.nanmax(reflectance)):.9g}",
+                        "surface_reflectance_used": (
+                            f"{float(np.nanmedian(final_reflectance)):.9g}"
+                        ),
+                        "surface_reflectance_min": f"{float(np.nanmin(final_reflectance)):.9g}",
+                        "surface_reflectance_max": f"{float(np.nanmax(final_reflectance)):.9g}",
+                        "surface_brdf_retrieval": args.surface_brdf_retrieval,
+                        "surface_brdf_retrieval_status": surface_brdf_retrieval.status,
+                        "surface_brdf_weight_l2": f"{float(case[f'brdf_weight_{band}']):.9g}",
+                        "surface_brdf_weight_scale": f"{surface_brdf_retrieval.scale:.9g}",
+                        "surface_brdf_weight_tilt": f"{surface_brdf_retrieval.tilt:.9g}",
+                        "surface_brdf_weight_at_reference": (
+                            f"{float(case[f'brdf_weight_{band}']) * surface_brdf_retrieval.scale:.9g}"
+                        ),
+                        "surface_brdf_fit_points": surface_brdf_retrieval.n_points,
+                        "surface_brdf_fit_rmse_percent": (
+                            f"{surface_brdf_retrieval.fit_rmse_percent:.9g}"
+                        ),
+                        "surface_brdf_scale_bounds": (
+                            f"{args.surface_brdf_scale_min:.9g};{args.surface_brdf_scale_max:.9g}"
+                        ),
                         "stream_value": f"{args.stream_value:.9g}",
                         "brdf_quadrature_streams": args.brdf_quadrature_streams,
                         "absco_o2_scale": f"{o2_scale[band_index]:.9g}",
@@ -2396,6 +2794,8 @@ def main() -> None:
                                 if np.isfinite(solar_irradiance_reference)
                                 else "not_applied"
                             ),
+                            "surface_brdf_weight_scale": f"{surface_brdf_retrieval.scale:.9e}",
+                            "surface_brdf_weight_tilt": f"{surface_brdf_retrieval.tilt:.9e}",
                             "oco_continuum_signal_radiance_w_m2_sr_um": (
                                 f"{continuum_signal_energy:.9e}"
                             ),
@@ -2429,6 +2829,15 @@ def main() -> None:
             "surface_reflectance_used",
             "surface_reflectance_min",
             "surface_reflectance_max",
+            "surface_brdf_retrieval",
+            "surface_brdf_retrieval_status",
+            "surface_brdf_weight_l2",
+            "surface_brdf_weight_scale",
+            "surface_brdf_weight_tilt",
+            "surface_brdf_weight_at_reference",
+            "surface_brdf_fit_points",
+            "surface_brdf_fit_rmse_percent",
+            "surface_brdf_scale_bounds",
             "stream_value",
             "brdf_quadrature_streams",
             "absco_o2_scale",
@@ -2499,6 +2908,8 @@ def main() -> None:
             "py2sess_fluorescence_w_m2_sr_um",
             "py2sess_eof_correction_w_m2_sr_um",
             "solar_irradiance_reference_w_m2_um",
+            "surface_brdf_weight_scale",
+            "surface_brdf_weight_tilt",
             "oco_continuum_signal_radiance_w_m2_sr_um",
             "py2sess_unit_solver_signal",
             "py2sess_effective_fbeam_w_m2_um",
@@ -2507,10 +2918,12 @@ def main() -> None:
         ],
         spectrum_rows,
     )
-    _plot(plot_path, spectrum_rows)
+    if not args.skip_plot:
+        _plot(plot_path, spectrum_rows)
     print(f"summary={summary_path}")
     print(f"spectrum={spectrum_path}")
-    print(f"plot={plot_path}")
+    if not args.skip_plot:
+        print(f"plot={plot_path}")
 
 
 if __name__ == "__main__":

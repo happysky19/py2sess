@@ -461,6 +461,11 @@ def main() -> None:
     parser.add_argument("--snr-wco2-min", type=float, default=100.0)
     parser.add_argument("--snr-sco2-min", type=float, default=50.0)
     parser.add_argument("--aod-max", type=float, default=0.30)
+    parser.add_argument(
+        "--skip-plot",
+        action="store_true",
+        help="Write selected-case CSV files without generating the diagnostic figure.",
+    )
     args = parser.parse_args()
 
     l2std_path = args.data_dir / "oco3_L2StdSC_17767a_220624_B10313r_220919181911.h5"
@@ -485,7 +490,8 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     _write_selected_cases(args.output_dir / "selected_soundings.csv", selected, data)
     _write_selected_spectra(args.output_dir / "selected_l2dia_spectra.csv", selected, l2dia_path)
-    _plot_selected_spectra(args.output_dir / "selected_l2dia_spectra.png", selected, l2dia_path)
+    if not args.skip_plot:
+        _plot_selected_spectra(args.output_dir / "selected_l2dia_spectra.png", selected, l2dia_path)
 
     print(f"candidate_count={candidates.size}")
     print(f"selected_count={selected.size}")
