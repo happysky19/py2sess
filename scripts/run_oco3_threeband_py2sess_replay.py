@@ -5,10 +5,10 @@ By default, the driver uses official posterior state fields, OCO ABSCO tables,
 the OCO solar model, L1B ILS sampling, L2 posterior gaussian-log aerosol
 loading, and L1B instrument Stokes coefficients. It does not fit pressure,
 spectroscopy, wavelength, gas columns, or aerosol loading. It applies a
-continuum-constrained land BRDF weight and slope adjustment for each sounding
-and band; pass --surface-brdf-retrieval none for a strict fixed-L2-surface
-replay. OCO photon radiances and py2sess replay spectra are both reported as
-energy spectral radiance.
+continuum-constrained surface brightness adjustment for each sounding and band;
+pass --surface-brdf-retrieval none for a strict fixed-L2-surface replay. OCO
+photon radiances and py2sess replay spectra are both reported as energy
+spectral radiance.
 
 The default polarization treatment uses the OCO L1B normalized-radiance
 convention, L = I + (m12/m11) Q + (m13/m11) U. A raw detector projection,
@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 import csv
+from functools import lru_cache
 import math
 import os
 import tempfile
@@ -39,12 +40,13 @@ DEFAULT_DATA_DIR = ROOT / "outputs" / "oco3_joint_official_downloads" / "2022062
 DEFAULT_CASE_DIR = ROOT / "outputs" / "oco3_threeband_replay" / "20220624_17767a"
 DEFAULT_ABSCO_DIR = ROOT / "outputs" / "oco3_joint_official_downloads" / "absco_v52"
 DEFAULT_CO2_ABSCO = DEFAULT_ABSCO_DIR / "co2_v52.hdf"
-DEFAULT_O2_ABSCO = ROOT.parent / "bayesrt" / "data" / "external" / "absco" / "o2_v52.hdf"
-DEFAULT_H2O_ABSCO = ROOT.parent / "bayesrt" / "data" / "external" / "absco" / "h2o_v52.hdf"
+DEFAULT_O2_ABSCO = DEFAULT_ABSCO_DIR / "o2_v52.hdf"
+DEFAULT_H2O_ABSCO = DEFAULT_ABSCO_DIR / "h2o_v52.hdf"
 DEFAULT_OCO_SOLAR_MODEL = (
     ROOT / "outputs" / "oco3_joint_official_downloads" / "solar" / "l2_solar_model.h5"
 )
-DEFAULT_OCO3_EOF_FILE = Path("/tmp/RtRetrievalFramework/input/oco/input/l2_oco3_eof.h5")
+DEFAULT_RT_RETRIEVAL_SUPPORT_DIR = ROOT / "scripts" / "oco3_paper_support" / "rt_retrieval"
+DEFAULT_OCO3_EOF_FILE = DEFAULT_RT_RETRIEVAL_SUPPORT_DIR / "l2_oco3_eof.h5"
 
 BANDS = ("o2", "wco2", "sco2")
 BAND_LABELS = {"o2": "O2 A", "wco2": "weak CO2", "sco2": "strong CO2"}
@@ -56,10 +58,13 @@ OCO_CONTINUUM_FIELD = {
     "sco2": "L1bScSpectralParameters/rad_continuum_strong_co2",
 }
 RPV_KERNEL_NORMALIZATION = 20.0
+OCEAN_SURFACE_TYPE = "Coxmunk,Lambertian"
+OCO_COXMUNK_REFRACTIVE_INDEX = {"o2": 1.331, "wco2": 1.318, "sco2": 1.303}
 # solar_obs_brdf_from_kernels follows the local py2sess Fourier convention;
 # its direct_brf term is twice the OCO L2 BRDF reflectance kernel used here.
 SOLAR_OBS_DIRECT_BRF_TO_OCO_BRF = 0.5
-AEROSOL_REFERENCE_WAVELENGTH_UM = 0.76
+# RtRetrieval AerosolOptical normalizes aerosol extinction at reference_wn=1e4/0.755.
+AEROSOL_REFERENCE_WAVELENGTH_UM = 0.755
 AEROSOL_HG_MOMENT_ORDER = 80
 PLANCK_CONSTANT_J_S = 6.62607015e-34
 SPEED_OF_LIGHT_M_S = 299792458.0
@@ -86,6 +91,7 @@ OCO_L2FP_AEROSOL_PROPERTY_GROUPS = {
     "Water": "wc_008",
     "ST": "strat",
 }
+OCO_SCALAR_REPLAY_AEROSOL_TYPES = frozenset(("DU", "SS", "BC", "OC", "SO"))
 ABSCO_GAS_DATASET = {
     "o2": "Gas_07_Absorption",
     "co2": "Gas_02_Absorption",
@@ -95,6 +101,8 @@ O2_DRY_AIR_MOLE_FRACTION = 0.2095
 M_AIR = 28.9647e-3
 M_H2O = 18.01528e-3
 M2_TO_CM2 = 1.0e-4
+AVOGADRO_PER_MOL = 6.02214076e23
+STANDARD_GRAVITY_M_S2 = 9.80665
 
 
 @dataclass(frozen=True)
@@ -148,6 +156,7 @@ class AbscoTable:
         with h5py.File(self.path, "r") as handle:
             cube = handle[self.dataset][:, :, :, lo:hi]
 
+        wn_lo, wn_hi, wn_w = _linear_interp_indices(grid, wn)
         p_lo, p_hi, p_w = _bracket(self.pressure, p_layer)
         b_lo, b_hi, b_w = _bracket(
             self.broadener, np.clip(h2o_layer, self.broadener[0], self.broadener[-1])
@@ -178,12 +187,37 @@ class AbscoTable:
                         weight = float(pw * tw * bw)
                         if weight == 0.0:
                             continue
-                        out[:, layer] += weight * np.interp(
-                            wn,
-                            grid,
+                        out[:, layer] += weight * _interp_with_indices(
                             cube[int(p_choice), int(t_choice), int(b_choice)],
+                            wn_lo,
+                            wn_hi,
+                            wn_w,
                         )
         return out
+
+
+def _linear_interp_indices(
+    grid: np.ndarray,
+    values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    grid_arr = np.asarray(grid, dtype=float)
+    value_arr = np.asarray(values, dtype=float)
+    hi = np.searchsorted(grid_arr, value_arr, side="right")
+    hi = np.clip(hi, 1, grid_arr.size - 1)
+    lo = hi - 1
+    span = grid_arr[hi] - grid_arr[lo]
+    weight = np.where(span > 0.0, (value_arr - grid_arr[lo]) / span, 0.0)
+    return lo, hi, weight
+
+
+def _interp_with_indices(
+    values: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    weight: np.ndarray,
+) -> np.ndarray:
+    value_arr = np.asarray(values, dtype=float)
+    return value_arr[lo] * (1.0 - weight) + value_arr[hi] * weight
 
 
 def _bracket(grid: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -202,6 +236,7 @@ class AerosolInputs:
     extinction_tau: np.ndarray
     scattering_tau: np.ndarray
     moments: np.ndarray
+    polarization_moments: np.ndarray
     interp_fraction: np.ndarray
     total_aod_used: float
     phase_model: str
@@ -213,6 +248,7 @@ class OcoL2fpAerosolProperty:
     extinction_coefficient: np.ndarray
     scattering_coefficient: np.ndarray
     phase_moments: np.ndarray
+    polarization_moments: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -236,6 +272,7 @@ class SurfaceBrdfRetrieval:
     n_points: int
     fit_rmse_percent: float
     status: str
+    iterations: int = 1
 
 
 @dataclass(frozen=True)
@@ -244,6 +281,29 @@ class StokesProjection:
     analyzer_q: float
     analyzer_u: float
     description: str
+
+
+@dataclass(frozen=True)
+class Py2sessRtContext:
+    tau: np.ndarray
+    ssa: np.ndarray
+    g: np.ndarray
+    delta_m_truncation_factor: np.ndarray
+    fo_scatter_term: np.ndarray
+    rayleigh_scattering_tau: np.ndarray
+    aerosol_scattering_tau: np.ndarray
+    aerosol_polarization_moments: np.ndarray
+    aerosol_interp_fraction: np.ndarray
+    scattering_tau: np.ndarray
+    depol: np.ndarray
+    height_grid: np.ndarray
+    angles: np.ndarray
+    solar_reference_factor: np.ndarray | None
+    stokes_projection: StokesProjection
+    polarization_correction: str
+    polarization_sign: int
+    polarization_diffuse_azimuths: int
+    stream_value: float
 
 
 def _band_slices(counts: np.ndarray) -> dict[str, slice]:
@@ -261,6 +321,19 @@ def _load_selected_cases(case_dir: Path, count: int) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     return rows[:count]
+
+
+def _single_data_file(data_dir: Path, pattern: str) -> Path:
+    matches = sorted(data_dir.glob(pattern))
+    if len(matches) != 1:
+        preview = ", ".join(path.name for path in matches[:5])
+        if len(matches) > 5:
+            preview += ", ..."
+        raise FileNotFoundError(
+            f"expected exactly one {pattern!r} file in {data_dir}; "
+            f"found {len(matches)}" + (f": {preview}" if preview else "")
+        )
+    return matches[0]
 
 
 def _default_oco_solar_model() -> Path | None:
@@ -334,42 +407,127 @@ def _interp_profile_to_retrieval_levels(
     met_pressure_pa: np.ndarray,
     met_values: np.ndarray,
 ) -> np.ndarray:
-    xp = np.log(np.asarray(met_pressure_pa, dtype=float))
+    xp = np.asarray(met_pressure_pa, dtype=float)
     fp = np.asarray(met_values, dtype=float)
-    x = np.log(np.asarray(target_pressure_pa, dtype=float))
+    x = np.asarray(target_pressure_pa, dtype=float)
     return np.interp(x, xp, fp)
 
 
 def _specific_humidity_to_vmr(q: np.ndarray) -> np.ndarray:
     q_arr = np.clip(np.asarray(q, dtype=float), 0.0, 0.95)
-    mol_ratio = q_arr / np.maximum(1.0 - q_arr, 1.0e-12) * (M_AIR / M_H2O)
-    return mol_ratio / (1.0 + mol_ratio)
+    return q_arr / np.maximum(1.0 - q_arr, 1.0e-12) * (M_AIR / M_H2O)
 
 
-def _state_for_retrieval(std: h5py.File, index: int) -> dict[str, np.ndarray | float]:
+def _hydrostatic_column_cm2(
+    pressure_pa: np.ndarray,
+    layer_h2o_vmr: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pressure = np.asarray(pressure_pa, dtype=float)
+    h2o = np.asarray(layer_h2o_vmr, dtype=float)
+    if pressure.ndim != 1 or pressure.size < 2 or np.any(np.diff(pressure) <= 0.0):
+        raise ValueError("pressure levels must increase from top to bottom")
+    if h2o.shape != (pressure.size - 1,):
+        raise ValueError("layer H2O VMR must have one value per pressure layer")
+    if np.any(h2o < 0.0) or not np.all(np.isfinite(h2o)):
+        raise ValueError("layer H2O VMR must be finite and nonnegative")
+    delta_pressure = np.diff(pressure)
+    dry_air = (
+        delta_pressure
+        / STANDARD_GRAVITY_M_S2
+        * AVOGADRO_PER_MOL
+        / (M_AIR + h2o * M_H2O)
+        * M2_TO_CM2
+    )
+    h2o_column = dry_air * h2o
+    wet_air = dry_air + h2o_column
+    return dry_air, wet_air, h2o_column
+
+
+def _hydrostatic_heights_km(
+    *,
+    pressure_pa: np.ndarray,
+    temperature_k: np.ndarray,
+    h2o_vmr: np.ndarray,
+    surface_height_km: float,
+) -> np.ndarray:
+    pressure = np.asarray(pressure_pa, dtype=float)
+    temperature = np.asarray(temperature_k, dtype=float)
+    h2o = np.asarray(h2o_vmr, dtype=float)
+    if pressure.ndim != 1 or pressure.size < 2 or np.any(np.diff(pressure) <= 0.0):
+        raise ValueError("pressure levels must increase from top to bottom")
+    if temperature.shape != pressure.shape or h2o.shape != pressure.shape:
+        raise ValueError("temperature and H2O VMR must match pressure levels")
+    layer_temperature = 0.5 * (temperature[:-1] + temperature[1:])
+    layer_h2o = 0.5 * (h2o[:-1] + h2o[1:])
+    moist_molar_mass = (M_AIR + layer_h2o * M_H2O) / (1.0 + layer_h2o)
+    gas_constant = 8.31446261815324
+    thickness_km = (
+        gas_constant
+        * layer_temperature
+        / (moist_molar_mass * STANDARD_GRAVITY_M_S2)
+        * np.log(pressure[1:] / pressure[:-1])
+        / 1000.0
+    )
+    heights = np.empty_like(pressure, dtype=float)
+    heights[-1] = float(surface_height_km)
+    for layer in range(pressure.size - 2, -1, -1):
+        heights[layer] = heights[layer + 1] + thickness_km[layer]
+    return heights
+
+
+def _metadata_o2_vmr(std: h5py.File) -> float:
+    if "Metadata/VMRO2" not in std:
+        return O2_DRY_AIR_MOLE_FRACTION
+    value = float(np.asarray(std["Metadata/VMRO2"][...], dtype=float).reshape(-1)[0])
+    return value if np.isfinite(value) and value > 0.0 else O2_DRY_AIR_MOLE_FRACTION
+
+
+def _state_for_retrieval(
+    std: h5py.File,
+    index: int,
+    *,
+    layer_pressure_method: str = "geometric",
+    surface_pressure_offset_hpa: float = 0.0,
+    surface_pressure_column_mode: str = "fixed-columns",
+) -> dict[str, np.ndarray | float]:
     rr = std["RetrievalResults"]
     pressure_pa = rr["vector_pressure_levels"][index].astype(float)
-    heights_km = rr["vector_altitude_levels"][index].astype(float) / 1000.0
+    original_pressure_pa = pressure_pa.copy()
+    original_surface_pressure_pa = float(pressure_pa[-1])
+    if surface_pressure_offset_hpa != 0.0:
+        offset_pa = float(surface_pressure_offset_hpa) * 100.0
+        surface_pressure_pa = original_surface_pressure_pa + offset_pa
+        if surface_pressure_pa <= 0.0:
+            raise ValueError("diagnostic surface pressure offset produced non-positive pressure")
+        pressure_pa = pressure_pa * (surface_pressure_pa / original_surface_pressure_pa)
+    original_heights_km = rr["vector_altitude_levels"][index].astype(float) / 1000.0
+    heights_km = original_heights_km.copy()
     met_pressure = rr["vector_pressure_levels_met"][index].astype(float)
     met_temperature = rr["temperature_profile_met"][index].astype(float)
     met_q = rr["specific_humidity_profile_met"][index].astype(float)
+    temperature_offset = float(rr["temperature_offset_fph"][index])
+    h2o_scale_factor = float(rr["h2o_scale_factor"][index])
     temperature = _interp_profile_to_retrieval_levels(
         target_pressure_pa=pressure_pa,
         met_pressure_pa=met_pressure,
         met_values=met_temperature,
     )
-    temperature = temperature + float(rr["temperature_offset_fph"][index])
-    h2o_vmr = _specific_humidity_to_vmr(
-        _interp_profile_to_retrieval_levels(
-            target_pressure_pa=pressure_pa,
-            met_pressure_pa=met_pressure,
-            met_values=met_q,
-        )
+    temperature = temperature + temperature_offset
+    met_temperature = met_temperature + temperature_offset
+    met_h2o_vmr = _specific_humidity_to_vmr(met_q) * h2o_scale_factor
+    h2o_vmr = _interp_profile_to_retrieval_levels(
+        target_pressure_pa=pressure_pa,
+        met_pressure_pa=met_pressure,
+        met_values=met_h2o_vmr,
     )
-    h2o_vmr *= float(rr["h2o_scale_factor"][index])
     co2_vmr = rr["co2_profile"][index].astype(float)
 
-    layer_pressure = np.sqrt(pressure_pa[:-1] * pressure_pa[1:])
+    if layer_pressure_method == "geometric":
+        layer_pressure = np.sqrt(pressure_pa[:-1] * pressure_pa[1:])
+    elif layer_pressure_method == "arithmetic":
+        layer_pressure = 0.5 * (pressure_pa[:-1] + pressure_pa[1:])
+    else:
+        raise ValueError(f"unknown layer pressure method: {layer_pressure_method!r}")
     layer_temperature = 0.5 * (temperature[:-1] + temperature[1:])
     layer_h2o_vmr = 0.5 * (h2o_vmr[:-1] + h2o_vmr[1:])
     layer_co2_vmr = 0.5 * (co2_vmr[:-1] + co2_vmr[1:])
@@ -380,20 +538,192 @@ def _state_for_retrieval(std: h5py.File, index: int) -> dict[str, np.ndarray | f
         rr["retrieved_wet_air_column_layer_thickness"][index].astype(float) * M2_TO_CM2
     )
     h2o_col_cm2 = rr["retrieved_h2o_column_layer_thickness"][index].astype(float) * M2_TO_CM2
+    if surface_pressure_column_mode == "fixed-columns":
+        pass
+    elif surface_pressure_column_mode == "hydrostatic-columns":
+        dry_air_col_cm2, wet_air_col_cm2, h2o_col_cm2 = _hydrostatic_column_cm2(
+            pressure_pa,
+            layer_h2o_vmr,
+        )
+        heights_km = _hydrostatic_heights_km(
+            pressure_pa=pressure_pa,
+            temperature_k=temperature,
+            h2o_vmr=h2o_vmr,
+            surface_height_km=float(original_heights_km[-1]),
+        )
+    else:
+        raise ValueError(f"unknown surface pressure column mode: {surface_pressure_column_mode!r}")
+    o2_vmr = _metadata_o2_vmr(std)
 
     return {
         "pressure_pa": pressure_pa,
+        "original_pressure_pa": original_pressure_pa,
         "heights_km": heights_km,
+        "original_heights_km": original_heights_km,
         "temperature_k": temperature,
+        "h2o_vmr": h2o_vmr,
+        "co2_vmr": co2_vmr,
+        "met_pressure_pa": met_pressure,
+        "met_temperature_k": met_temperature,
+        "met_h2o_vmr": met_h2o_vmr,
         "layer_pressure_pa": layer_pressure,
         "layer_temperature_k": layer_temperature,
         "layer_h2o_vmr": layer_h2o_vmr,
-        "o2_col_cm2": dry_air_col_cm2 * O2_DRY_AIR_MOLE_FRACTION,
+        "o2_vmr": o2_vmr,
+        "o2_col_cm2": dry_air_col_cm2 * o2_vmr,
         "co2_col_cm2": dry_air_col_cm2 * layer_co2_vmr,
         "h2o_col_cm2": h2o_col_cm2,
+        "dry_air_col_cm2": dry_air_col_cm2,
         "wet_air_col_cm2": wet_air_col_cm2,
         "xco2_ppm": float(rr["xco2"][index]) * 1.0e6,
+        "surface_pressure_original_hpa": original_surface_pressure_pa / 100.0,
+        "surface_pressure_used_hpa": float(pressure_pa[-1]) / 100.0,
+        "surface_pressure_offset_hpa": float(surface_pressure_offset_hpa),
+        "surface_pressure_column_mode": surface_pressure_column_mode,
     }
+
+
+def _profile_at_pressure(
+    *,
+    pressure_levels_pa: np.ndarray,
+    values: np.ndarray,
+    target_pressure_pa: np.ndarray,
+) -> np.ndarray:
+    pressure = np.asarray(pressure_levels_pa, dtype=float)
+    profile = np.asarray(values, dtype=float)
+    target = np.asarray(target_pressure_pa, dtype=float)
+    return np.interp(target, pressure, profile)
+
+
+def _simpson_layer_pressure_grid(
+    pressure_levels_pa: np.ndarray,
+    *,
+    nsub: int = 10,
+) -> tuple[np.ndarray, np.ndarray]:
+    if nsub <= 0 or nsub % 2 != 0:
+        raise ValueError("Simpson sublayer count must be a positive even integer")
+    pressure = np.asarray(pressure_levels_pa, dtype=float)
+    if pressure.ndim != 1 or pressure.size < 2 or np.any(np.diff(pressure) <= 0.0):
+        raise ValueError("pressure levels must be one-dimensional and increasing")
+    n_layers = pressure.size - 1
+    fractions = np.linspace(0.0, 1.0, nsub + 1)
+    subpressure = (
+        pressure[:-1, np.newaxis] * (1.0 - fractions) + pressure[1:, np.newaxis] * fractions
+    )
+    spacing = (pressure[1:] - pressure[:-1])[:, np.newaxis] / float(nsub)
+    coeff = np.ones(nsub + 1, dtype=float)
+    coeff[1:-1:2] = 4.0
+    coeff[2:-1:2] = 2.0
+    weights = spacing * coeff[np.newaxis, :] / 3.0
+    if subpressure.shape != (n_layers, nsub + 1):
+        raise AssertionError("unexpected Simpson pressure grid shape")
+    return subpressure, weights
+
+
+def _simpson_layer_pressure_samples(
+    pressure_levels_pa: np.ndarray,
+    *,
+    important_pressure_levels_pa: np.ndarray | None = None,
+    nsub: int = 10,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if important_pressure_levels_pa is None:
+        subpressure, weights = _simpson_layer_pressure_grid(pressure_levels_pa, nsub=nsub)
+        layer_index = np.repeat(np.arange(subpressure.shape[0]), subpressure.shape[1])
+        return subpressure.reshape(-1), weights.reshape(-1), layer_index
+    if nsub <= 0 or nsub % 2 != 0:
+        raise ValueError("Simpson sublayer count must be a positive even integer")
+    pressure = np.asarray(pressure_levels_pa, dtype=float)
+    important = np.asarray(important_pressure_levels_pa, dtype=float)
+    if pressure.ndim != 1 or pressure.size < 2 or np.any(np.diff(pressure) <= 0.0):
+        raise ValueError("pressure levels must be one-dimensional and increasing")
+    if important.ndim != 1:
+        raise ValueError("important pressure levels must be one-dimensional")
+    n_regions = nsub // 2
+    points: list[float] = []
+    weights: list[float] = []
+    layers: list[int] = []
+    for layer, (p_top, p_bottom) in enumerate(zip(pressure[:-1], pressure[1:], strict=True)):
+        uniform = p_top + (p_bottom - p_top) * np.arange(1, n_regions + 1) / n_regions
+        inside = important[(important > p_top) & (important < p_bottom)]
+        endpoints = np.unique(np.concatenate(([p_top], uniform, inside, [p_bottom])))
+        endpoints.sort()
+        for left, right in zip(endpoints[:-1], endpoints[1:], strict=True):
+            delta = right - left
+            if delta <= 0.0:
+                continue
+            midpoint = 0.5 * (left + right)
+            points.extend((left, midpoint, right))
+            weights.extend((delta / 6.0, 4.0 * delta / 6.0, delta / 6.0))
+            layers.extend((layer, layer, layer))
+    return (
+        np.asarray(points, dtype=float),
+        np.asarray(weights, dtype=float),
+        np.asarray(layers, dtype=int),
+    )
+
+
+def _column_weighted_absco_cross_section_cm2(
+    *,
+    absco: AbscoTable,
+    wavelength_um: np.ndarray,
+    pressure_levels_pa: np.ndarray,
+    temperature_levels_k: np.ndarray,
+    h2o_vmr_levels: np.ndarray,
+    temperature_pressure_levels_pa: np.ndarray | None = None,
+    h2o_vmr_pressure_levels_pa: np.ndarray | None = None,
+    species_vmr_levels: np.ndarray | None = None,
+    species_vmr_pressure_levels_pa: np.ndarray | None = None,
+    important_pressure_levels_pa: np.ndarray | None = None,
+    nsub: int = 10,
+) -> np.ndarray:
+    pressure_flat, pressure_weights_flat, layer_index = _simpson_layer_pressure_samples(
+        pressure_levels_pa,
+        important_pressure_levels_pa=important_pressure_levels_pa,
+        nsub=nsub,
+    )
+    temperature_flat = _profile_at_pressure(
+        pressure_levels_pa=(
+            pressure_levels_pa
+            if temperature_pressure_levels_pa is None
+            else temperature_pressure_levels_pa
+        ),
+        values=temperature_levels_k,
+        target_pressure_pa=pressure_flat,
+    )
+    h2o_flat = _profile_at_pressure(
+        pressure_levels_pa=(
+            pressure_levels_pa if h2o_vmr_pressure_levels_pa is None else h2o_vmr_pressure_levels_pa
+        ),
+        values=h2o_vmr_levels,
+        target_pressure_pa=pressure_flat,
+    )
+    xsec_flat = absco.cross_section_cm2(
+        wavelength_um=wavelength_um,
+        pressure_pa=pressure_flat,
+        temperature_k=temperature_flat,
+        h2o_vmr=h2o_flat,
+    )
+    n_layers = np.asarray(pressure_levels_pa).size - 1
+    weights = pressure_weights_flat / (1.0 + h2o_flat * M_H2O / M_AIR)
+    if species_vmr_levels is not None:
+        species_flat = _profile_at_pressure(
+            pressure_levels_pa=(
+                pressure_levels_pa
+                if species_vmr_pressure_levels_pa is None
+                else species_vmr_pressure_levels_pa
+            ),
+            values=species_vmr_levels,
+            target_pressure_pa=pressure_flat,
+        )
+        weights = weights * np.clip(species_flat, 0.0, np.inf)
+    denom = np.bincount(layer_index, weights=weights, minlength=n_layers)
+    if np.any(denom <= 0.0):
+        raise ValueError("non-positive gas integration weights")
+    out = np.zeros((np.asarray(wavelength_um).size, n_layers), dtype=float)
+    weighted_xsec = xsec_flat * weights[np.newaxis, :]
+    for layer in range(n_layers):
+        out[:, layer] = np.sum(weighted_xsec[:, layer_index == layer], axis=1) / denom[layer]
+    return out
 
 
 def _decode_h5_strings(values: np.ndarray) -> list[str]:
@@ -410,6 +740,7 @@ def _empty_aerosol_inputs(wavelength_um: np.ndarray, n_layers: int) -> AerosolIn
         extinction_tau=np.zeros((wavelength_um.size, n_layers, 0), dtype=float),
         scattering_tau=np.zeros((wavelength_um.size, n_layers, 0), dtype=float),
         moments=np.zeros((2, 3, 0), dtype=float),
+        polarization_moments=np.zeros((2, 3, 0), dtype=float),
         interp_fraction=np.zeros(wavelength_um.shape, dtype=float),
         total_aod_used=0.0,
         phase_model="none",
@@ -421,6 +752,36 @@ def _aerosol_type_defaults(aerosol_type: str) -> dict[str, float]:
         aerosol_type,
         {"ssa": 0.94, "g": 0.70, "angstrom": 1.0},
     )
+
+
+def _parse_aerosol_type_filter(value: str | None) -> frozenset[str] | None:
+    if value is None or not value.strip():
+        return None
+    parsed = frozenset(part.strip() for part in value.split(",") if part.strip())
+    return parsed or None
+
+
+def _default_aerosol_type_filter(kind: str) -> frozenset[str] | None:
+    if kind == "tropospheric":
+        return OCO_SCALAR_REPLAY_AEROSOL_TYPES
+    if kind == "all":
+        return None
+    raise ValueError(f"unknown aerosol type set: {kind!r}")
+
+
+def _validate_aerosol_type_filter(
+    aerosol_types: list[str],
+    aerosol_type_filter: frozenset[str] | None,
+) -> None:
+    if aerosol_type_filter is None:
+        return
+    available = set(aerosol_types)
+    unknown = sorted(aerosol_type_filter - available)
+    if unknown:
+        raise ValueError(
+            "unknown aerosol type(s) in --diagnostic-aerosol-types: "
+            f"{', '.join(unknown)}; available types are: {', '.join(sorted(available))}"
+        )
 
 
 def _hg_phase_moments(g: float, order: int = AEROSOL_HG_MOMENT_ORDER) -> np.ndarray:
@@ -489,13 +850,40 @@ def _load_oco_l2fp_aerosol_property(
         extinction_coefficient=extinction,
         scattering_coefficient=scattering,
         phase_moments=moments[:, :, 0],
+        polarization_moments=(
+            moments[:, :, 4] if moments.shape[2] > 4 else np.zeros_like(moments[:, :, 0])
+        ),
     )
+
+
+@lru_cache(maxsize=None)
+def _load_oco_l2fp_aerosol_property_file(
+    property_file: str,
+    aerosol_type: str,
+) -> OcoL2fpAerosolProperty:
+    with h5py.File(property_file, "r") as handle:
+        return _load_oco_l2fp_aerosol_property(handle, aerosol_type)
+
+
+def _interp_oco_l2fp_extinction_scattering(
+    property_table: OcoL2fpAerosolProperty,
+    wavelength_um: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    wave_number = 1.0e4 / np.asarray(wavelength_um, dtype=float)
+    source = property_table.wave_number_cm
+    if wave_number.min() < source[0] or wave_number.max() > source[-1]:
+        raise ValueError(
+            "OCO L2FP aerosol property table does not cover requested wavelength range"
+        )
+    extinction = np.interp(wave_number, source, property_table.extinction_coefficient)
+    scattering = np.interp(wave_number, source, property_table.scattering_coefficient)
+    return extinction, scattering
 
 
 def _interp_oco_l2fp_property(
     property_table: OcoL2fpAerosolProperty,
     wavelength_um: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     wave_number = 1.0e4 / np.asarray(wavelength_um, dtype=float)
     source = property_table.wave_number_cm
     if wave_number.min() < source[0] or wave_number.max() > source[-1]:
@@ -510,7 +898,29 @@ def _interp_oco_l2fp_property(
             for moment in range(property_table.phase_moments.shape[1])
         ]
     )
-    return extinction, scattering, moments
+    polarization_moments = np.column_stack(
+        [
+            np.interp(wave_number, source, property_table.polarization_moments[:, moment])
+            for moment in range(property_table.polarization_moments.shape[1])
+        ]
+    )
+    return extinction, scattering, moments, polarization_moments
+
+
+def _stack_oco_l2fp_endpoint_moments(
+    endpoint_moment_list: list[tuple[int, np.ndarray]],
+    n_active: int,
+) -> np.ndarray:
+    if not endpoint_moment_list:
+        return np.zeros((2, 3, n_active), dtype=float)
+    # RtRetrieval keeps the longest requested moment table and pads shorter
+    # aerosol tables with zeros; truncating to the shortest table suppresses
+    # forward-scattering aerosols such as sea salt.
+    n_moments = max(endpoint.shape[1] for _, endpoint in endpoint_moment_list)
+    moments = np.zeros((2, n_moments, n_active), dtype=float)
+    for out_index, endpoint_moments in endpoint_moment_list:
+        moments[:, : endpoint_moments.shape[1], out_index] = endpoint_moments
+    return moments
 
 
 def _aerosol_profile_tau_from_gaussian(
@@ -541,9 +951,12 @@ def _posterior_oco_l2fp_aerosol_inputs(
     index: int,
     state: dict[str, np.ndarray | float],
     wavelength_um: np.ndarray,
+    aerosol_type_filter: frozenset[str] | None,
+    aerosol_scale: float,
 ) -> AerosolInputs:
     wavelength = np.asarray(wavelength_um, dtype=float)
     aerosol_types = _decode_h5_strings(std["Metadata/AllAerosolTypes"][...])
+    _validate_aerosol_type_filter(aerosol_types, aerosol_type_filter)
     aerosol_model = _decode_h5_strings(std["AerosolResults/aerosol_model"][index])
     aerosol_param = std["AerosolResults/aerosol_param"][index].astype(float)
     aerosol_retrieved = std["AerosolResults/aerosol_type_retrieved"][index].astype(bool)
@@ -553,7 +966,9 @@ def _posterior_oco_l2fp_aerosol_inputs(
     active = [
         type_index
         for type_index, retrieved in enumerate(aerosol_retrieved)
-        if retrieved and aerosol_model[type_index].strip()
+        if retrieved
+        and aerosol_model[type_index].strip()
+        and (aerosol_type_filter is None or aerosol_types[type_index] in aerosol_type_filter)
     ]
     if not active:
         return _empty_aerosol_inputs(wavelength, n_layers)
@@ -561,6 +976,7 @@ def _posterior_oco_l2fp_aerosol_inputs(
     extinction = np.zeros((wavelength.size, n_layers, len(active)), dtype=float)
     scattering = np.zeros_like(extinction)
     endpoint_moment_list: list[tuple[int, np.ndarray]] = []
+    endpoint_polarization_moment_list: list[tuple[int, np.ndarray]] = []
     total_ref_aod = 0.0
     if wavelength.size == 1:
         interp_fraction = np.zeros(wavelength.shape, dtype=float)
@@ -572,53 +988,55 @@ def _posterior_oco_l2fp_aerosol_inputs(
         )
         endpoint_wavelengths = np.array([wavelength[0], wavelength[-1]], dtype=float)
 
-    with h5py.File(property_file, "r") as prop_handle:
-        for out_index, type_index in enumerate(active):
-            aerosol_type = aerosol_types[type_index]
-            model = aerosol_model[type_index].strip()
-            if model != "gaussian_log":
-                raise ValueError(
-                    "OCO L2FP aerosol treatment currently supports gaussian_log only; "
-                    f"{aerosol_type} uses {model!r}"
-                )
-            log_aod, center_ratio, sigma_ratio = aerosol_param[type_index]
-            if not np.all(np.isfinite((log_aod, center_ratio, sigma_ratio))):
-                continue
-            tau_ref = _aerosol_profile_tau_from_gaussian(
-                pressure_levels_pa=pressure_levels,
-                log_aod=float(log_aod),
-                center_pressure_ratio=float(center_ratio),
-                sigma_pressure_ratio=float(sigma_ratio),
+    property_file_key = str(property_file)
+    for out_index, type_index in enumerate(active):
+        aerosol_type = aerosol_types[type_index]
+        model = aerosol_model[type_index].strip()
+        if model != "gaussian_log":
+            raise ValueError(
+                "OCO L2FP aerosol treatment currently supports gaussian_log only; "
+                f"{aerosol_type} uses {model!r}"
             )
-            total_ref_aod += float(np.sum(tau_ref))
-            property_table = _load_oco_l2fp_aerosol_property(prop_handle, aerosol_type)
-            qext, qsca, _ = _interp_oco_l2fp_property(property_table, wavelength)
-            qext_ref = float(
-                np.interp(
-                    1.0e4 / AEROSOL_REFERENCE_WAVELENGTH_UM,
-                    property_table.wave_number_cm,
-                    property_table.extinction_coefficient,
-                )
+        log_aod, center_ratio, sigma_ratio = aerosol_param[type_index]
+        if not np.all(np.isfinite((log_aod, center_ratio, sigma_ratio))):
+            continue
+        tau_ref = _aerosol_profile_tau_from_gaussian(
+            pressure_levels_pa=pressure_levels,
+            log_aod=float(log_aod),
+            center_pressure_ratio=float(center_ratio),
+            sigma_pressure_ratio=float(sigma_ratio),
+        ) * float(aerosol_scale)
+        total_ref_aod += float(np.sum(tau_ref))
+        property_table = _load_oco_l2fp_aerosol_property_file(property_file_key, aerosol_type)
+        qext, qsca = _interp_oco_l2fp_extinction_scattering(property_table, wavelength)
+        qext_ref = float(
+            np.interp(
+                1.0e4 / AEROSOL_REFERENCE_WAVELENGTH_UM,
+                property_table.wave_number_cm,
+                property_table.extinction_coefficient,
             )
-            if qext_ref <= 0.0:
-                raise ValueError(f"OCO L2FP aerosol property {aerosol_type} has bad reference Qext")
-            extinction[:, :, out_index] = (qext / qext_ref)[:, np.newaxis] * tau_ref[np.newaxis, :]
-            scattering[:, :, out_index] = (qsca / qext_ref)[:, np.newaxis] * tau_ref[np.newaxis, :]
-            _, _, endpoint_moments = _interp_oco_l2fp_property(property_table, endpoint_wavelengths)
-            endpoint_moment_list.append((out_index, endpoint_moments))
+        )
+        if qext_ref <= 0.0:
+            raise ValueError(f"OCO L2FP aerosol property {aerosol_type} has bad reference Qext")
+        extinction[:, :, out_index] = (qext / qext_ref)[:, np.newaxis] * tau_ref[np.newaxis, :]
+        scattering[:, :, out_index] = (qsca / qext_ref)[:, np.newaxis] * tau_ref[np.newaxis, :]
+        _, _, endpoint_moments, endpoint_polarization_moments = _interp_oco_l2fp_property(
+            property_table, endpoint_wavelengths
+        )
+        endpoint_moment_list.append((out_index, endpoint_moments))
+        endpoint_polarization_moment_list.append((out_index, endpoint_polarization_moments))
 
-    if endpoint_moment_list:
-        n_moments = min(endpoint.shape[1] for _, endpoint in endpoint_moment_list)
-        moments = np.zeros((2, n_moments, len(active)), dtype=float)
-        for out_index, endpoint_moments in endpoint_moment_list:
-            moments[:, :, out_index] = endpoint_moments[:, :n_moments]
-    else:
-        moments = np.zeros((2, 3, len(active)), dtype=float)
+    moments = _stack_oco_l2fp_endpoint_moments(endpoint_moment_list, len(active))
+    polarization_moments = _stack_oco_l2fp_endpoint_moments(
+        endpoint_polarization_moment_list,
+        len(active),
+    )
 
     return AerosolInputs(
         extinction_tau=extinction,
         scattering_tau=scattering,
         moments=moments,
+        polarization_moments=polarization_moments,
         interp_fraction=interp_fraction,
         total_aod_used=total_ref_aod,
         phase_model=f"OCO L2FP aerosol properties from {property_file.name}",
@@ -633,6 +1051,8 @@ def _posterior_aerosol_inputs(
     state: dict[str, np.ndarray | float],
     wavelength_um: np.ndarray,
     treatment: str,
+    aerosol_type_filter: frozenset[str] | None,
+    aerosol_scale: float,
 ) -> AerosolInputs:
     wavelength = np.asarray(wavelength_um, dtype=float)
     n_layers = np.asarray(state["layer_pressure_pa"], dtype=float).size
@@ -651,11 +1071,14 @@ def _posterior_aerosol_inputs(
             index=index,
             state=state,
             wavelength_um=wavelength,
+            aerosol_type_filter=aerosol_type_filter,
+            aerosol_scale=aerosol_scale,
         )
     if treatment not in {"l2-posterior-hg", "l2-posterior-gaussian-hg"}:
         raise ValueError(f"unknown aerosol treatment: {treatment!r}")
 
     aerosol_types = _decode_h5_strings(std["Metadata/AllAerosolTypes"][...])
+    _validate_aerosol_type_filter(aerosol_types, aerosol_type_filter)
     aod = std["AerosolResults/aerosol_aod"][index].astype(float)
     if aod.shape[0] != len(aerosol_types) or aod.shape[1] < 4:
         raise ValueError("unexpected L2 aerosol_aod shape")
@@ -675,6 +1098,11 @@ def _posterior_aerosol_inputs(
         all_positive = layer_air > 0.0
         for type_index in range(len(aerosol_types)):
             if not aerosol_retrieved[type_index]:
+                continue
+            if (
+                aerosol_type_filter is not None
+                and aerosol_types[type_index] not in aerosol_type_filter
+            ):
                 continue
             subcolumn_sum = 0.0
             for sub_index, mask in enumerate(subcolumn_masks, start=1):
@@ -701,6 +1129,11 @@ def _posterior_aerosol_inputs(
         for type_index, model in enumerate(aerosol_model):
             if not aerosol_retrieved[type_index]:
                 continue
+            if (
+                aerosol_type_filter is not None
+                and aerosol_types[type_index] not in aerosol_type_filter
+            ):
+                continue
             if model.strip() != "gaussian_log":
                 raise ValueError(
                     f"aerosol treatment {treatment!r} only supports gaussian_log; "
@@ -720,9 +1153,12 @@ def _posterior_aerosol_inputs(
             tau_ref[:, type_index] = total_aod * weights / total_weight
         phase_model = "L2 posterior Gaussian-log aerosol profile, HG type defaults"
 
+    tau_ref *= float(aerosol_scale)
+
     extinction = np.zeros((wavelength.size, n_layers, len(aerosol_types)), dtype=float)
     scattering = np.zeros_like(extinction)
     moments = np.zeros((2, AEROSOL_HG_MOMENT_ORDER + 1, len(aerosol_types)), dtype=float)
+    polarization_moments = np.zeros_like(moments)
     for type_index, aerosol_type in enumerate(aerosol_types):
         defaults = _aerosol_type_defaults(aerosol_type)
         scale = (wavelength / AEROSOL_REFERENCE_WAVELENGTH_UM) ** (-defaults["angstrom"])
@@ -734,6 +1170,7 @@ def _posterior_aerosol_inputs(
         extinction_tau=extinction,
         scattering_tau=scattering,
         moments=moments,
+        polarization_moments=polarization_moments,
         interp_fraction=np.zeros(wavelength.shape, dtype=float),
         total_aod_used=float(np.sum(tau_ref)),
         phase_model=phase_model,
@@ -753,10 +1190,23 @@ def _band_l1b_eof_name(band: str) -> str:
 
 
 def _attach_l2_brdf_parameters(case: dict[str, str], std: h5py.File, index: int) -> dict[str, str]:
-    """Add OCO land-BRDF kernel parameters missing from older selected-case CSVs."""
+    """Add OCO surface parameters missing from older selected-case CSVs."""
     out = dict(case)
+    out.setdefault("wind_speed", f"{float(std['RetrievalResults/wind_speed'][index]):.12g}")
+    out.setdefault(
+        "wind_speed_apriori",
+        f"{float(std['RetrievalResults/wind_speed_apriori'][index]):.12g}",
+    )
     for band in BANDS:
         l2_name = _band_l2_brdf_name(band)
+        out.setdefault(
+            f"albedo_{band}",
+            f"{float(std[f'AlbedoResults/albedo_{l2_name}_fph'][index]):.12g}",
+        )
+        out.setdefault(
+            f"albedo_slope_{band}",
+            f"{float(std[f'AlbedoResults/albedo_slope_{l2_name}'][index]):.12g}",
+        )
         fields = {
             "weight_slope": f"BRDFResults/brdf_weight_slope_{l2_name}",
             "weight_quadratic": f"BRDFResults/brdf_weight_quadratic_{l2_name}",
@@ -924,12 +1374,18 @@ def _detector_average(
     response_flat: np.ndarray,
     n_detector: int,
 ) -> np.ndarray:
-    detector_values = np.full(n_detector, np.nan, dtype=float)
-    for det in range(n_detector):
-        det_mask = detector_id == det
-        weights = response_flat[det_mask]
-        weight_sum = np.sum(weights)
-        detector_values[det] = np.sum(values[det_mask] * weights) / weight_sum
+    values_arr = np.asarray(values, dtype=float)
+    detector = np.asarray(detector_id, dtype=int)
+    weights = np.asarray(response_flat, dtype=float)
+    if values_arr.shape != detector.shape or values_arr.shape != weights.shape:
+        raise ValueError("values, detector_id, and response_flat must have the same shape")
+    if np.any(detector < 0) or np.any(detector >= int(n_detector)):
+        raise ValueError("detector_id contains values outside n_detector")
+
+    weight_sum = np.bincount(detector, weights=weights, minlength=int(n_detector))
+    weighted_sum = np.bincount(detector, weights=values_arr * weights, minlength=int(n_detector))
+    detector_values = np.full(int(n_detector), np.nan, dtype=float)
+    np.divide(weighted_sum, weight_sum, out=detector_values, where=weight_sum > 0.0)
     return detector_values
 
 
@@ -969,6 +1425,39 @@ def _land_surface_spectrum(
     else:
         raise ValueError(f"unknown surface_spectrum={surface_spectrum!r}")
     return reflectance
+
+
+def _is_ocean_surface(case: dict[str, str]) -> bool:
+    return case.get("surface_type", "") == OCEAN_SURFACE_TYPE
+
+
+def _ocean_lambertian_spectrum(
+    *,
+    case: dict[str, str],
+    band: str,
+    wavelength_um: np.ndarray,
+    surface_spectrum: str,
+) -> np.ndarray:
+    base = float(case[f"albedo_{band}"])
+    if not np.isfinite(base) or base < 0.0:
+        raise ValueError(f"selected ocean case does not provide a valid albedo for {band}")
+    wavelength = np.asarray(wavelength_um, dtype=float)
+    if surface_spectrum == "constant":
+        albedo = np.full(wavelength.shape, base, dtype=float)
+    elif surface_spectrum in {"l2-linear", "l2-polynomial"}:
+        slope = float(case[f"albedo_slope_{band}"])
+        if not np.isfinite(slope):
+            raise ValueError(f"L2 ocean albedo slope is not finite for {band}")
+        reference_wn = 1.0e4 / BAND_REFERENCE_WAVELENGTH_UM[band]
+        albedo = base + slope * (1.0e4 / wavelength - reference_wn)
+    else:
+        raise ValueError(f"unknown surface_spectrum={surface_spectrum!r}")
+    if not np.all(np.isfinite(albedo)) or np.any(albedo < 0.0):
+        raise ValueError(
+            f"computed negative ocean Lambertian albedo for {band}; "
+            f"min={np.nanmin(albedo):.6g}, max={np.nanmax(albedo):.6g}"
+        )
+    return albedo
 
 
 def _land_surface_reflectance(
@@ -1098,6 +1587,119 @@ def _oco_rpv_brdf(
     return brdf, direct_brf[:, 0]
 
 
+def _oco_coxmunk_lambertian_brdf(
+    *,
+    case: dict[str, str],
+    band: str,
+    wavelength_um: np.ndarray,
+    surface_spectrum: str,
+    angles: np.ndarray,
+    stream_value: float,
+    brdf_quadrature_streams: int,
+    stokes_projection: StokesProjection,
+    coxmunk_stokes_scope: str,
+    fo_direct_brf_factor: float = 1.0,
+) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, float]]:
+    from py2sess.optical.brdf_solar_obs import (
+        COXMUNK_IDX,
+        LAMBERTIAN_IDX,
+        coxmunk_giss_stokes_direct_kernel,
+        solar_obs_brdf_from_kernels,
+    )
+
+    wind_speed = float(case["wind_speed"])
+    if not np.isfinite(wind_speed) or wind_speed < 0.0:
+        raise ValueError(f"invalid Cox-Munk wind speed for {band}: {wind_speed}")
+    refractive_index = OCO_COXMUNK_REFRACTIVE_INDEX[band]
+    lambertian = _ocean_lambertian_spectrum(
+        case=case,
+        band=band,
+        wavelength_um=wavelength_um,
+        surface_spectrum=surface_spectrum,
+    )
+    common = {
+        "user_obsgeoms": np.asarray(angles, dtype=float).reshape(1, 3),
+        "stream_value": stream_value,
+        "n_geoms": 1,
+    }
+    coxmunk = solar_obs_brdf_from_kernels(
+        kernel_specs=[
+            {
+                "which_brdf": COXMUNK_IDX,
+                "factor": 1.0,
+                "wind_speed": wind_speed,
+                "refractive_index": refractive_index,
+                "nstreams_brdf": brdf_quadrature_streams,
+            }
+        ],
+        **common,
+    )
+    lambert = solar_obs_brdf_from_kernels(
+        kernel_specs=[
+            {
+                "which_brdf": LAMBERTIAN_IDX,
+                "factor": 1.0,
+                "nstreams_brdf": brdf_quadrature_streams,
+            }
+        ],
+        **common,
+    )
+    coxmunk_stokes = coxmunk_giss_stokes_direct_kernel(
+        sza_deg=float(angles[0]),
+        vza_deg=float(angles[1]),
+        relative_azimuth_deg=float(angles[2]),
+        wind_speed=wind_speed,
+        refractive_index=refractive_index,
+    )
+    scalar_direct_brf = float(coxmunk.direct_brf[0])
+    scalar_factor = float(stokes_projection.scalar_factor)
+    if abs(scalar_factor) <= 1.0e-12:
+        raise ValueError("Stokes scalar factor is too small for Cox-Munk projection")
+    analyzer_q = float(stokes_projection.analyzer_q) / scalar_factor
+    analyzer_u = float(stokes_projection.analyzer_u) / scalar_factor
+    projected_direct_brf = float(
+        coxmunk_stokes[0] + analyzer_q * coxmunk_stokes[1] + analyzer_u * coxmunk_stokes[2]
+    )
+    coxmunk_scale = 1.0
+    if scalar_direct_brf > 1.0e-14 and projected_direct_brf > 0.0:
+        coxmunk_scale = projected_direct_brf / scalar_direct_brf
+    if coxmunk_stokes_scope == "all":
+        coxmunk_direct_scale = coxmunk_scale
+        coxmunk_fourier_scale = coxmunk_scale
+    elif coxmunk_stokes_scope == "direct":
+        coxmunk_direct_scale = coxmunk_scale
+        coxmunk_fourier_scale = 1.0
+    elif coxmunk_stokes_scope == "none":
+        coxmunk_direct_scale = 1.0
+        coxmunk_fourier_scale = 1.0
+    else:
+        raise ValueError(f"unknown Cox-Munk Stokes scope: {coxmunk_stokes_scope!r}")
+
+    direct_brf = coxmunk_direct_scale * coxmunk.direct_brf[np.newaxis, :] + (
+        lambertian[:, np.newaxis] * lambert.direct_brf[np.newaxis, :]
+    )
+    brdf = {
+        "brdf_f_0": coxmunk_fourier_scale * coxmunk.brdf_f_0[np.newaxis, :, :]
+        + lambertian[:, np.newaxis, np.newaxis] * lambert.brdf_f_0[np.newaxis, :, :],
+        "brdf_f": coxmunk_fourier_scale * coxmunk.brdf_f[np.newaxis, :]
+        + lambertian[:, np.newaxis] * lambert.brdf_f[np.newaxis, :],
+        "ubrdf_f": coxmunk_fourier_scale * coxmunk.ubrdf_f[np.newaxis, :, :]
+        + lambertian[:, np.newaxis, np.newaxis] * lambert.ubrdf_f[np.newaxis, :, :],
+        "direct_brf": float(fo_direct_brf_factor) * direct_brf,
+    }
+    metadata = {
+        "wind_speed": wind_speed,
+        "refractive_index": refractive_index,
+        "lambertian_albedo_reference": float(case[f"albedo_{band}"]),
+        "coxmunk_direct_brf": scalar_direct_brf,
+        "coxmunk_stokes_i": float(coxmunk_stokes[0]),
+        "coxmunk_stokes_scale": float(coxmunk_scale),
+        "coxmunk_direct_scale": float(coxmunk_direct_scale),
+        "coxmunk_fourier_scale": float(coxmunk_fourier_scale),
+    }
+    return brdf, direct_brf[:, 0], metadata
+
+
 def _ils_integration_weights(delta_lambda: np.ndarray, response: np.ndarray) -> np.ndarray:
     """Return response weights including the nonuniform ILS wavelength grid."""
     delta = np.asarray(delta_lambda, dtype=float)
@@ -1156,8 +1758,13 @@ def _build_ils_eval_grid(
         resp_table = resp_table[order]
         wn_min = 1.0e4 / wl_table[-1]
         wn_max = 1.0e4 / wl_table[0]
-        n_grid = max(2, int(math.ceil((wn_max - wn_min) / spacing)) + 1)
-        wn_grid = np.linspace(wn_max, wn_min, n_grid)
+        wn_start = math.ceil(wn_min / spacing) * spacing
+        wn_stop = math.floor(wn_max / spacing) * spacing
+        if wn_stop < wn_start:
+            wn_grid = np.array([(wn_min + wn_max) * 0.5], dtype=float)
+        else:
+            n_grid = int(round((wn_stop - wn_start) / spacing)) + 1
+            wn_grid = wn_start + spacing * np.arange(n_grid, dtype=float)
         wl_grid = 1.0e4 / wn_grid
         resp_grid = np.interp(wl_grid, wl_table, resp_table, left=0.0, right=0.0)
         weights = resp_grid * _sample_spacing(wl_grid)
@@ -1228,23 +1835,42 @@ def _stokes_rotation_from_scattering_plane(angles: np.ndarray) -> tuple[float, f
     return 1.0 - 2.0 * sin2, sign * math.sqrt(sin2) * cosi2m, costhm
 
 
+def _spin2_spherical_function(cos_scatter: float, n_moments: int) -> np.ndarray:
+    """LRad gsfmi(:,2) basis for scattering-matrix polarization moments."""
+    if n_moments <= 0:
+        return np.zeros(0, dtype=float)
+    basis = np.zeros(int(n_moments), dtype=float)
+    if n_moments <= 2:
+        return basis
+    u = min(1.0, max(-1.0, float(cos_scatter)))
+    qroot6 = 0.25 * math.sqrt(6.0)
+    basis[2] = -qroot6 * (1.0 - u * u)
+    if n_moments <= 3:
+        return basis
+    sql4 = np.zeros(n_moments, dtype=float)
+    for order in range(3, n_moments):
+        sql4[order] = math.sqrt(float(order * order - 4))
+    for order in range(2, n_moments - 1):
+        basis[order + 1] = (
+            float(2 * order + 1) * u * basis[order] - sql4[order] * basis[order - 1]
+        ) / sql4[order + 1]
+    return basis
+
+
 def _direction_vector(mu: float, azimuth_deg: float) -> np.ndarray:
     rho = math.sqrt(max(1.0 - float(mu) * float(mu), 0.0))
     azimuth = math.radians(float(azimuth_deg))
     return np.array([rho * math.cos(azimuth), rho * math.sin(azimuth), float(mu)])
 
 
-def _projected_rayleigh_p12(
+def _projected_scattering_geometry(
     *,
     incoming_mu: float,
     incoming_azimuth_deg: float,
     outgoing_mu: float,
     outgoing_azimuth_deg: float,
-    depol: np.ndarray,
     stokes_projection: StokesProjection,
-    sign: int,
-) -> np.ndarray:
-    """Return instrument-projected Rayleigh P12 for one incoming/outgoing pair."""
+) -> tuple[float, float]:
     k_in = _direction_vector(incoming_mu, incoming_azimuth_deg)
     k_out = _direction_vector(outgoing_mu, outgoing_azimuth_deg)
     cos_scatter = float(np.dot(k_in, k_out))
@@ -1262,18 +1888,96 @@ def _projected_rayleigh_p12(
         scattering_normal /= scattering_norm
         reference_normal /= reference_norm
         cos_chi = float(np.dot(scattering_normal, reference_normal))
-        # Sign convention chosen to reproduce the LRad first-scatter rotation
-        # for the direct-solar incoming direction.
         sin_chi = -float(np.dot(k_out, np.cross(reference_normal, scattering_normal)))
         c2i2m = cos_chi * cos_chi - sin_chi * sin_chi
         s2i2m = 2.0 * sin_chi * cos_chi
 
-    delta = 2.0 * (1.0 - np.asarray(depol, dtype=float)) / (2.0 + np.asarray(depol, dtype=float))
-    rayleigh_p12 = -0.75 * delta * (1.0 - cos_scatter * cos_scatter)
     analyzer_projection = (
         stokes_projection.analyzer_q * c2i2m + stokes_projection.analyzer_u * s2i2m
     )
+    return analyzer_projection, cos_scatter
+
+
+def _projected_rayleigh_p12(
+    *,
+    incoming_mu: float,
+    incoming_azimuth_deg: float,
+    outgoing_mu: float,
+    outgoing_azimuth_deg: float,
+    depol: np.ndarray,
+    stokes_projection: StokesProjection,
+    sign: int,
+) -> np.ndarray:
+    """Return instrument-projected Rayleigh P12 for one incoming/outgoing pair."""
+    analyzer_projection, cos_scatter = _projected_scattering_geometry(
+        incoming_mu=incoming_mu,
+        incoming_azimuth_deg=incoming_azimuth_deg,
+        outgoing_mu=outgoing_mu,
+        outgoing_azimuth_deg=outgoing_azimuth_deg,
+        stokes_projection=stokes_projection,
+    )
+    delta = 2.0 * (1.0 - np.asarray(depol, dtype=float)) / (2.0 + np.asarray(depol, dtype=float))
+    rayleigh_p12 = -0.75 * delta * (1.0 - cos_scatter * cos_scatter)
     return float(sign) * analyzer_projection * rayleigh_p12
+
+
+def _rayleigh_p12_from_cosine(cos_scatter: float, depol: np.ndarray) -> np.ndarray:
+    delta = 2.0 * (1.0 - np.asarray(depol, dtype=float)) / (2.0 + np.asarray(depol, dtype=float))
+    return -0.75 * delta * (1.0 - float(cos_scatter) * float(cos_scatter))
+
+
+def _scattering_plane_cos2(
+    *,
+    first_incoming_mu: float,
+    first_incoming_azimuth_deg: float,
+    shared_mu: float,
+    shared_azimuth_deg: float,
+    second_outgoing_mu: float,
+    second_outgoing_azimuth_deg: float,
+) -> float:
+    first_in = _direction_vector(first_incoming_mu, first_incoming_azimuth_deg)
+    shared = _direction_vector(shared_mu, shared_azimuth_deg)
+    second_out = _direction_vector(second_outgoing_mu, second_outgoing_azimuth_deg)
+    first_normal = np.cross(first_in, shared)
+    second_normal = np.cross(shared, second_out)
+    first_norm = np.linalg.norm(first_normal)
+    second_norm = np.linalg.norm(second_normal)
+    if first_norm <= 1.0e-14 or second_norm <= 1.0e-14:
+        return 1.0
+    first_normal /= first_norm
+    second_normal /= second_norm
+    cos_chi = float(np.clip(np.dot(first_normal, second_normal), -1.0, 1.0))
+    return 2.0 * cos_chi * cos_chi - 1.0
+
+
+def _projected_aerosol_p12(
+    *,
+    incoming_mu: float,
+    incoming_azimuth_deg: float,
+    outgoing_mu: float,
+    outgoing_azimuth_deg: float,
+    aerosol_polarization_moments: np.ndarray,
+    aerosol_interp_fraction: np.ndarray,
+    stokes_projection: StokesProjection,
+    sign: int,
+) -> np.ndarray:
+    moments = np.asarray(aerosol_polarization_moments, dtype=float)
+    fac = np.asarray(aerosol_interp_fraction, dtype=float)
+    if moments.ndim != 3 or moments.shape[0] != 2:
+        raise ValueError("aerosol polarization moments must have shape (2, nmom, naerosol)")
+    if moments.shape[2] == 0:
+        return np.zeros((fac.size, 0), dtype=float)
+    analyzer_projection, cos_scatter = _projected_scattering_geometry(
+        incoming_mu=incoming_mu,
+        incoming_azimuth_deg=incoming_azimuth_deg,
+        outgoing_mu=outgoing_mu,
+        outgoing_azimuth_deg=outgoing_azimuth_deg,
+        stokes_projection=stokes_projection,
+    )
+    basis = _spin2_spherical_function(cos_scatter, moments.shape[1])
+    endpoint_p12 = np.matmul(np.moveaxis(moments, 1, 2), basis)
+    p12 = endpoint_p12[0] + fac[:, np.newaxis] * (endpoint_p12[1] - endpoint_p12[0])
+    return float(sign) * analyzer_projection * p12
 
 
 def _l1b_stokes_coefficients(
@@ -1365,6 +2069,61 @@ def _rayleigh_projected_polarization_scatter_term(
         * analyzer_projection
         * rayleigh_p12[..., np.newaxis]
         * ray_arr
+        * inv_scattering
+        * ssa_arr
+        / denominator
+    )
+    source = np.where(np.isfinite(source), source, 0.0)
+    return np.ascontiguousarray(source, dtype=float)
+
+
+def _aerosol_projected_polarization_scatter_term(
+    *,
+    ssa: np.ndarray,
+    aerosol_scattering_tau: np.ndarray,
+    scattering_tau: np.ndarray,
+    aerosol_polarization_moments: np.ndarray,
+    aerosol_interp_fraction: np.ndarray,
+    delta_m_truncation_factor: np.ndarray,
+    angles: np.ndarray,
+    stokes_projection: StokesProjection,
+    sign: int,
+) -> np.ndarray:
+    """Build a direct-FO aerosol M12 source projected through OCO Stokes response."""
+    aerosol_tau = np.asarray(aerosol_scattering_tau, dtype=float)
+    moments = np.asarray(aerosol_polarization_moments, dtype=float)
+    if aerosol_tau.shape[-1] == 0:
+        return np.zeros(np.asarray(scattering_tau, dtype=float).shape, dtype=float)
+    if moments.ndim != 3 or moments.shape[0] != 2 or moments.shape[2] != aerosol_tau.shape[-1]:
+        raise ValueError("aerosol polarization moments must have shape (2, nmom, naerosol)")
+
+    ssa_arr, scattering_arr, factor_arr = np.broadcast_arrays(
+        np.asarray(ssa, dtype=float),
+        np.asarray(scattering_tau, dtype=float),
+        np.asarray(delta_m_truncation_factor, dtype=float),
+    )
+    if aerosol_tau.shape[:2] != scattering_arr.shape:
+        raise ValueError("aerosol scattering tau must have shape (nwave, nlayer, naerosol)")
+    fac = np.asarray(aerosol_interp_fraction, dtype=float)
+    if fac.shape != scattering_arr.shape[:1]:
+        raise ValueError("aerosol interpolation fraction must have shape (nwave,)")
+
+    c2i2m, s2i2m, cos_scatter = _stokes_rotation_from_scattering_plane(angles)
+    analyzer_projection = (
+        stokes_projection.analyzer_q * c2i2m + stokes_projection.analyzer_u * s2i2m
+    )
+    basis = _spin2_spherical_function(cos_scatter, moments.shape[1])
+    endpoint_p12 = np.matmul(np.moveaxis(moments, 1, 2), basis)
+    aerosol_p12 = endpoint_p12[0] + fac[:, np.newaxis] * (endpoint_p12[1] - endpoint_p12[0])
+    aerosol_p12_scattering = np.einsum("wla,wa->wl", aerosol_tau, aerosol_p12)
+
+    inv_scattering = np.zeros_like(scattering_arr, dtype=float)
+    np.divide(1.0, scattering_arr, out=inv_scattering, where=scattering_arr > 0.0)
+    denominator = 1.0 - factor_arr * ssa_arr
+    source = (
+        float(sign)
+        * analyzer_projection
+        * aerosol_p12_scattering
         * inv_scattering
         * ssa_arr
         / denominator
@@ -1482,7 +2241,678 @@ def _rayleigh_diffuse_source_iteration_correction(
             * ray_per_tau_eff
         )
     manual_diffuse = np.sum(diffuse_source * los_weight, axis=1)
-    return np.where(np.isfinite(scale * manual_diffuse), scale * manual_diffuse, 0.0)
+    # ``scale`` maps the dimensionless manual direct-beam source to py2sess FO
+    # radiance, so it contains the solar-beam F/(4*pi) normalization.  The
+    # scalar diffuse profile is already a radiance; keep only the residual
+    # geometry/source-integration correction when applying it to diffuse light.
+    diffuse_scale = scale / (0.25 / math.pi)
+    correction = diffuse_scale * manual_diffuse
+    return np.where(np.isfinite(correction), correction, 0.0)
+
+
+def _polarized_diffuse_source_iteration_correction(
+    *,
+    solver,
+    tau: np.ndarray,
+    ssa: np.ndarray,
+    g: np.ndarray,
+    height_grid: np.ndarray,
+    observer_angles: np.ndarray,
+    diffuse_albedo: np.ndarray,
+    delta_m_truncation_factor: np.ndarray,
+    rayleigh_scattering_tau: np.ndarray,
+    aerosol_scattering_tau: np.ndarray,
+    aerosol_polarization_moments: np.ndarray,
+    aerosol_interp_fraction: np.ndarray,
+    depol: np.ndarray,
+    stokes_projection: StokesProjection,
+    direct_scatter_source: np.ndarray,
+    first_order_correction: np.ndarray,
+    sign: int,
+    n_azimuths: int,
+    stream_value: float,
+) -> np.ndarray:
+    tau_arr = np.asarray(tau, dtype=float)
+    ssa_arr = np.asarray(ssa, dtype=float)
+    factor_arr = np.asarray(delta_m_truncation_factor, dtype=float)
+    ray_arr = np.asarray(rayleigh_scattering_tau, dtype=float)
+    aer_arr = np.asarray(aerosol_scattering_tau, dtype=float)
+    direct_source_arr = np.asarray(direct_scatter_source, dtype=float)
+    tau_eff = tau_arr * (1.0 - factor_arr * ssa_arr)
+    mu0 = math.cos(math.radians(float(observer_angles[0])))
+    mu_obs = math.cos(math.radians(float(observer_angles[1])))
+    if mu0 <= 0.0 or mu_obs <= 0.0:
+        return np.zeros(tau_arr.shape[0], dtype=float)
+
+    top_tau = np.concatenate(
+        (np.zeros((tau_eff.shape[0], 1), dtype=float), np.cumsum(tau_eff, axis=1)[:, :-1]),
+        axis=1,
+    )
+    mid_tau = top_tau + 0.5 * tau_eff
+    los_weight = np.exp(-top_tau / mu_obs) * (1.0 - np.exp(-tau_eff / mu_obs))
+    direct_incident = np.exp(-mid_tau / mu0)
+    manual_first = np.sum(direct_incident * direct_source_arr * los_weight, axis=1)
+    scale = np.divide(
+        np.asarray(first_order_correction, dtype=float),
+        manual_first,
+        out=np.zeros_like(manual_first),
+        where=np.abs(manual_first) > 1.0e-14,
+    )
+
+    mu_quad = float(stream_value)
+    vza_quad = math.degrees(math.acos(mu_quad))
+    azimuths = np.linspace(0.0, 360.0, int(n_azimuths), endpoint=False)
+    diffuse_angles = np.column_stack(
+        (
+            np.full(azimuths.size, float(observer_angles[0])),
+            np.full(azimuths.size, vza_quad),
+            azimuths,
+        )
+    )
+    diffuse_result = solver.forward(
+        tau=tau_arr,
+        ssa=ssa_arr,
+        g=g,
+        z=height_grid,
+        angles=diffuse_angles,
+        fbeam=1.0,
+        albedo=diffuse_albedo,
+        stream=stream_value,
+        delta_m_truncation_factor=factor_arr,
+        include_fo=False,
+    )
+    up_profile = np.asarray(diffuse_result.radiance_profile_2s, dtype=float)
+    if up_profile.ndim != 3:
+        raise ValueError("diffuse radiance profile must have shape (nwave, nazimuth, nlevel)")
+    layer_incident = 0.5 * (up_profile[:, :, :-1] + up_profile[:, :, 1:])
+
+    inv_tau_eff = np.zeros_like(tau_eff, dtype=float)
+    np.divide(1.0, tau_eff, out=inv_tau_eff, where=tau_eff > 0.0)
+    diffuse_source = np.zeros_like(tau_arr, dtype=float)
+    direction_weight = 0.5 / float(azimuths.size)
+    for geom_index, azimuth in enumerate(azimuths):
+        rayleigh_p12 = _projected_rayleigh_p12(
+            incoming_mu=mu_quad,
+            incoming_azimuth_deg=float(azimuth),
+            outgoing_mu=mu_obs,
+            outgoing_azimuth_deg=float(observer_angles[2]),
+            depol=depol,
+            stokes_projection=stokes_projection,
+            sign=sign,
+        )
+        scatter_source = rayleigh_p12[:, np.newaxis] * ray_arr * inv_tau_eff
+        if aer_arr.shape[-1] > 0:
+            aerosol_p12 = _projected_aerosol_p12(
+                incoming_mu=mu_quad,
+                incoming_azimuth_deg=float(azimuth),
+                outgoing_mu=mu_obs,
+                outgoing_azimuth_deg=float(observer_angles[2]),
+                aerosol_polarization_moments=aerosol_polarization_moments,
+                aerosol_interp_fraction=aerosol_interp_fraction,
+                stokes_projection=stokes_projection,
+                sign=sign,
+            )
+            scatter_source = scatter_source + np.einsum(
+                "wa,wla,wl->wl",
+                aerosol_p12,
+                aer_arr,
+                inv_tau_eff,
+            )
+        diffuse_source += direction_weight * layer_incident[:, geom_index, :] * scatter_source
+
+    manual_diffuse = np.sum(diffuse_source * los_weight, axis=1)
+    # ``scale`` maps the dimensionless manual direct-beam source to py2sess FO
+    # radiance, so it contains the solar-beam F/(4*pi) normalization.  The
+    # scalar diffuse profile is already a radiance; keep only the residual
+    # geometry/source-integration correction when applying it to diffuse light.
+    diffuse_scale = scale / (0.25 / math.pi)
+    correction = diffuse_scale * manual_diffuse
+    return np.where(np.isfinite(correction), correction, 0.0)
+
+
+def _polarized_second_order_source_iteration_correction(
+    *,
+    solver,
+    tau: np.ndarray,
+    ssa: np.ndarray,
+    g: np.ndarray,
+    height_grid: np.ndarray,
+    observer_angles: np.ndarray,
+    delta_m_truncation_factor: np.ndarray,
+    rayleigh_scattering_tau: np.ndarray,
+    depol: np.ndarray,
+    stokes_projection: StokesProjection,
+    direct_scatter_source: np.ndarray,
+    first_order_correction: np.ndarray,
+    sign: int,
+    n_azimuths: int,
+    stream_value: float,
+) -> np.ndarray:
+    """Approximate Rayleigh-Rayleigh second-order polarization.
+
+    This is a diagnostic 2OS-like source iteration.  The first scattering is
+    scalar direct-solar Rayleigh FO into the two-stream upward direction.  The
+    second scattering projects Rayleigh P12 into the OCO detector Stokes
+    response.  Aerosol direct-FO polarization remains in the base correction,
+    but aerosol second order is not included here because the aerosol phase
+    forward peak needs a higher-order angular quadrature than this diagnostic.
+    """
+    tau_arr = np.asarray(tau, dtype=float)
+    ssa_arr = np.asarray(ssa, dtype=float)
+    g_arr = np.asarray(g, dtype=float)
+    factor_arr = np.asarray(delta_m_truncation_factor, dtype=float)
+    ray_arr = np.asarray(rayleigh_scattering_tau, dtype=float)
+    direct_source_arr = np.asarray(direct_scatter_source, dtype=float)
+    tau_eff = tau_arr * (1.0 - factor_arr * ssa_arr)
+    mu0 = math.cos(math.radians(float(observer_angles[0])))
+    mu_obs = math.cos(math.radians(float(observer_angles[1])))
+    if mu0 <= 0.0 or mu_obs <= 0.0:
+        return np.zeros(tau_arr.shape[0], dtype=float)
+
+    top_tau = np.concatenate(
+        (np.zeros((tau_eff.shape[0], 1), dtype=float), np.cumsum(tau_eff, axis=1)[:, :-1]),
+        axis=1,
+    )
+    mid_tau = top_tau + 0.5 * tau_eff
+    los_weight = np.exp(-top_tau / mu_obs) * (1.0 - np.exp(-tau_eff / mu_obs))
+    direct_incident = np.exp(-mid_tau / mu0)
+    manual_first = np.sum(direct_incident * direct_source_arr * los_weight, axis=1)
+    scale = np.divide(
+        np.asarray(first_order_correction, dtype=float),
+        manual_first,
+        out=np.zeros_like(manual_first),
+        where=np.abs(manual_first) > 1.0e-14,
+    )
+    source_scale = scale / (0.25 / math.pi)
+
+    mu_quad = float(stream_value)
+    vza_quad = math.degrees(math.acos(mu_quad))
+    azimuths = np.linspace(0.0, 360.0, int(n_azimuths), endpoint=False)
+    first_order_angles = np.column_stack(
+        (
+            np.full(azimuths.size, float(observer_angles[0])),
+            np.full(azimuths.size, vza_quad),
+            azimuths,
+        )
+    )
+    sza = np.deg2rad(first_order_angles[:, 0])
+    vza = np.deg2rad(first_order_angles[:, 1])
+    raz = np.deg2rad(first_order_angles[:, 2])
+    mu1 = np.cos(vza)
+    cos_scatter = -(np.cos(vza) * np.cos(sza)) + np.sin(vza) * np.sin(sza) * np.cos(raz)
+    overhead = np.isclose(first_order_angles[:, 0], 0.0)
+    if np.any(overhead):
+        cos_scatter = cos_scatter.copy()
+        cos_scatter[overhead] = np.where(np.isclose(mu1[overhead], 0.0), 0.0, -mu1[overhead])
+    delta = 2.0 * (1.0 - np.asarray(depol, dtype=float)) / (2.0 + np.asarray(depol, dtype=float))
+    rayleigh_phase = delta[:, np.newaxis] * 0.75 * (1.0 + cos_scatter * cos_scatter) + (
+        1.0 - delta[:, np.newaxis]
+    )
+    rayleigh_p12_up = -0.75 * delta[:, np.newaxis] * (1.0 - cos_scatter * cos_scatter)
+    first_order_scatter = np.divide(
+        rayleigh_phase[:, np.newaxis, :] * ray_arr[:, :, np.newaxis],
+        tau_eff[:, :, np.newaxis],
+        out=np.zeros(tau_eff.shape + (azimuths.size,), dtype=float),
+        where=tau_eff[:, :, np.newaxis] > 0.0,
+    )
+    first_order_q_scatter = np.divide(
+        rayleigh_p12_up[:, np.newaxis, :] * ray_arr[:, :, np.newaxis],
+        tau_eff[:, :, np.newaxis],
+        out=np.zeros(tau_eff.shape + (azimuths.size,), dtype=float),
+        where=tau_eff[:, :, np.newaxis] > 0.0,
+    )
+    first_order = solver.forward_fo(
+        tau=tau_arr,
+        ssa=ssa_arr,
+        g=g_arr,
+        z=height_grid,
+        angles=first_order_angles,
+        fbeam=1.0,
+        albedo=np.zeros(tau_arr.shape[0], dtype=float),
+        stream=stream_value,
+        delta_m_truncation_factor=factor_arr,
+        fo_scatter_term=first_order_scatter,
+        n_moments=0,
+    )
+    first_order_q = solver.forward_fo(
+        tau=tau_arr,
+        ssa=ssa_arr,
+        g=g_arr,
+        z=height_grid,
+        angles=first_order_angles,
+        fbeam=1.0,
+        albedo=np.zeros(tau_arr.shape[0], dtype=float),
+        stream=stream_value,
+        delta_m_truncation_factor=factor_arr,
+        fo_scatter_term=first_order_q_scatter,
+        n_moments=0,
+    )
+    first_profile = np.asarray(first_order.intensity_ss_profile, dtype=float)
+    first_q_profile = np.asarray(first_order_q.intensity_ss_profile, dtype=float)
+    expected_shape = (tau_arr.shape[0], azimuths.size, tau_arr.shape[1] + 1)
+    if first_profile.shape != expected_shape or first_q_profile.shape != expected_shape:
+        raise ValueError(
+            "first-order profiles must have shape "
+            f"{expected_shape}; got {first_profile.shape} and {first_q_profile.shape}"
+        )
+    up_layer_incident = 0.5 * (first_profile[:, :, :-1] + first_profile[:, :, 1:])
+    up_q_layer = 0.5 * (first_q_profile[:, :, :-1] + first_q_profile[:, :, 1:])
+
+    cos_scatter_down = mu0 * mu_quad + math.sin(math.radians(float(observer_angles[0]))) * math.sin(
+        math.acos(mu_quad)
+    ) * np.cos(np.deg2rad(azimuths))
+    rayleigh_phase_down = delta[:, np.newaxis] * 0.75 * (
+        1.0 + cos_scatter_down * cos_scatter_down
+    ) + (1.0 - delta[:, np.newaxis])
+    rayleigh_p12_down = -0.75 * delta[:, np.newaxis] * (1.0 - cos_scatter_down * cos_scatter_down)
+    down_scatter = np.divide(
+        rayleigh_phase_down[:, np.newaxis, :] * ray_arr[:, :, np.newaxis],
+        tau_eff[:, :, np.newaxis],
+        out=np.zeros(tau_eff.shape + (azimuths.size,), dtype=float),
+        where=tau_eff[:, :, np.newaxis] > 0.0,
+    )
+    down_q_scatter = np.divide(
+        rayleigh_p12_down[:, np.newaxis, :] * ray_arr[:, :, np.newaxis],
+        tau_eff[:, :, np.newaxis],
+        out=np.zeros(tau_eff.shape + (azimuths.size,), dtype=float),
+        where=tau_eff[:, :, np.newaxis] > 0.0,
+    )
+    down_source = (0.25 / math.pi) * down_scatter * np.exp(-mid_tau[:, :, np.newaxis] / mu0)
+    down_q_source = (0.25 / math.pi) * down_q_scatter * np.exp(-mid_tau[:, :, np.newaxis] / mu0)
+    down_trans = np.exp(-tau_eff / mu_quad)
+    down_profile = np.zeros(expected_shape, dtype=float)
+    down_q_profile = np.zeros(expected_shape, dtype=float)
+    for layer_index in range(tau_arr.shape[1]):
+        down_profile[:, :, layer_index + 1] = down_profile[:, :, layer_index] * down_trans[
+            :, layer_index, np.newaxis
+        ] + down_source[:, layer_index, :] * (1.0 - down_trans[:, layer_index, np.newaxis])
+        down_q_profile[:, :, layer_index + 1] = down_q_profile[:, :, layer_index] * down_trans[
+            :, layer_index, np.newaxis
+        ] + down_q_source[:, layer_index, :] * (1.0 - down_trans[:, layer_index, np.newaxis])
+    down_layer_incident = 0.5 * (down_profile[:, :, :-1] + down_profile[:, :, 1:])
+    down_q_layer = 0.5 * (down_q_profile[:, :, :-1] + down_q_profile[:, :, 1:])
+
+    inv_tau_eff = np.zeros_like(tau_eff, dtype=float)
+    np.divide(1.0, tau_eff, out=inv_tau_eff, where=tau_eff > 0.0)
+    second_source = np.zeros_like(tau_arr, dtype=float)
+    icorr_source = np.zeros_like(tau_arr, dtype=float)
+    direction_weight = 0.5 / float(azimuths.size)
+    for geom_index, azimuth in enumerate(azimuths):
+        rayleigh_p12 = _projected_rayleigh_p12(
+            incoming_mu=mu_quad,
+            incoming_azimuth_deg=float(azimuth),
+            outgoing_mu=mu_obs,
+            outgoing_azimuth_deg=float(observer_angles[2]),
+            depol=depol,
+            stokes_projection=stokes_projection,
+            sign=sign,
+        )
+        scatter_source = rayleigh_p12[:, np.newaxis] * ray_arr * inv_tau_eff
+        second_source += direction_weight * up_layer_incident[:, geom_index, :] * scatter_source
+        _, up_second_cos = _projected_scattering_geometry(
+            incoming_mu=mu_quad,
+            incoming_azimuth_deg=float(azimuth),
+            outgoing_mu=mu_obs,
+            outgoing_azimuth_deg=float(observer_angles[2]),
+            stokes_projection=stokes_projection,
+        )
+        up_second_p12 = _rayleigh_p12_from_cosine(up_second_cos, depol)
+        up_cos2 = _scattering_plane_cos2(
+            first_incoming_mu=-mu0,
+            first_incoming_azimuth_deg=0.0,
+            shared_mu=mu_quad,
+            shared_azimuth_deg=float(azimuth),
+            second_outgoing_mu=mu_obs,
+            second_outgoing_azimuth_deg=float(observer_angles[2]),
+        )
+        icorr_source += (
+            direction_weight
+            * up_q_layer[:, geom_index, :]
+            * up_cos2
+            * up_second_p12[:, np.newaxis]
+            * ray_arr
+            * inv_tau_eff
+        )
+
+        down_rayleigh_p12 = _projected_rayleigh_p12(
+            incoming_mu=-mu_quad,
+            incoming_azimuth_deg=float(azimuth),
+            outgoing_mu=mu_obs,
+            outgoing_azimuth_deg=float(observer_angles[2]),
+            depol=depol,
+            stokes_projection=stokes_projection,
+            sign=sign,
+        )
+        down_scatter_source = down_rayleigh_p12[:, np.newaxis] * ray_arr * inv_tau_eff
+        second_source += (
+            direction_weight * down_layer_incident[:, geom_index, :] * down_scatter_source
+        )
+        _, down_second_cos = _projected_scattering_geometry(
+            incoming_mu=-mu_quad,
+            incoming_azimuth_deg=float(azimuth),
+            outgoing_mu=mu_obs,
+            outgoing_azimuth_deg=float(observer_angles[2]),
+            stokes_projection=stokes_projection,
+        )
+        down_second_p12 = _rayleigh_p12_from_cosine(down_second_cos, depol)
+        down_cos2 = _scattering_plane_cos2(
+            first_incoming_mu=-mu0,
+            first_incoming_azimuth_deg=0.0,
+            shared_mu=-mu_quad,
+            shared_azimuth_deg=float(azimuth),
+            second_outgoing_mu=mu_obs,
+            second_outgoing_azimuth_deg=float(observer_angles[2]),
+        )
+        icorr_source += (
+            direction_weight
+            * down_q_layer[:, geom_index, :]
+            * down_cos2
+            * down_second_p12[:, np.newaxis]
+            * ray_arr
+            * inv_tau_eff
+        )
+
+    manual_second = np.sum(second_source * los_weight, axis=1)
+    manual_icorr = np.sum(icorr_source * los_weight, axis=1)
+    correction = source_scale * (
+        manual_second + float(stokes_projection.scalar_factor) * manual_icorr
+    )
+    return np.where(np.isfinite(correction), correction, 0.0)
+
+
+def _prepare_py2sess_rt_context(
+    *,
+    wavelength_um: np.ndarray,
+    state: dict[str, np.ndarray | float],
+    gas_tau: np.ndarray,
+    angles: np.ndarray,
+    aerosol: AerosolInputs,
+    solar_reference_factor: np.ndarray | None,
+    stokes_coefficients: np.ndarray,
+    stokes_projection_mode: str,
+    polarization_correction: str,
+    polarization_sign: int,
+    polarization_diffuse_azimuths: int,
+    stream_value: float,
+) -> Py2sessRtContext:
+    from py2sess.optical.phase import build_solar_phase_inputs_from_scattering_tau
+
+    ray_tau, depol = _rayleigh_tau_cm2(
+        wavelength_um,
+        np.asarray(state["dry_air_col_cm2"], dtype=float),
+        float(state["xco2_ppm"]),
+    )
+    stokes_projection = _stokes_projection(stokes_coefficients, stokes_projection_mode)
+    aerosol_extinction = np.sum(aerosol.extinction_tau, axis=-1)
+    aerosol_scattering = aerosol.scattering_tau
+    scattering_tau = ray_tau + np.sum(aerosol_scattering, axis=-1)
+    tau = gas_tau + ray_tau + aerosol_extinction
+    ssa = np.divide(scattering_tau, tau, out=np.zeros_like(tau), where=tau > 0.0)
+    phase = build_solar_phase_inputs_from_scattering_tau(
+        ssa=ssa,
+        depol=depol,
+        rayleigh_scattering_tau=ray_tau,
+        aerosol_scattering_tau=aerosol_scattering,
+        aerosol_moments=aerosol.moments,
+        aerosol_interp_fraction=aerosol.interp_fraction,
+        angles=angles,
+        validate_inputs=False,
+    )
+    return Py2sessRtContext(
+        tau=tau,
+        ssa=ssa,
+        g=phase.g,
+        delta_m_truncation_factor=phase.delta_m_truncation_factor,
+        fo_scatter_term=phase.fo_scatter_term,
+        rayleigh_scattering_tau=ray_tau,
+        aerosol_scattering_tau=aerosol_scattering,
+        aerosol_polarization_moments=aerosol.polarization_moments,
+        aerosol_interp_fraction=aerosol.interp_fraction,
+        scattering_tau=scattering_tau,
+        depol=depol,
+        height_grid=np.asarray(state["heights_km"], dtype=float),
+        angles=np.asarray(angles, dtype=float),
+        solar_reference_factor=solar_reference_factor,
+        stokes_projection=stokes_projection,
+        polarization_correction=polarization_correction,
+        polarization_sign=polarization_sign,
+        polarization_diffuse_azimuths=polarization_diffuse_azimuths,
+        stream_value=stream_value,
+    )
+
+
+def _compute_py2sess_polarization_correction(
+    *,
+    context: Py2sessRtContext,
+    diffuse_albedo: np.ndarray,
+) -> np.ndarray:
+    from py2sess import TwoStreamEss, TwoStreamEssOptions
+
+    polarization_radiance = np.zeros(context.tau.shape[0], dtype=float)
+    if context.polarization_correction in {
+        "rayleigh-fo",
+        "rayleigh-aerosol-fo",
+        "rayleigh-fo-updiffuse",
+        "rayleigh-aerosol-fo-updiffuse",
+        "rayleigh-aerosol-fo-rayleigh-2os-diagnostic",
+    }:
+        rayleigh_polarization_scatter = _rayleigh_projected_polarization_scatter_term(
+            ssa=context.ssa,
+            rayleigh_scattering_tau=context.rayleigh_scattering_tau,
+            scattering_tau=context.scattering_tau,
+            depol=context.depol,
+            delta_m_truncation_factor=context.delta_m_truncation_factor,
+            angles=context.angles,
+            stokes_projection=context.stokes_projection,
+            sign=context.polarization_sign,
+        )
+        polarization_scatter = rayleigh_polarization_scatter
+        if context.polarization_correction in {
+            "rayleigh-aerosol-fo",
+            "rayleigh-aerosol-fo-updiffuse",
+            "rayleigh-aerosol-fo-rayleigh-2os-diagnostic",
+        }:
+            polarization_scatter = (
+                polarization_scatter
+                + _aerosol_projected_polarization_scatter_term(
+                    ssa=context.ssa,
+                    aerosol_scattering_tau=context.aerosol_scattering_tau,
+                    scattering_tau=context.scattering_tau,
+                    aerosol_polarization_moments=context.aerosol_polarization_moments,
+                    aerosol_interp_fraction=context.aerosol_interp_fraction,
+                    delta_m_truncation_factor=context.delta_m_truncation_factor,
+                    angles=context.angles,
+                    stokes_projection=context.stokes_projection,
+                    sign=context.polarization_sign,
+                )
+            )
+        fo_solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=context.tau.shape[1],
+                mode="solar",
+                backend="numpy",
+                output_levels=False,
+                brdf_surface=False,
+            )
+        )
+        polarization_fo = fo_solver.forward_fo(
+            tau=context.tau,
+            ssa=context.ssa,
+            g=context.g,
+            z=context.height_grid,
+            angles=context.angles,
+            fbeam=1.0,
+            albedo=np.zeros(context.tau.shape[0], dtype=float),
+            stream=context.stream_value,
+            delta_m_truncation_factor=context.delta_m_truncation_factor,
+            fo_scatter_term=polarization_scatter,
+            n_moments=0,
+        )
+        polarization_radiance = np.asarray(polarization_fo.intensity_ss, dtype=float)
+        if context.polarization_correction == "rayleigh-fo-updiffuse":
+            diffuse_solver = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=context.tau.shape[1],
+                    mode="solar",
+                    backend="numpy",
+                    output_levels=True,
+                    brdf_surface=False,
+                )
+            )
+            polarization_radiance = (
+                polarization_radiance
+                + _rayleigh_diffuse_source_iteration_correction(
+                    solver=diffuse_solver,
+                    tau=context.tau,
+                    ssa=context.ssa,
+                    g=context.g,
+                    height_grid=context.height_grid,
+                    observer_angles=context.angles,
+                    diffuse_albedo=np.asarray(diffuse_albedo, dtype=float),
+                    delta_m_truncation_factor=context.delta_m_truncation_factor,
+                    rayleigh_scattering_tau=context.rayleigh_scattering_tau,
+                    depol=context.depol,
+                    stokes_projection=context.stokes_projection,
+                    first_order_correction=np.asarray(polarization_fo.intensity_ss, dtype=float),
+                    sign=context.polarization_sign,
+                    n_azimuths=context.polarization_diffuse_azimuths,
+                    stream_value=context.stream_value,
+                )
+            )
+        elif context.polarization_correction == "rayleigh-aerosol-fo-updiffuse":
+            diffuse_solver = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=context.tau.shape[1],
+                    mode="solar",
+                    backend="numpy",
+                    output_levels=True,
+                    brdf_surface=False,
+                )
+            )
+            polarization_radiance = (
+                polarization_radiance
+                + _polarized_diffuse_source_iteration_correction(
+                    solver=diffuse_solver,
+                    tau=context.tau,
+                    ssa=context.ssa,
+                    g=context.g,
+                    height_grid=context.height_grid,
+                    observer_angles=context.angles,
+                    diffuse_albedo=np.asarray(diffuse_albedo, dtype=float),
+                    delta_m_truncation_factor=context.delta_m_truncation_factor,
+                    rayleigh_scattering_tau=context.rayleigh_scattering_tau,
+                    aerosol_scattering_tau=context.aerosol_scattering_tau,
+                    aerosol_polarization_moments=context.aerosol_polarization_moments,
+                    aerosol_interp_fraction=context.aerosol_interp_fraction,
+                    depol=context.depol,
+                    stokes_projection=context.stokes_projection,
+                    direct_scatter_source=polarization_scatter,
+                    first_order_correction=np.asarray(polarization_fo.intensity_ss, dtype=float),
+                    sign=context.polarization_sign,
+                    n_azimuths=context.polarization_diffuse_azimuths,
+                    stream_value=context.stream_value,
+                )
+            )
+        elif context.polarization_correction == "rayleigh-aerosol-fo-rayleigh-2os-diagnostic":
+            rayleigh_fo = fo_solver.forward_fo(
+                tau=context.tau,
+                ssa=context.ssa,
+                g=context.g,
+                z=context.height_grid,
+                angles=context.angles,
+                fbeam=1.0,
+                albedo=np.zeros(context.tau.shape[0], dtype=float),
+                stream=context.stream_value,
+                delta_m_truncation_factor=context.delta_m_truncation_factor,
+                fo_scatter_term=rayleigh_polarization_scatter,
+                n_moments=0,
+            )
+            second_order_solver = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=context.tau.shape[1],
+                    mode="solar",
+                    backend="numpy",
+                    output_levels=True,
+                    brdf_surface=False,
+                )
+            )
+            polarization_radiance = (
+                polarization_radiance
+                + _polarized_second_order_source_iteration_correction(
+                    solver=second_order_solver,
+                    tau=context.tau,
+                    ssa=context.ssa,
+                    g=context.g,
+                    height_grid=context.height_grid,
+                    observer_angles=context.angles,
+                    delta_m_truncation_factor=context.delta_m_truncation_factor,
+                    rayleigh_scattering_tau=context.rayleigh_scattering_tau,
+                    depol=context.depol,
+                    stokes_projection=context.stokes_projection,
+                    direct_scatter_source=rayleigh_polarization_scatter,
+                    first_order_correction=np.asarray(rayleigh_fo.intensity_ss, dtype=float),
+                    sign=context.polarization_sign,
+                    n_azimuths=context.polarization_diffuse_azimuths,
+                    stream_value=context.stream_value,
+                )
+            )
+    elif context.polarization_correction != "none":
+        raise ValueError(f"unknown polarization correction: {context.polarization_correction!r}")
+    return polarization_radiance
+
+
+def _run_py2sess_prepared(
+    *,
+    context: Py2sessRtContext,
+    albedo: np.ndarray,
+    diffuse_albedo: np.ndarray,
+    brdf: dict[str, np.ndarray] | None,
+    polarization_correction_cache: np.ndarray | None = None,
+) -> Py2sessReplayResult:
+    from py2sess import TwoStreamEss, TwoStreamEssOptions
+
+    solver = TwoStreamEss(
+        TwoStreamEssOptions(
+            nlyr=context.tau.shape[1],
+            mode="solar",
+            backend="numpy",
+            output_levels=False,
+            brdf_surface=brdf is not None,
+        )
+    )
+    result = solver.forward(
+        tau=context.tau,
+        ssa=context.ssa,
+        g=context.g,
+        z=context.height_grid,
+        angles=context.angles,
+        fbeam=1.0,
+        albedo=albedo,
+        brdf=brdf,
+        stream=context.stream_value,
+        delta_m_truncation_factor=context.delta_m_truncation_factor,
+        fo_scatter_term=context.fo_scatter_term,
+        include_fo=True,
+    )
+    scalar_radiance = (
+        np.asarray(result.radiance_total, dtype=float) * context.stokes_projection.scalar_factor
+    )
+    if polarization_correction_cache is None:
+        polarization_radiance = _compute_py2sess_polarization_correction(
+            context=context,
+            diffuse_albedo=diffuse_albedo,
+        )
+    else:
+        polarization_radiance = np.asarray(polarization_correction_cache, dtype=float)
+    if context.solar_reference_factor is not None:
+        factor = np.asarray(context.solar_reference_factor, dtype=float)
+        scalar_radiance = scalar_radiance * factor
+        polarization_radiance = polarization_radiance * factor
+    return Py2sessReplayResult(
+        scalar_radiance=scalar_radiance,
+        polarization_correction=polarization_radiance,
+        radiance=scalar_radiance + polarization_radiance,
+    )
 
 
 def _run_py2sess(
@@ -1503,132 +2933,25 @@ def _run_py2sess(
     polarization_diffuse_azimuths: int,
     stream_value: float,
 ) -> Py2sessReplayResult:
-    from py2sess import TwoStreamEss, TwoStreamEssOptions
-    from py2sess.optical.phase import build_solar_phase_inputs_from_scattering_tau
-
-    ray_tau, depol = _rayleigh_tau_cm2(
-        wavelength_um,
-        np.asarray(state["wet_air_col_cm2"], dtype=float),
-        float(state["xco2_ppm"]),
-    )
-    stokes_projection = _stokes_projection(stokes_coefficients, stokes_projection_mode)
-    aerosol_extinction = np.sum(aerosol.extinction_tau, axis=-1)
-    aerosol_scattering = aerosol.scattering_tau
-    scattering_tau = ray_tau + np.sum(aerosol_scattering, axis=-1)
-    tau = gas_tau + ray_tau + aerosol_extinction
-    ssa = np.divide(scattering_tau, tau, out=np.zeros_like(tau), where=tau > 0.0)
-    phase = build_solar_phase_inputs_from_scattering_tau(
-        ssa=ssa,
-        depol=depol,
-        rayleigh_scattering_tau=ray_tau,
-        aerosol_scattering_tau=aerosol_scattering,
-        aerosol_moments=aerosol.moments,
-        aerosol_interp_fraction=aerosol.interp_fraction,
+    context = _prepare_py2sess_rt_context(
+        wavelength_um=wavelength_um,
+        state=state,
+        gas_tau=gas_tau,
         angles=angles,
-        validate_inputs=False,
+        aerosol=aerosol,
+        solar_reference_factor=solar_reference_factor,
+        stokes_coefficients=stokes_coefficients,
+        stokes_projection_mode=stokes_projection_mode,
+        polarization_correction=polarization_correction,
+        polarization_sign=polarization_sign,
+        polarization_diffuse_azimuths=polarization_diffuse_azimuths,
+        stream_value=stream_value,
     )
-    solver = TwoStreamEss(
-        TwoStreamEssOptions(
-            nlyr=tau.shape[1],
-            mode="solar",
-            backend="numpy",
-            output_levels=False,
-            brdf_surface=brdf is not None,
-        )
-    )
-    result = solver.forward(
-        tau=tau,
-        ssa=ssa,
-        g=phase.g,
-        z=np.asarray(state["heights_km"], dtype=float),
-        angles=angles,
-        fbeam=1.0,
+    return _run_py2sess_prepared(
+        context=context,
         albedo=albedo,
+        diffuse_albedo=diffuse_albedo,
         brdf=brdf,
-        stream=stream_value,
-        delta_m_truncation_factor=phase.delta_m_truncation_factor,
-        fo_scatter_term=phase.fo_scatter_term,
-        include_fo=True,
-    )
-    scalar_radiance = (
-        np.asarray(result.radiance_total, dtype=float) * stokes_projection.scalar_factor
-    )
-    polarization_radiance = np.zeros_like(scalar_radiance, dtype=float)
-    if polarization_correction in {"rayleigh-fo", "rayleigh-fo-updiffuse"}:
-        polarization_scatter = _rayleigh_projected_polarization_scatter_term(
-            ssa=ssa,
-            rayleigh_scattering_tau=ray_tau,
-            scattering_tau=scattering_tau,
-            depol=depol,
-            delta_m_truncation_factor=phase.delta_m_truncation_factor,
-            angles=angles,
-            stokes_projection=stokes_projection,
-            sign=polarization_sign,
-        )
-        fo_solver = TwoStreamEss(
-            TwoStreamEssOptions(
-                nlyr=tau.shape[1],
-                mode="solar",
-                backend="numpy",
-                output_levels=False,
-                brdf_surface=False,
-            )
-        )
-        polarization_fo = fo_solver.forward_fo(
-            tau=tau,
-            ssa=ssa,
-            g=phase.g,
-            z=np.asarray(state["heights_km"], dtype=float),
-            angles=angles,
-            fbeam=1.0,
-            albedo=np.zeros_like(albedo, dtype=float),
-            stream=stream_value,
-            delta_m_truncation_factor=phase.delta_m_truncation_factor,
-            fo_scatter_term=polarization_scatter,
-            n_moments=0,
-        )
-        polarization_radiance = np.asarray(polarization_fo.intensity_ss, dtype=float)
-        if polarization_correction == "rayleigh-fo-updiffuse":
-            diffuse_solver = TwoStreamEss(
-                TwoStreamEssOptions(
-                    nlyr=tau.shape[1],
-                    mode="solar",
-                    backend="numpy",
-                    output_levels=True,
-                    brdf_surface=False,
-                )
-            )
-            polarization_radiance = (
-                polarization_radiance
-                + _rayleigh_diffuse_source_iteration_correction(
-                    solver=diffuse_solver,
-                    tau=tau,
-                    ssa=ssa,
-                    g=phase.g,
-                    height_grid=np.asarray(state["heights_km"], dtype=float),
-                    observer_angles=angles,
-                    diffuse_albedo=np.asarray(diffuse_albedo, dtype=float),
-                    delta_m_truncation_factor=phase.delta_m_truncation_factor,
-                    rayleigh_scattering_tau=ray_tau,
-                    depol=depol,
-                    stokes_projection=stokes_projection,
-                    first_order_correction=np.asarray(polarization_fo.intensity_ss, dtype=float),
-                    sign=polarization_sign,
-                    n_azimuths=polarization_diffuse_azimuths,
-                    stream_value=stream_value,
-                )
-            )
-    elif polarization_correction != "none":
-        raise ValueError(f"unknown polarization correction: {polarization_correction!r}")
-
-    if solar_reference_factor is not None:
-        factor = np.asarray(solar_reference_factor, dtype=float)
-        scalar_radiance = scalar_radiance * factor
-        polarization_radiance = polarization_radiance * factor
-    return Py2sessReplayResult(
-        scalar_radiance=scalar_radiance,
-        polarization_correction=polarization_radiance,
-        radiance=scalar_radiance + polarization_radiance,
     )
 
 
@@ -1719,6 +3042,7 @@ def _solve_linearized_surface_brdf_scale(
     continuum_radiance: float,
     continuum_mask: np.ndarray,
     probe_scale: float,
+    current_scale: float = 1.0,
     scale_min: float,
     scale_max: float,
     prior_sigma: float,
@@ -1728,7 +3052,7 @@ def _solve_linearized_surface_brdf_scale(
     if n_points == 0:
         return SurfaceBrdfRetrieval(1.0, 0.0, 0, math.nan, "no_continuum_points")
 
-    delta_scale = float(probe_scale) - 1.0
+    delta_scale = float(probe_scale) - float(current_scale)
     if not np.isfinite(delta_scale) or abs(delta_scale) < 1.0e-12:
         return SurfaceBrdfRetrieval(1.0, 0.0, n_points, math.nan, "bad_probe_scale")
 
@@ -1750,15 +3074,17 @@ def _solve_linearized_surface_brdf_scale(
     numerator = float(np.sum(jac[valid] * residual[valid]))
     denominator = float(np.sum(jac[valid] * jac[valid]))
     if prior_sigma > 0.0:
-        denominator += 1.0 / (float(prior_sigma) * float(prior_sigma))
+        prior_weight = 1.0 / (float(prior_sigma) * float(prior_sigma))
+        numerator -= (float(current_scale) - 1.0) * prior_weight
+        denominator += prior_weight
     if denominator <= 0.0 or not np.isfinite(denominator):
         return SurfaceBrdfRetrieval(1.0, 0.0, n_valid, math.nan, "zero_surface_response")
 
-    scale = 1.0 + numerator / denominator
+    scale = float(current_scale) + numerator / denominator
     scale = float(np.clip(scale, float(scale_min), float(scale_max)))
     linearized = np.asarray(base_radiance, dtype=float) + (
         np.asarray(probe_radiance, dtype=float) - np.asarray(base_radiance, dtype=float)
-    ) * ((scale - 1.0) / delta_scale)
+    ) * ((scale - float(current_scale)) / delta_scale)
     fit_residual = 100.0 * (linearized[valid] - np.asarray(measured_radiance)[valid]) / continuum
     fit_rmse = float(np.sqrt(np.mean(fit_residual * fit_residual)))
     return SurfaceBrdfRetrieval(scale, 0.0, n_valid, fit_rmse, "continuum_linearized")
@@ -1774,6 +3100,8 @@ def _solve_linearized_surface_brdf_scale_and_tilt(
     continuum_mask: np.ndarray,
     probe_scale: float,
     probe_tilt: float,
+    current_scale: float = 1.0,
+    current_tilt: float = 0.0,
     scale_min: float,
     scale_max: float,
     tilt_min: float,
@@ -1786,8 +3114,8 @@ def _solve_linearized_surface_brdf_scale_and_tilt(
     continuum = float(continuum_radiance)
     if not np.isfinite(continuum) or continuum <= 0.0:
         return SurfaceBrdfRetrieval(1.0, 0.0, n_points, math.nan, "bad_continuum")
-    delta_scale = float(probe_scale) - 1.0
-    delta_tilt = float(probe_tilt)
+    delta_scale = float(probe_scale) - float(current_scale)
+    delta_tilt = float(probe_tilt) - float(current_tilt)
     if abs(delta_scale) < 1.0e-12 or abs(delta_tilt) < 1.0e-12:
         return SurfaceBrdfRetrieval(1.0, 0.0, n_points, math.nan, "bad_probe")
 
@@ -1805,9 +3133,13 @@ def _solve_linearized_surface_brdf_scale_and_tilt(
         solution, *_ = np.linalg.lstsq(design, residual[valid], rcond=None)
     except np.linalg.LinAlgError:
         return SurfaceBrdfRetrieval(1.0, 0.0, n_valid, math.nan, "singular_surface_response")
-    scale = float(np.clip(1.0 + solution[0], scale_min, scale_max))
-    tilt = float(np.clip(solution[1], tilt_min, tilt_max))
-    linearized = base + (scale - 1.0) * continuum * scale_jac + tilt * continuum * tilt_jac
+    scale = float(np.clip(float(current_scale) + solution[0], scale_min, scale_max))
+    tilt = float(np.clip(float(current_tilt) + solution[1], tilt_min, tilt_max))
+    linearized = (
+        base
+        + (scale - float(current_scale)) * continuum * scale_jac
+        + (tilt - float(current_tilt)) * continuum * tilt_jac
+    )
     fit_residual = 100.0 * (linearized[valid] - np.asarray(measured_radiance)[valid]) / continuum
     fit_rmse = float(np.sqrt(np.mean(fit_residual * fit_residual)))
     return SurfaceBrdfRetrieval(scale, tilt, n_valid, fit_rmse, "continuum_linearized_slope")
@@ -2000,7 +3332,7 @@ def main() -> None:
     parser.add_argument(
         "--surface-brdf-continuum-fraction",
         type=float,
-        default=0.20,
+        default=0.40,
         help="Fraction of highest-radiance detector colors used for the surface BRDF fit.",
     )
     parser.add_argument(
@@ -2026,6 +3358,15 @@ def main() -> None:
         type=float,
         default=0.02,
         help="Finite-difference step for the linearized surface BRDF retrieval.",
+    )
+    parser.add_argument(
+        "--surface-brdf-max-iterations",
+        type=int,
+        default=3,
+        help=(
+            "Maximum number of continuum surface BRDF linearization iterations. "
+            "Use 1 to reproduce the original single-step replay."
+        ),
     )
     parser.add_argument(
         "--surface-brdf-prior-sigma",
@@ -2069,6 +3410,30 @@ def main() -> None:
             "Path to RtRetrievalFramework l2_aerosol_combined.h5. Required for "
             "--aerosol-treatment oco-l2fp unless RTRF_AEROSOL_FILE is set."
         ),
+    )
+    parser.add_argument(
+        "--diagnostic-aerosol-types",
+        default=None,
+        help=(
+            "Comma-separated aerosol types to keep for aerosol diagnostics, e.g. SS,SO. "
+            "When set, this overrides --aerosol-type-set."
+        ),
+    )
+    parser.add_argument(
+        "--aerosol-type-set",
+        choices=("tropospheric", "all"),
+        default="tropospheric",
+        help=(
+            "Aerosol type set used when --diagnostic-aerosol-types is not supplied. "
+            "'tropospheric' keeps DU, SS, BC, OC, and SO. 'all' also keeps the "
+            "OCO cloud/stratospheric proxy types Ice, Water, and ST."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-aerosol-scale",
+        type=float,
+        default=1.0,
+        help="Diagnostic multiplicative scale applied to aerosol optical depth.",
     )
     parser.add_argument(
         "--eof-treatment",
@@ -2118,15 +3483,28 @@ def main() -> None:
     )
     parser.add_argument(
         "--polarization-correction",
-        choices=("none", "rayleigh-fo", "rayleigh-fo-updiffuse"),
-        default="rayleigh-fo",
+        choices=(
+            "none",
+            "rayleigh-fo",
+            "rayleigh-aerosol-fo",
+            "rayleigh-fo-updiffuse",
+            "rayleigh-aerosol-fo-updiffuse",
+            "rayleigh-aerosol-fo-rayleigh-2os-diagnostic",
+        ),
+        default="rayleigh-aerosol-fo",
         help=(
-            "Optional correction that projects Rayleigh Q/U scattering "
+            "Optional correction that projects Q/U scattering "
             "through the L1B instrument Stokes coefficients. The default "
-            "'rayleigh-fo' uses only the direct-solar first-order term; "
-            "'rayleigh-fo-updiffuse' also adds one source-iteration term from "
-            "py2sess scalar upwelling diffuse radiance. Use 'none' for scalar-only "
-            "replay. This leaves the py2sess scalar solver unchanged."
+            "'rayleigh-aerosol-fo' uses the direct-solar Rayleigh term and "
+            "also includes direct-solar aerosol polarization from the OCO "
+            "L2FP phase matrix when available; 'rayleigh-fo' keeps only "
+            "Rayleigh for diagnostics; "
+            "'rayleigh-aerosol-fo-updiffuse' also adds one source-iteration "
+            "term from py2sess scalar upwelling diffuse radiance; "
+            "'rayleigh-aerosol-fo-rayleigh-2os-diagnostic' adds a diagnostic "
+            "Rayleigh-Rayleigh second-order source iteration from direct-solar "
+            "FO scalar radiance. Use 'none' for scalar-only replay. This "
+            "leaves the py2sess scalar solver unchanged."
         ),
     )
     parser.add_argument(
@@ -2141,11 +3519,81 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--ocean-coxmunk-stokes-scope",
+        choices=("all", "direct", "none"),
+        default="all",
+        help=(
+            "Diagnostic scope for applying the GISS Cox-Munk Stokes projection. "
+            "'all' applies it to both direct glint and py2sess BRDF Fourier terms; "
+            "'direct' applies it only to the direct surface BRF; 'none' leaves "
+            "the scalar Cox-Munk surface unprojected."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-gas-tau-scale-o2",
+        type=float,
+        default=1.0,
+        help="Diagnostic multiplier on O2-band O2 gas optical depth.",
+    )
+    parser.add_argument(
+        "--diagnostic-gas-tau-scale-wco2",
+        type=float,
+        default=1.0,
+        help="Diagnostic multiplier on weak-CO2-band CO2 gas optical depth.",
+    )
+    parser.add_argument(
+        "--diagnostic-gas-tau-scale-sco2",
+        type=float,
+        default=1.0,
+        help="Diagnostic multiplier on strong-CO2-band CO2 gas optical depth.",
+    )
+    parser.add_argument(
+        "--diagnostic-layer-pressure-method",
+        choices=("geometric", "arithmetic"),
+        default="geometric",
+        help="Diagnostic layer-pressure sampling used for ABSCO lookup.",
+    )
+    parser.add_argument(
+        "--diagnostic-surface-pressure-offset-hpa",
+        type=float,
+        default=0.0,
+        help=(
+            "Diagnostic offset added to the L2 retrieved surface pressure before "
+            "ABSCO lookup. The retrieval pressure grid is scaled to the shifted "
+            "surface pressure."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-surface-pressure-column-mode",
+        choices=("fixed-columns", "hydrostatic-columns"),
+        default="fixed-columns",
+        help=(
+            "How to update layer columns after a diagnostic surface-pressure shift. "
+            "'fixed-columns' preserves the L2 retrieved gas columns and isolates "
+            "pressure-broadening sensitivity. 'hydrostatic-columns' recomputes "
+            "dry/wet/H2O columns from delta-p and H2O VMR, so O2, CO2, Rayleigh, "
+            "and height inputs follow the shifted pressure grid."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-gas-integration",
+        choices=("single-point", "simpson10", "simpson10-metgrid"),
+        default="single-point",
+        help=(
+            "Diagnostic ABSCO layer integration. 'single-point' uses the current "
+            "one pressure/temperature sample per layer. 'simpson10' preserves the "
+            "L2 gas columns but averages cross sections over ten pressure "
+            "subintervals in each layer. 'simpson10-metgrid' also inserts the "
+            "meteorology pressure levels as Simpson segment endpoints, matching "
+            "the RtRetrieval AbsorberAbsco treatment more closely."
+        ),
+    )
+    parser.add_argument(
         "--polarization-diffuse-azimuths",
         type=int,
         default=8,
         help=(
-            "Number of azimuth quadrature points for rayleigh-fo-updiffuse. "
+            "Number of azimuth quadrature points for the updiffuse polarization modes. "
             "Ignored by other polarization modes."
         ),
     )
@@ -2185,6 +3633,8 @@ def main() -> None:
         raise ValueError("--surface-brdf-scale bounds must contain 1")
     if not np.isfinite(args.surface_brdf_probe_step) or args.surface_brdf_probe_step <= 0.0:
         raise ValueError("--surface-brdf-probe-step must be positive and finite")
+    if args.surface_brdf_max_iterations <= 0:
+        raise ValueError("--surface-brdf-max-iterations must be positive")
     if 1.0 + args.surface_brdf_probe_step > args.surface_brdf_scale_max:
         raise ValueError("--surface-brdf-probe-step must stay within --surface-brdf-scale-max")
     if args.surface_brdf_prior_sigma < 0.0 or not np.isfinite(args.surface_brdf_prior_sigma):
@@ -2199,10 +3649,20 @@ def main() -> None:
         raise FileNotFoundError(
             "--eof-treatment oco3-static requires --oco3-eof-file or RTRF_OCO3_EOF_FILE"
         )
+    if args.diagnostic_aerosol_scale < 0.0:
+        raise ValueError("--diagnostic-aerosol-scale must be nonnegative")
+    aerosol_type_filter = _parse_aerosol_type_filter(args.diagnostic_aerosol_types)
+    if aerosol_type_filter is None:
+        aerosol_type_filter = _default_aerosol_type_filter(args.aerosol_type_set)
+    aerosol_type_filter_label = (
+        ",".join(sorted(aerosol_type_filter))
+        if aerosol_type_filter is not None
+        else "all_retrieved"
+    )
 
-    l1b_path = args.data_dir / "oco3_L1bScSC_17767a_220624_B10313r_220907005244.h5"
-    l2std_path = args.data_dir / "oco3_L2StdSC_17767a_220624_B10313r_220919181911.h5"
-    l2dia_path = args.data_dir / "oco3_L2DiaSC_17767a_220624_B10313r_220919175057.h5"
+    l1b_path = _single_data_file(args.data_dir, "oco3_L1bScSC_*.h5")
+    l2std_path = _single_data_file(args.data_dir, "oco3_L2StdSC_*.h5")
+    l2dia_path = _single_data_file(args.data_dir, "oco3_L2DiaSC_*.h5")
     for path in (l1b_path, l2std_path, l2dia_path, args.co2_absco, args.o2_absco, args.h2o_absco):
         if not path.exists():
             raise FileNotFoundError(path)
@@ -2247,6 +3707,11 @@ def main() -> None:
         o2_scale = std["Metadata/AbscoO2Scale"][...].astype(float)
         co2_scale = std["Metadata/AbscoCO2Scale"][...].astype(float)
         h2o_scale = std["Metadata/AbscoH2OScale"][...].astype(float)
+        diagnostic_gas_tau_scale = {
+            "o2": float(args.diagnostic_gas_tau_scale_o2),
+            "wco2": float(args.diagnostic_gas_tau_scale_wco2),
+            "sco2": float(args.diagnostic_gas_tau_scale_sco2),
+        }
 
         for case in selected:
             index = int(case["retrieval_index"])
@@ -2259,7 +3724,13 @@ def main() -> None:
             dia_index = int(np.argwhere(dia_sounding_id == sid)[0, 0])
             if dia_index != index:
                 raise ValueError(f"L2Std/L2Dia retrieval index mismatch for {sid}")
-            state = _state_for_retrieval(std, index)
+            state = _state_for_retrieval(
+                std,
+                index,
+                layer_pressure_method=args.diagnostic_layer_pressure_method,
+                surface_pressure_offset_hpa=args.diagnostic_surface_pressure_offset_hpa,
+                surface_pressure_column_mode=args.diagnostic_surface_pressure_column_mode,
+            )
             relative_velocity = float(std["RetrievalGeometry/retrieval_relative_velocity"][index])
             solar_relative_velocity = float(
                 std["RetrievalGeometry/retrieval_solar_relative_velocity"][index]
@@ -2335,37 +3806,99 @@ def main() -> None:
                     relative_velocity_m_s=relative_velocity,
                 )
 
-                x_o2 = (
-                    absco["o2"].cross_section_cm2(
+                important_gas_pressure = (
+                    np.asarray(state["met_pressure_pa"], dtype=float)
+                    if args.diagnostic_gas_integration == "simpson10-metgrid"
+                    else None
+                )
+                if args.diagnostic_gas_integration in {"simpson10", "simpson10-metgrid"}:
+                    x_h2o = _column_weighted_absco_cross_section_cm2(
+                        absco=absco["h2o"],
+                        wavelength_um=gas_wavelength,
+                        pressure_levels_pa=np.asarray(state["pressure_pa"], dtype=float),
+                        important_pressure_levels_pa=important_gas_pressure,
+                        temperature_pressure_levels_pa=np.asarray(
+                            state["met_pressure_pa"], dtype=float
+                        ),
+                        temperature_levels_k=np.asarray(state["met_temperature_k"], dtype=float),
+                        h2o_vmr_pressure_levels_pa=np.asarray(
+                            state["met_pressure_pa"], dtype=float
+                        ),
+                        h2o_vmr_levels=np.asarray(state["met_h2o_vmr"], dtype=float),
+                        species_vmr_pressure_levels_pa=np.asarray(
+                            state["met_pressure_pa"], dtype=float
+                        ),
+                        species_vmr_levels=np.asarray(state["met_h2o_vmr"], dtype=float),
+                    )
+                    if band == "o2":
+                        x_o2 = _column_weighted_absco_cross_section_cm2(
+                            absco=absco["o2"],
+                            wavelength_um=gas_wavelength,
+                            pressure_levels_pa=np.asarray(state["pressure_pa"], dtype=float),
+                            important_pressure_levels_pa=important_gas_pressure,
+                            temperature_pressure_levels_pa=np.asarray(
+                                state["met_pressure_pa"], dtype=float
+                            ),
+                            temperature_levels_k=np.asarray(
+                                state["met_temperature_k"], dtype=float
+                            ),
+                            h2o_vmr_pressure_levels_pa=np.asarray(
+                                state["met_pressure_pa"], dtype=float
+                            ),
+                            h2o_vmr_levels=np.asarray(state["met_h2o_vmr"], dtype=float),
+                        )
+                        x_co2 = 0.0
+                    else:
+                        x_o2 = 0.0
+                        x_co2 = _column_weighted_absco_cross_section_cm2(
+                            absco=absco["co2"],
+                            wavelength_um=gas_wavelength,
+                            pressure_levels_pa=np.asarray(state["pressure_pa"], dtype=float),
+                            important_pressure_levels_pa=important_gas_pressure,
+                            temperature_pressure_levels_pa=np.asarray(
+                                state["met_pressure_pa"], dtype=float
+                            ),
+                            temperature_levels_k=np.asarray(
+                                state["met_temperature_k"], dtype=float
+                            ),
+                            h2o_vmr_pressure_levels_pa=np.asarray(
+                                state["met_pressure_pa"], dtype=float
+                            ),
+                            h2o_vmr_levels=np.asarray(state["met_h2o_vmr"], dtype=float),
+                            species_vmr_levels=np.asarray(state["co2_vmr"], dtype=float),
+                        )
+                else:
+                    x_o2 = (
+                        absco["o2"].cross_section_cm2(
+                            wavelength_um=gas_wavelength,
+                            pressure_pa=np.asarray(state["layer_pressure_pa"], dtype=float),
+                            temperature_k=np.asarray(state["layer_temperature_k"], dtype=float),
+                            h2o_vmr=np.asarray(state["layer_h2o_vmr"], dtype=float),
+                        )
+                        if band == "o2"
+                        else 0.0
+                    )
+                    x_co2 = (
+                        absco["co2"].cross_section_cm2(
+                            wavelength_um=gas_wavelength,
+                            pressure_pa=np.asarray(state["layer_pressure_pa"], dtype=float),
+                            temperature_k=np.asarray(state["layer_temperature_k"], dtype=float),
+                            h2o_vmr=np.asarray(state["layer_h2o_vmr"], dtype=float),
+                        )
+                        if band != "o2"
+                        else 0.0
+                    )
+                    x_h2o = absco["h2o"].cross_section_cm2(
                         wavelength_um=gas_wavelength,
                         pressure_pa=np.asarray(state["layer_pressure_pa"], dtype=float),
                         temperature_k=np.asarray(state["layer_temperature_k"], dtype=float),
                         h2o_vmr=np.asarray(state["layer_h2o_vmr"], dtype=float),
                     )
-                    * o2_scale[band_index]
-                    if band == "o2"
-                    else 0.0
-                )
-                x_co2 = (
-                    absco["co2"].cross_section_cm2(
-                        wavelength_um=gas_wavelength,
-                        pressure_pa=np.asarray(state["layer_pressure_pa"], dtype=float),
-                        temperature_k=np.asarray(state["layer_temperature_k"], dtype=float),
-                        h2o_vmr=np.asarray(state["layer_h2o_vmr"], dtype=float),
-                    )
-                    * co2_scale[band_index]
-                    if band != "o2"
-                    else 0.0
-                )
-                x_h2o = (
-                    absco["h2o"].cross_section_cm2(
-                        wavelength_um=gas_wavelength,
-                        pressure_pa=np.asarray(state["layer_pressure_pa"], dtype=float),
-                        temperature_k=np.asarray(state["layer_temperature_k"], dtype=float),
-                        h2o_vmr=np.asarray(state["layer_h2o_vmr"], dtype=float),
-                    )
-                    * h2o_scale[band_index]
-                )
+                x_h2o = x_h2o * h2o_scale[band_index]
+                if band == "o2":
+                    x_o2 = x_o2 * o2_scale[band_index] * diagnostic_gas_tau_scale[band]
+                else:
+                    x_co2 = x_co2 * co2_scale[band_index] * diagnostic_gas_tau_scale[band]
                 gas_tau = x_h2o * np.asarray(state["h2o_col_cm2"], dtype=float)[np.newaxis, :]
                 o2_column_tau = np.zeros(eval_wavelength.shape, dtype=float)
                 if band == "o2":
@@ -2382,17 +3915,54 @@ def main() -> None:
                         + x_co2 * np.asarray(state["co2_col_cm2"], dtype=float)[np.newaxis, :]
                     )
 
-                reflectance = _land_surface_reflectance(
-                    case=case,
-                    band=band,
-                    wavelength_um=eval_wavelength,
-                    surface_spectrum=args.surface_spectrum,
-                    surface_angular=args.surface_angular,
-                    angles=surface_angles,
-                )
+                surface_model_family = "land-rpv"
+                surface_angular_model = args.surface_angular
+                surface_wind_speed = math.nan
+                surface_refractive_index = math.nan
+                surface_lambertian_albedo_l2 = math.nan
+                surface_coxmunk_direct_brf = math.nan
+                surface_coxmunk_stokes_i = math.nan
+                surface_coxmunk_stokes_scale = math.nan
+                surface_coxmunk_direct_scale = math.nan
+                surface_coxmunk_fourier_scale = math.nan
+                surface_l2_weight = math.nan
+                surface_l2_weight_at_reference = math.nan
                 brdf = None
-                solver_albedo = reflectance
-                if args.surface_angular == "rpv-brdf":
+                if _is_ocean_surface(case):
+                    surface_model_family = "ocean-coxmunk-lambertian"
+                    surface_angular_model = "coxmunk-lambertian"
+                    brdf, reflectance, ocean_surface = _oco_coxmunk_lambertian_brdf(
+                        case=case,
+                        band=band,
+                        wavelength_um=eval_wavelength,
+                        surface_spectrum=args.surface_spectrum,
+                        angles=rt_angles,
+                        stream_value=args.stream_value,
+                        brdf_quadrature_streams=args.brdf_quadrature_streams,
+                        stokes_projection=stokes_projection,
+                        coxmunk_stokes_scope=args.ocean_coxmunk_stokes_scope,
+                        fo_direct_brf_factor=fo_direct_brf_factor,
+                    )
+                    solver_albedo = np.zeros_like(reflectance)
+                    surface_wind_speed = ocean_surface["wind_speed"]
+                    surface_refractive_index = ocean_surface["refractive_index"]
+                    surface_lambertian_albedo_l2 = ocean_surface["lambertian_albedo_reference"]
+                    surface_coxmunk_direct_brf = ocean_surface["coxmunk_direct_brf"]
+                    surface_coxmunk_stokes_i = ocean_surface["coxmunk_stokes_i"]
+                    surface_coxmunk_stokes_scale = ocean_surface["coxmunk_stokes_scale"]
+                    surface_coxmunk_direct_scale = ocean_surface["coxmunk_direct_scale"]
+                    surface_coxmunk_fourier_scale = ocean_surface["coxmunk_fourier_scale"]
+                else:
+                    reflectance = _land_surface_reflectance(
+                        case=case,
+                        band=band,
+                        wavelength_um=eval_wavelength,
+                        surface_spectrum=args.surface_spectrum,
+                        surface_angular=args.surface_angular,
+                        angles=surface_angles,
+                    )
+                    solver_albedo = reflectance
+                if args.surface_angular == "rpv-brdf" and not _is_ocean_surface(case):
                     brdf, reflectance = _oco_rpv_brdf(
                         case=case,
                         band=band,
@@ -2404,6 +3974,7 @@ def main() -> None:
                         fo_direct_brf_factor=fo_direct_brf_factor,
                     )
                     solver_albedo = np.zeros_like(reflectance)
+                    surface_l2_weight = float(case[f"brdf_weight_{band}"])
                 aerosol = _posterior_aerosol_inputs(
                     std=std,
                     oco_l2fp_property_file=args.oco_l2fp_aerosol_file,
@@ -2411,6 +3982,8 @@ def main() -> None:
                     state=state,
                     wavelength_um=eval_wavelength,
                     treatment=args.aerosol_treatment,
+                    aerosol_type_filter=aerosol_type_filter,
+                    aerosol_scale=args.diagnostic_aerosol_scale,
                 )
                 rpv_fields = (
                     f"brdf_hotspot_parameter_{band}",
@@ -2419,9 +3992,11 @@ def main() -> None:
                 )
                 rpv_kernel = (
                     _oco_rpv_kernel(case=case, band=band, angles=surface_angles)
-                    if all(field in case for field in rpv_fields)
+                    if (not _is_ocean_surface(case) and all(field in case for field in rpv_fields))
                     else math.nan
                 )
+                if not _is_ocean_surface(case) and f"brdf_weight_{band}" in case:
+                    surface_l2_weight = float(case[f"brdf_weight_{band}"])
                 solar_doppler_velocity = 0.0
                 solar_wavelength, solar_doppler_velocity = _solar_reference_lookup_wavelength(
                     wavelength_um=eval_wavelength,
@@ -2443,13 +4018,10 @@ def main() -> None:
                     )[0]
                 )
                 obs = measured[index, selected_colors].astype(float)
-                py_run = _run_py2sess(
+                rt_context = _prepare_py2sess_rt_context(
                     wavelength_um=eval_wavelength,
                     state=state,
                     gas_tau=gas_tau,
-                    albedo=solver_albedo,
-                    diffuse_albedo=reflectance,
-                    brdf=brdf,
                     angles=rt_angles,
                     aerosol=aerosol,
                     solar_reference_factor=solar_reference_factor,
@@ -2459,6 +4031,19 @@ def main() -> None:
                     polarization_sign=args.polarization_sign,
                     polarization_diffuse_azimuths=args.polarization_diffuse_azimuths,
                     stream_value=args.stream_value,
+                )
+                polarization_correction_cache = None
+                if args.polarization_correction in {"none", "rayleigh-fo", "rayleigh-aerosol-fo"}:
+                    polarization_correction_cache = _compute_py2sess_polarization_correction(
+                        context=rt_context,
+                        diffuse_albedo=reflectance,
+                    )
+                py_run = _run_py2sess_prepared(
+                    context=rt_context,
+                    albedo=solver_albedo,
+                    diffuse_albedo=reflectance,
+                    brdf=brdf,
+                    polarization_correction_cache=polarization_correction_cache,
                 )
                 py_detector = _detector_average(
                     py_run.radiance,
@@ -2491,13 +4076,12 @@ def main() -> None:
                         ),
                         fluorescence_slope=float(std["RetrievalResults/fluorescence_slope"][index]),
                     )
-                    for det in range(center_wavelength.size):
-                        det_mask = detector_id == det
-                        weights = response_flat[det_mask]
-                        weight_sum = np.sum(weights)
-                        fluorescence_detector_photon[det] = (
-                            np.sum(fluorescence_eval[det_mask] * weights) / weight_sum
-                        )
+                    fluorescence_detector_photon = _detector_average(
+                        fluorescence_eval,
+                        detector_id=detector_id,
+                        response_flat=response_flat,
+                        n_detector=center_wavelength.size,
+                    )
                 fluorescence_energy = _photon_to_energy_spectral_radiance(
                     fluorescence_detector_photon,
                     center_wavelength,
@@ -2533,12 +4117,18 @@ def main() -> None:
                 py_detector = py_detector + fixed_detector_energy
                 py_scalar_detector = py_detector - py_polarization_detector
                 obs_energy = _photon_to_energy_spectral_radiance(obs, center_wavelength)
+                unadjusted_stats = _continuum_residual_stats(
+                    py_detector,
+                    obs_energy,
+                    continuum_signal_energy,
+                )
                 surface_brdf_retrieval = SurfaceBrdfRetrieval(
                     scale=1.0,
                     tilt=0.0,
                     n_points=0,
                     fit_rmse_percent=math.nan,
                     status="not_requested",
+                    iterations=0,
                 )
                 tilt_axis = _surface_brdf_tilt_axis(wavelength_um=eval_wavelength, band=band)
 
@@ -2550,24 +4140,14 @@ def main() -> None:
                     if np.any(~np.isfinite(surface_factor)) or np.any(surface_factor <= 0.0):
                         raise ValueError("surface BRDF scale/tilt produced non-positive weights")
                     scaled_reflectance = surface_factor * reflectance
-                    scaled_run = _run_py2sess(
-                        wavelength_um=eval_wavelength,
-                        state=state,
-                        gas_tau=gas_tau,
+                    scaled_run = _run_py2sess_prepared(
+                        context=rt_context,
                         albedo=solver_albedo
                         if brdf is not None
                         else surface_factor * solver_albedo,
                         diffuse_albedo=scaled_reflectance,
                         brdf=_scale_brdf(brdf, surface_factor),
-                        angles=rt_angles,
-                        aerosol=aerosol,
-                        solar_reference_factor=solar_reference_factor,
-                        stokes_coefficients=stokes_coefficients,
-                        stokes_projection_mode=args.stokes_projection,
-                        polarization_correction=args.polarization_correction,
-                        polarization_sign=args.polarization_sign,
-                        polarization_diffuse_azimuths=args.polarization_diffuse_azimuths,
-                        stream_value=args.stream_value,
+                        polarization_correction_cache=polarization_correction_cache,
                     )
                     detector = _detector_average(
                         scaled_run.radiance,
@@ -2588,55 +4168,131 @@ def main() -> None:
                     "continuum-linearized",
                     "continuum-linearized-slope",
                 }:
-                    probe_scale = 1.0 + args.surface_brdf_probe_step
-                    probe_detector, _, _ = _run_scaled_surface_detector(probe_scale)
                     continuum_mask = _continuum_fit_mask(
                         obs_energy,
                         fraction=args.surface_brdf_continuum_fraction,
                         min_points=args.surface_brdf_continuum_min_points,
                     )
-                    if args.surface_brdf_retrieval == "continuum-linearized":
-                        surface_brdf_retrieval = _solve_linearized_surface_brdf_scale(
-                            measured_radiance=obs_energy,
-                            base_radiance=py_detector,
-                            probe_radiance=probe_detector,
-                            continuum_radiance=continuum_signal_energy,
-                            continuum_mask=continuum_mask,
-                            probe_scale=probe_scale,
-                            scale_min=args.surface_brdf_scale_min,
-                            scale_max=args.surface_brdf_scale_max,
-                            prior_sigma=args.surface_brdf_prior_sigma,
+                    current_scale = 1.0
+                    current_tilt = 0.0
+                    for surface_iteration in range(args.surface_brdf_max_iterations):
+                        probe_scale = current_scale + args.surface_brdf_probe_step
+                        probe_detector, _, _ = _run_scaled_surface_detector(
+                            probe_scale,
+                            current_tilt,
                         )
-                    else:
-                        tilt_probe_detector, _, _ = _run_scaled_surface_detector(
-                            1.0,
-                            args.surface_brdf_probe_step,
-                        )
-                        surface_brdf_retrieval = _solve_linearized_surface_brdf_scale_and_tilt(
-                            measured_radiance=obs_energy,
-                            base_radiance=py_detector,
-                            scale_probe_radiance=probe_detector,
-                            tilt_probe_radiance=tilt_probe_detector,
-                            continuum_radiance=continuum_signal_energy,
-                            continuum_mask=continuum_mask,
-                            probe_scale=probe_scale,
-                            probe_tilt=args.surface_brdf_probe_step,
-                            scale_min=args.surface_brdf_scale_min,
-                            scale_max=args.surface_brdf_scale_max,
-                            tilt_min=args.surface_brdf_tilt_min,
-                            tilt_max=args.surface_brdf_tilt_max,
-                        )
-                    if surface_brdf_retrieval.status.startswith("continuum_linearized"):
-                        py_detector, py_scalar_detector, py_polarization_detector = (
-                            _run_scaled_surface_detector(
-                                surface_brdf_retrieval.scale,
-                                surface_brdf_retrieval.tilt,
+                        if args.surface_brdf_retrieval == "continuum-linearized":
+                            candidate = _solve_linearized_surface_brdf_scale(
+                                measured_radiance=obs_energy,
+                                base_radiance=py_detector,
+                                probe_radiance=probe_detector,
+                                continuum_radiance=continuum_signal_energy,
+                                continuum_mask=continuum_mask,
+                                probe_scale=probe_scale,
+                                current_scale=current_scale,
+                                scale_min=args.surface_brdf_scale_min,
+                                scale_max=args.surface_brdf_scale_max,
+                                prior_sigma=args.surface_brdf_prior_sigma,
                             )
+                        else:
+                            probe_tilt = current_tilt + args.surface_brdf_probe_step
+                            tilt_probe_detector, _, _ = _run_scaled_surface_detector(
+                                current_scale,
+                                probe_tilt,
+                            )
+                            candidate = _solve_linearized_surface_brdf_scale_and_tilt(
+                                measured_radiance=obs_energy,
+                                base_radiance=py_detector,
+                                scale_probe_radiance=probe_detector,
+                                tilt_probe_radiance=tilt_probe_detector,
+                                continuum_radiance=continuum_signal_energy,
+                                continuum_mask=continuum_mask,
+                                probe_scale=probe_scale,
+                                probe_tilt=probe_tilt,
+                                current_scale=current_scale,
+                                current_tilt=current_tilt,
+                                scale_min=args.surface_brdf_scale_min,
+                                scale_max=args.surface_brdf_scale_max,
+                                tilt_min=args.surface_brdf_tilt_min,
+                                tilt_max=args.surface_brdf_tilt_max,
+                            )
+                        if not candidate.status.startswith("continuum_linearized"):
+                            if surface_iteration == 0:
+                                surface_brdf_retrieval = SurfaceBrdfRetrieval(
+                                    candidate.scale,
+                                    candidate.tilt,
+                                    candidate.n_points,
+                                    candidate.fit_rmse_percent,
+                                    candidate.status,
+                                    0,
+                                )
+                            break
+                        current_scale = candidate.scale
+                        current_tilt = candidate.tilt
+                        py_detector, py_scalar_detector, py_polarization_detector = (
+                            _run_scaled_surface_detector(current_scale, current_tilt)
+                        )
+                        surface_brdf_retrieval = SurfaceBrdfRetrieval(
+                            candidate.scale,
+                            candidate.tilt,
+                            candidate.n_points,
+                            candidate.fit_rmse_percent,
+                            candidate.status,
+                            surface_iteration + 1,
                         )
                 final_surface_factor = (
                     surface_brdf_retrieval.scale + surface_brdf_retrieval.tilt * tilt_axis
                 )
                 final_reflectance = final_surface_factor * reflectance
+                if np.isfinite(surface_l2_weight):
+                    surface_l2_weight_at_reference = (
+                        surface_l2_weight * surface_brdf_retrieval.scale
+                    )
+                is_ocean_surface = _is_ocean_surface(case)
+                surface_adjustment_target = "none"
+                surface_adjustment_components = "none"
+                if args.surface_brdf_retrieval != "none":
+                    if is_ocean_surface:
+                        surface_adjustment_target = "ocean_coxmunk_lambertian_effective_continuum"
+                        surface_adjustment_components = (
+                            "coxmunk_fourier_terms;lambertian_albedo;diffuse_albedo"
+                        )
+                    else:
+                        surface_adjustment_target = "land_rpv_brdf_weight"
+                        surface_adjustment_components = "rpv_brdf_weight;diffuse_albedo"
+                land_brdf_weight_scale = (
+                    surface_brdf_retrieval.scale
+                    if (not is_ocean_surface and np.isfinite(surface_l2_weight))
+                    else math.nan
+                )
+                land_brdf_weight_tilt = (
+                    surface_brdf_retrieval.tilt
+                    if (not is_ocean_surface and np.isfinite(surface_l2_weight))
+                    else math.nan
+                )
+                ocean_surface_continuum_scale = (
+                    surface_brdf_retrieval.scale if is_ocean_surface else math.nan
+                )
+                ocean_surface_continuum_tilt = (
+                    surface_brdf_retrieval.tilt if is_ocean_surface else math.nan
+                )
+                land_brdf_weight_fit_points = (
+                    surface_brdf_retrieval.n_points if not is_ocean_surface else 0
+                )
+                land_brdf_weight_fit_rmse = (
+                    surface_brdf_retrieval.fit_rmse_percent if not is_ocean_surface else math.nan
+                )
+                land_brdf_weight_status = (
+                    surface_brdf_retrieval.status
+                    if not is_ocean_surface
+                    else "not_land_brdf_weight"
+                )
+                ocean_surface_continuum_fit_points = (
+                    surface_brdf_retrieval.n_points if is_ocean_surface else 0
+                )
+                ocean_surface_continuum_fit_rmse = (
+                    surface_brdf_retrieval.fit_rmse_percent if is_ocean_surface else math.nan
+                )
 
                 py_unit_continuum_signal = _sample_continuum_level(py_detector)
                 if not np.isfinite(py_unit_continuum_signal) or py_unit_continuum_signal <= 0.0:
@@ -2679,26 +4335,81 @@ def main() -> None:
                         "ils_grid_spacing_cm_1": f"{args.ils_grid_spacing_cm_1:.9g}",
                         "relative_azimuth_deg": f"{surface_angles[2]:.6f}",
                         "rt_relative_azimuth_deg": f"{rt_angles[2]:.6f}",
+                        "surface_model_family": surface_model_family,
                         "surface_reflectance_model": args.surface_spectrum,
-                        "surface_angular_model": args.surface_angular,
+                        "surface_angular_model": surface_angular_model,
                         "surface_rpv_kernel": f"{rpv_kernel:.9g}",
                         "surface_reflectance_used": (
                             f"{float(np.nanmedian(final_reflectance)):.9g}"
                         ),
                         "surface_reflectance_min": f"{float(np.nanmin(final_reflectance)):.9g}",
                         "surface_reflectance_max": f"{float(np.nanmax(final_reflectance)):.9g}",
-                        "surface_brdf_retrieval": args.surface_brdf_retrieval,
-                        "surface_brdf_retrieval_status": surface_brdf_retrieval.status,
-                        "surface_brdf_weight_l2": f"{float(case[f'brdf_weight_{band}']):.9g}",
-                        "surface_brdf_weight_scale": f"{surface_brdf_retrieval.scale:.9g}",
-                        "surface_brdf_weight_tilt": f"{surface_brdf_retrieval.tilt:.9g}",
-                        "surface_brdf_weight_at_reference": (
-                            f"{float(case[f'brdf_weight_{band}']) * surface_brdf_retrieval.scale:.9g}"
-                        ),
-                        "surface_brdf_fit_points": surface_brdf_retrieval.n_points,
-                        "surface_brdf_fit_rmse_percent": (
+                        "surface_ocean_wind_speed_m_s": f"{surface_wind_speed:.9g}",
+                        "surface_ocean_refractive_index": f"{surface_refractive_index:.9g}",
+                        "surface_lambertian_albedo_l2": f"{surface_lambertian_albedo_l2:.9g}",
+                        "surface_coxmunk_direct_brf": f"{surface_coxmunk_direct_brf:.9g}",
+                        "surface_coxmunk_stokes_i": f"{surface_coxmunk_stokes_i:.9g}",
+                        "surface_coxmunk_stokes_scale": f"{surface_coxmunk_stokes_scale:.9g}",
+                        "surface_coxmunk_stokes_scope": args.ocean_coxmunk_stokes_scope,
+                        "surface_coxmunk_direct_scale": f"{surface_coxmunk_direct_scale:.9g}",
+                        "surface_coxmunk_fourier_scale": f"{surface_coxmunk_fourier_scale:.9g}",
+                        "surface_adjustment_target": surface_adjustment_target,
+                        "surface_adjustment_components": surface_adjustment_components,
+                        "surface_adjustment_method": args.surface_brdf_retrieval,
+                        "surface_adjustment_status": surface_brdf_retrieval.status,
+                        "surface_adjustment_iterations": surface_brdf_retrieval.iterations,
+                        "surface_adjustment_scale": f"{surface_brdf_retrieval.scale:.9g}",
+                        "surface_adjustment_tilt": f"{surface_brdf_retrieval.tilt:.9g}",
+                        "surface_adjustment_fit_points": surface_brdf_retrieval.n_points,
+                        "surface_adjustment_fit_rmse_percent": (
                             f"{surface_brdf_retrieval.fit_rmse_percent:.9g}"
                         ),
+                        "surface_adjustment_scale_bounds": (
+                            f"{args.surface_brdf_scale_min:.9g};{args.surface_brdf_scale_max:.9g}"
+                        ),
+                        "surface_unadjusted_continuum_referenced_bias_percent": (
+                            f"{unadjusted_stats['continuum_referenced_bias_percent']:.9g}"
+                        ),
+                        "surface_unadjusted_continuum_referenced_rmse_percent": (
+                            f"{unadjusted_stats['continuum_referenced_rmse_percent']:.9g}"
+                        ),
+                        "surface_unadjusted_continuum_referenced_max_abs_percent": (
+                            f"{unadjusted_stats['continuum_referenced_max_abs_percent']:.9g}"
+                        ),
+                        "surface_brdf_retrieval": args.surface_brdf_retrieval,
+                        "surface_brdf_retrieval_status": land_brdf_weight_status,
+                        "surface_brdf_weight_l2": f"{surface_l2_weight:.9g}",
+                        "surface_brdf_weight_scale": f"{land_brdf_weight_scale:.9g}",
+                        "surface_brdf_weight_tilt": f"{land_brdf_weight_tilt:.9g}",
+                        "surface_brdf_weight_at_reference": f"{surface_l2_weight_at_reference:.9g}",
+                        "land_brdf_weight_l2": f"{surface_l2_weight:.9g}",
+                        "land_brdf_weight_scale": f"{land_brdf_weight_scale:.9g}",
+                        "land_brdf_weight_tilt": f"{land_brdf_weight_tilt:.9g}",
+                        "land_brdf_weight_at_reference": f"{surface_l2_weight_at_reference:.9g}",
+                        "land_brdf_weight_fit_points": land_brdf_weight_fit_points,
+                        "land_brdf_weight_fit_rmse_percent": (f"{land_brdf_weight_fit_rmse:.9g}"),
+                        "land_brdf_weight_status": land_brdf_weight_status,
+                        "ocean_surface_continuum_status": (
+                            surface_brdf_retrieval.status if is_ocean_surface else "not_ocean"
+                        ),
+                        "ocean_surface_continuum_scale": (f"{ocean_surface_continuum_scale:.9g}"),
+                        "ocean_surface_continuum_tilt": (f"{ocean_surface_continuum_tilt:.9g}"),
+                        "ocean_surface_continuum_fit_points": (ocean_surface_continuum_fit_points),
+                        "ocean_surface_continuum_fit_rmse_percent": (
+                            f"{ocean_surface_continuum_fit_rmse:.9g}"
+                        ),
+                        "ocean_surface_unadjusted_bias_percent": (
+                            f"{unadjusted_stats['continuum_referenced_bias_percent']:.9g}"
+                            if is_ocean_surface
+                            else "nan"
+                        ),
+                        "ocean_surface_unadjusted_rmse_percent": (
+                            f"{unadjusted_stats['continuum_referenced_rmse_percent']:.9g}"
+                            if is_ocean_surface
+                            else "nan"
+                        ),
+                        "surface_brdf_fit_points": land_brdf_weight_fit_points,
+                        "surface_brdf_fit_rmse_percent": (f"{land_brdf_weight_fit_rmse:.9g}"),
                         "surface_brdf_scale_bounds": (
                             f"{args.surface_brdf_scale_min:.9g};{args.surface_brdf_scale_max:.9g}"
                         ),
@@ -2707,6 +4418,21 @@ def main() -> None:
                         "absco_o2_scale": f"{o2_scale[band_index]:.9g}",
                         "absco_co2_scale": f"{co2_scale[band_index]:.9g}",
                         "absco_h2o_scale": f"{h2o_scale[band_index]:.9g}",
+                        "diagnostic_gas_tau_scale": f"{diagnostic_gas_tau_scale[band]:.9g}",
+                        "diagnostic_layer_pressure_method": (args.diagnostic_layer_pressure_method),
+                        "diagnostic_surface_pressure_offset_hpa": (
+                            f"{args.diagnostic_surface_pressure_offset_hpa:.9g}"
+                        ),
+                        "surface_pressure_original_hpa": (
+                            f"{float(state['surface_pressure_original_hpa']):.9g}"
+                        ),
+                        "surface_pressure_used_hpa": (
+                            f"{float(state['surface_pressure_used_hpa']):.9g}"
+                        ),
+                        "diagnostic_surface_pressure_column_mode": (
+                            str(state["surface_pressure_column_mode"])
+                        ),
+                        "diagnostic_gas_integration": args.diagnostic_gas_integration,
                         "gas_doppler": args.gas_doppler,
                         "relative_velocity_m_s": f"{relative_velocity:.9g}",
                         "doppler_lookup_velocity_m_s": f"{doppler_velocity:.9g}",
@@ -2721,6 +4447,8 @@ def main() -> None:
                             else "not_applied"
                         ),
                         "aerosol_treatment": args.aerosol_treatment,
+                        "aerosol_type_filter": aerosol_type_filter_label,
+                        "aerosol_scale": f"{args.diagnostic_aerosol_scale:.9g}",
                         "aerosol_total_aod_used": f"{aerosol.total_aod_used:.9g}",
                         "aerosol_phase_model": aerosol.phase_model,
                         "polarization_correction": args.polarization_correction,
@@ -2794,8 +4522,19 @@ def main() -> None:
                                 if np.isfinite(solar_irradiance_reference)
                                 else "not_applied"
                             ),
-                            "surface_brdf_weight_scale": f"{surface_brdf_retrieval.scale:.9e}",
-                            "surface_brdf_weight_tilt": f"{surface_brdf_retrieval.tilt:.9e}",
+                            "surface_adjustment_target": surface_adjustment_target,
+                            "surface_adjustment_status": surface_brdf_retrieval.status,
+                            "surface_adjustment_iterations": surface_brdf_retrieval.iterations,
+                            "surface_adjustment_scale": f"{surface_brdf_retrieval.scale:.9e}",
+                            "surface_adjustment_tilt": f"{surface_brdf_retrieval.tilt:.9e}",
+                            "surface_brdf_weight_scale": f"{land_brdf_weight_scale:.9e}",
+                            "surface_brdf_weight_tilt": f"{land_brdf_weight_tilt:.9e}",
+                            "land_brdf_weight_scale": f"{land_brdf_weight_scale:.9e}",
+                            "land_brdf_weight_tilt": f"{land_brdf_weight_tilt:.9e}",
+                            "ocean_surface_continuum_scale": (
+                                f"{ocean_surface_continuum_scale:.9e}"
+                            ),
+                            "ocean_surface_continuum_tilt": (f"{ocean_surface_continuum_tilt:.9e}"),
                             "oco_continuum_signal_radiance_w_m2_sr_um": (
                                 f"{continuum_signal_energy:.9e}"
                             ),
@@ -2823,18 +4562,55 @@ def main() -> None:
             "ils_grid_spacing_cm_1",
             "relative_azimuth_deg",
             "rt_relative_azimuth_deg",
+            "surface_model_family",
             "surface_reflectance_model",
             "surface_angular_model",
             "surface_rpv_kernel",
             "surface_reflectance_used",
             "surface_reflectance_min",
             "surface_reflectance_max",
+            "surface_ocean_wind_speed_m_s",
+            "surface_ocean_refractive_index",
+            "surface_lambertian_albedo_l2",
+            "surface_coxmunk_direct_brf",
+            "surface_coxmunk_stokes_i",
+            "surface_coxmunk_stokes_scale",
+            "surface_coxmunk_stokes_scope",
+            "surface_coxmunk_direct_scale",
+            "surface_coxmunk_fourier_scale",
+            "surface_adjustment_target",
+            "surface_adjustment_components",
+            "surface_adjustment_method",
+            "surface_adjustment_status",
+            "surface_adjustment_iterations",
+            "surface_adjustment_scale",
+            "surface_adjustment_tilt",
+            "surface_adjustment_fit_points",
+            "surface_adjustment_fit_rmse_percent",
+            "surface_adjustment_scale_bounds",
+            "surface_unadjusted_continuum_referenced_bias_percent",
+            "surface_unadjusted_continuum_referenced_rmse_percent",
+            "surface_unadjusted_continuum_referenced_max_abs_percent",
             "surface_brdf_retrieval",
             "surface_brdf_retrieval_status",
             "surface_brdf_weight_l2",
             "surface_brdf_weight_scale",
             "surface_brdf_weight_tilt",
             "surface_brdf_weight_at_reference",
+            "land_brdf_weight_l2",
+            "land_brdf_weight_scale",
+            "land_brdf_weight_tilt",
+            "land_brdf_weight_at_reference",
+            "land_brdf_weight_fit_points",
+            "land_brdf_weight_fit_rmse_percent",
+            "land_brdf_weight_status",
+            "ocean_surface_continuum_status",
+            "ocean_surface_continuum_scale",
+            "ocean_surface_continuum_tilt",
+            "ocean_surface_continuum_fit_points",
+            "ocean_surface_continuum_fit_rmse_percent",
+            "ocean_surface_unadjusted_bias_percent",
+            "ocean_surface_unadjusted_rmse_percent",
             "surface_brdf_fit_points",
             "surface_brdf_fit_rmse_percent",
             "surface_brdf_scale_bounds",
@@ -2843,6 +4619,13 @@ def main() -> None:
             "absco_o2_scale",
             "absco_co2_scale",
             "absco_h2o_scale",
+            "diagnostic_gas_tau_scale",
+            "diagnostic_layer_pressure_method",
+            "diagnostic_surface_pressure_offset_hpa",
+            "surface_pressure_original_hpa",
+            "surface_pressure_used_hpa",
+            "diagnostic_surface_pressure_column_mode",
+            "diagnostic_gas_integration",
             "gas_doppler",
             "relative_velocity_m_s",
             "doppler_lookup_velocity_m_s",
@@ -2853,6 +4636,8 @@ def main() -> None:
             "solar_distance_m",
             "solar_irradiance_reference_w_m2_um",
             "aerosol_treatment",
+            "aerosol_type_filter",
+            "aerosol_scale",
             "aerosol_total_aod_used",
             "aerosol_phase_model",
             "polarization_correction",
@@ -2908,8 +4693,17 @@ def main() -> None:
             "py2sess_fluorescence_w_m2_sr_um",
             "py2sess_eof_correction_w_m2_sr_um",
             "solar_irradiance_reference_w_m2_um",
+            "surface_adjustment_target",
+            "surface_adjustment_status",
+            "surface_adjustment_iterations",
+            "surface_adjustment_scale",
+            "surface_adjustment_tilt",
             "surface_brdf_weight_scale",
             "surface_brdf_weight_tilt",
+            "land_brdf_weight_scale",
+            "land_brdf_weight_tilt",
+            "ocean_surface_continuum_scale",
+            "ocean_surface_continuum_tilt",
             "oco_continuum_signal_radiance_w_m2_sr_um",
             "py2sess_unit_solver_signal",
             "py2sess_effective_fbeam_w_m2_um",

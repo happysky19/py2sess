@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import math
+import importlib.util
+from pathlib import Path
+import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -8,7 +12,12 @@ import numpy as np
 from py2sess.reference_cases import load_tir_benchmark_case, load_uv_benchmark_case
 from py2sess.rtsolver.geometry import auxgeom_solar_obs, chapman_factors
 from py2sess.optical.brdf_solar_obs import _ross_kernel as _solar_ross_kernel
-from py2sess.optical.brdf_solar_obs import RPV_IDX, solar_obs_brdf_from_kernels
+from py2sess.optical.brdf_solar_obs import (
+    COXMUNK_IDX,
+    RPV_IDX,
+    coxmunk_giss_stokes_direct_kernel,
+    solar_obs_brdf_from_kernels,
+)
 from py2sess.optical.brdf_thermal import _ross_kernel as _thermal_ross_kernel
 from py2sess.optical.brdf_thermal import thermal_brdf_from_kernels
 from py2sess.optical.delta_m import (
@@ -31,6 +40,43 @@ from py2sess.optical.surface_leaving import (
 
 GEOMETRY_RTOL = 1.0e-11
 GEOMETRY_ATOL = 2.0e-11
+
+
+def _load_oco3_replay_script():
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "run_oco3_threeband_py2sess_replay.py"
+    )
+    spec = importlib.util.spec_from_file_location("oco3_threeband_replay", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_oco3_prepare_script():
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "prepare_oco3_threeband_replay_cases.py"
+    )
+    spec = importlib.util.spec_from_file_location("oco3_threeband_prepare", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_oco3_paper_replay_script():
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_oco3_paper_replay.py"
+    spec = importlib.util.spec_from_file_location("oco3_paper_replay", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class HelperParityTests(unittest.TestCase):
@@ -146,6 +192,145 @@ class HelperParityTests(unittest.TestCase):
             1.0e-3,
         )
 
+    def test_oco_l2fp_endpoint_moments_pad_to_longest_table(self) -> None:
+        module = _load_oco3_replay_script()
+
+        long_table = np.arange(8, dtype=float).reshape(2, 4)
+        short_table = np.array([[10.0, 11.0], [12.0, 13.0]], dtype=float)
+
+        stacked = module._stack_oco_l2fp_endpoint_moments(
+            [(0, long_table), (1, short_table)],
+            2,
+        )
+
+        self.assertEqual(stacked.shape, (2, 4, 2))
+        np.testing.assert_allclose(stacked[:, :, 0], long_table)
+        np.testing.assert_allclose(stacked[:, :2, 1], short_table)
+        np.testing.assert_allclose(stacked[:, 2:, 1], 0.0)
+
+    def test_oco_aerosol_type_filter_rejects_unknown_names(self) -> None:
+        module = _load_oco3_replay_script()
+
+        with self.assertRaisesRegex(ValueError, "BAD"):
+            module._validate_aerosol_type_filter(["SS", "ST"], frozenset({"SS", "BAD"}))
+
+    def test_oco_default_aerosol_type_filter_is_tropospheric(self) -> None:
+        module = _load_oco3_replay_script()
+
+        self.assertEqual(
+            module._default_aerosol_type_filter("tropospheric"),
+            frozenset(("DU", "SS", "BC", "OC", "SO")),
+        )
+        self.assertIsNone(module._default_aerosol_type_filter("all"))
+
+    def test_oco_l2_aerosol_reference_wavelength_matches_rtretrieval(self) -> None:
+        module = _load_oco3_replay_script()
+
+        self.assertEqual(module.AEROSOL_REFERENCE_WAVELENGTH_UM, 0.755)
+
+    def test_oco_scripts_discover_granule_files_from_data_dir(self) -> None:
+        prepare = _load_oco3_prepare_script()
+        replay = _load_oco3_replay_script()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            l2std = data_dir / "oco3_L2StdSC_12345a_test.h5"
+            l2std.touch()
+
+            self.assertEqual(prepare._single_data_file(data_dir, "oco3_L2StdSC_*.h5"), l2std)
+            self.assertEqual(replay._single_data_file(data_dir, "oco3_L2StdSC_*.h5"), l2std)
+
+            (data_dir / "oco3_L2StdSC_67890a_test.h5").touch()
+            with self.assertRaisesRegex(FileNotFoundError, "expected exactly one"):
+                prepare._single_data_file(data_dir, "oco3_L2StdSC_*.h5")
+
+    def test_oco_prepare_extracts_retrieved_st_aod(self) -> None:
+        module = _load_oco3_prepare_script()
+        params = np.array(
+            [
+                [-3.0, 0.5, 0.2],
+                [-4.5, 0.03, 0.04],
+            ],
+            dtype=float,
+        )
+
+        st_aod = module._retrieved_type_aod(
+            aerosol_types=["DU", "ST"],
+            aerosol_model=["gaussian_log", "gaussian_log"],
+            aerosol_param=params,
+            aerosol_retrieved=np.array([True, True]),
+            aerosol_type="ST",
+        )
+        self.assertAlmostEqual(st_aod, math.exp(-4.5))
+
+        skipped = module._retrieved_type_aod(
+            aerosol_types=["DU", "ST"],
+            aerosol_model=["gaussian_log", "gaussian_log"],
+            aerosol_param=params,
+            aerosol_retrieved=np.array([True, False]),
+            aerosol_type="ST",
+        )
+        self.assertEqual(skipped, 0.0)
+
+    def test_oco_prepare_rejects_negative_ocean_albedo_spectrum(self) -> None:
+        module = _load_oco3_prepare_script()
+        wavelengths = np.array([0.758, 0.765, 0.772], dtype=float)
+
+        self.assertTrue(
+            module._valid_linear_ocean_albedo_spectrum(
+                base=0.01,
+                slope=1.0e-6,
+                wavelength_um=wavelengths,
+                reference_wavelength_um=0.77,
+            )
+        )
+        self.assertFalse(
+            module._valid_linear_ocean_albedo_spectrum(
+                base=0.001,
+                slope=2.0e-4,
+                wavelength_um=wavelengths,
+                reference_wavelength_um=0.77,
+            )
+        )
+
+    def test_oco_paper_replay_runner_locks_physics_settings(self) -> None:
+        module = _load_oco3_paper_replay_script()
+
+        self.assertEqual(module.ST_AOD_MAX, 0.01)
+        settings = list(module.PAPER_REPLAY_SETTINGS)
+        self.assertEqual(settings[settings.index("--aerosol-treatment") + 1], "oco-l2fp")
+        self.assertEqual(settings[settings.index("--aerosol-type-set") + 1], "tropospheric")
+        self.assertEqual(
+            settings[settings.index("--polarization-correction") + 1],
+            "rayleigh-aerosol-fo",
+        )
+        self.assertNotIn("--diagnostic-aerosol-types", settings)
+        self.assertNotIn("--diagnostic-aerosol-scale", settings)
+
+        group = module.REPLAY_GROUPS["ocean_gl"]
+        prepare = module._prepare_command(
+            group=group,
+            data_dir=Path("/data"),
+            case_dir=Path("/case"),
+            count=3,
+        )
+        self.assertEqual(prepare[prepare.index("--operation-mode") + 1], "GL")
+        self.assertEqual(prepare[prepare.index("--land-fraction-max") + 1], "5")
+        self.assertEqual(prepare[prepare.index("--st-aod-max") + 1], "0.01")
+
+    def test_oco_spin2_basis_matches_rayleigh_p12(self) -> None:
+        module = _load_oco3_replay_script()
+
+        depol = 0.0279
+        cos_scatter = 0.25
+        basis = module._spin2_spherical_function(cos_scatter, 3)
+        greek_moment = math.sqrt(6.0) * (1.0 - depol) / (2.0 + depol)
+        lrad_p12 = greek_moment * basis[2]
+        delta = 2.0 * (1.0 - depol) / (2.0 + depol)
+        analytic_p12 = -0.75 * delta * (1.0 - cos_scatter * cos_scatter)
+
+        self.assertAlmostEqual(lrad_p12, analytic_p12)
+
     def test_solar_brdf_kernel_generation_regression(self) -> None:
         coeffs = solar_obs_brdf_from_kernels(
             kernel_specs=[
@@ -232,6 +417,61 @@ class HelperParityTests(unittest.TestCase):
         np.testing.assert_allclose(
             coeffs.direct_brf,
             np.array([0.07203537333245799], dtype=float),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+
+    def test_solar_coxmunk_brdf_kernel_generation_regression(self) -> None:
+        coeffs = solar_obs_brdf_from_kernels(
+            kernel_specs=[
+                {
+                    "which_brdf": COXMUNK_IDX,
+                    "factor": 1.0,
+                    "wind_speed": 5.86140585,
+                    "refractive_index": 1.331,
+                    "nstreams_brdf": 8,
+                }
+            ],
+            user_obsgeoms=np.array([[40.67311096, 39.04004669, 358.83097839]]),
+            stream_value=1.0 / math.sqrt(3.0),
+            n_geoms=1,
+        )
+        np.testing.assert_allclose(
+            coeffs.brdf_f_0,
+            np.array([[0.039281091574778375, 0.0766811685767482]], dtype=float),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            coeffs.brdf_f,
+            np.array([0.08340888275069114, 0.16286479897986425], dtype=float),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            coeffs.ubrdf_f,
+            np.array([[0.03428243492490374, 0.06691242185436247]], dtype=float),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            coeffs.direct_brf,
+            np.array([0.3086370109955187], dtype=float),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+
+    def test_solar_coxmunk_giss_direct_stokes_regression(self) -> None:
+        stokes = coxmunk_giss_stokes_direct_kernel(
+            sza_deg=40.67311096,
+            vza_deg=39.04004669,
+            relative_azimuth_deg=358.83097839,
+            wind_speed=5.86140585,
+            refractive_index=1.331,
+        )
+        np.testing.assert_allclose(
+            stokes,
+            np.array([0.3086370109955208, -0.2337941121380545, 0.0063208107144757]),
             rtol=0.0,
             atol=1.0e-12,
         )

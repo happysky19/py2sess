@@ -160,16 +160,24 @@ def load_geocape_aerosol_tables(
     first_wavelength_microns: float,
     last_wavelength_microns: float,
     aggregates: tuple[str, ...] = _DEFAULT_AEROSOL_AGGREGATES,
+    relative_humidity: int | str = 70,
     moment_cutoff: float = 1.0e-5,
     max_moments: int | None = None,
 ) -> GeocapeAerosolTables:
     """Read GEOCAPE aerosol bulk IOPs and endpoint phase moments."""
     root = Path(ssprops_dir)
+    rh_dir = _relative_humidity_dir(relative_humidity)
     bulk_columns = []
     moment_columns = []
     wavelengths = None
     for aggregate in aggregates:
-        base = root / aggregate / "70"
+        base = root / aggregate / rh_dir
+        if not base.is_dir():
+            available = sorted(path.name for path in (root / aggregate).glob("*") if path.is_dir())
+            raise ValueError(
+                f"GEOCAPE SSprops aggregate {aggregate!r} has no relative-humidity "
+                f"directory {rh_dir!r}; available: {available}"
+            )
         mie = np.loadtxt(base / "mie3_1.mie", dtype=float)
         if mie.ndim != 2 or mie.shape[1] < 3:
             raise ValueError(f"{base / 'mie3_1.mie'} must have at least three columns")
@@ -202,6 +210,17 @@ def load_geocape_aerosol_tables(
         bulk_iops=bulk,
         moments=moments,
     )
+
+
+def _relative_humidity_dir(relative_humidity: int | str) -> str:
+    """Return the GEOCAPE SSprops relative-humidity directory name."""
+    try:
+        value = int(relative_humidity)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("GEOCAPE relative_humidity must be an integer percentage") from exc
+    if value < 0 or value > 100:
+        raise ValueError("GEOCAPE relative_humidity must be in [0, 100]")
+    return str(value)
 
 
 def _read_moment_file(path: Path, *, max_moments: int | None) -> np.ndarray:
