@@ -993,6 +993,10 @@ def _load_geocape_ssprops(spec: Any, base_dir: Path, *, wavelengths_nm: np.ndarr
         kwargs["moment_cutoff"] = float(spec["moment_cutoff"])
     if "max_moments" in spec:
         kwargs["max_moments"] = int(spec["max_moments"])
+    if "relative_humidity" in spec:
+        kwargs["relative_humidity"] = int(spec["relative_humidity"])
+    if "rh" in spec:
+        kwargs["relative_humidity"] = int(spec["rh"])
     wavelengths_microns = np.asarray(wavelengths_nm, dtype=float) / 1000.0
     return load_geocape_aerosol_tables(
         _resolve_path(spec["path"], base_dir),

@@ -63,6 +63,23 @@ class GeocapeInputTests(unittest.TestCase):
         np.testing.assert_allclose(tables.moments[0, :, 0], [1.0, 0.3, 0.03])
         np.testing.assert_allclose(tables.moments[1, :, 0], [1.0, 0.4, 0.04])
 
+    def test_aerosol_ssprops_reader_accepts_relative_humidity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_ssprops(root / "organic" / "80")
+
+            tables = load_geocape_aerosol_tables(
+                root,
+                first_wavelength_microns=0.3,
+                last_wavelength_microns=0.4,
+                aggregates=("organic",),
+                relative_humidity=80,
+                moment_cutoff=0.0,
+                max_moments=2,
+            )
+
+        np.testing.assert_allclose(tables.moments[1, :, 0], [1.0, 0.4, 0.04])
+
     def test_aerosol_interpolation_accepts_table_endpoints(self) -> None:
         grid = np.array([0.3, 0.4, 0.5], dtype=float)
         values = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]], dtype=float)

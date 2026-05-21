@@ -27,16 +27,31 @@ DEFAULT_DATA_DIR = ROOT / "outputs" / "oco3_joint_official_downloads" / "2022062
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "oco3_threeband_replay" / "20220624_17767a"
 
 BANDS = ("o2", "wco2", "sco2")
+BAND_REFERENCE_WAVELENGTH_UM = {"o2": 0.77, "wco2": 1.615, "sco2": 2.06}
 BAND_LABELS = {
     "o2": "O2 A",
     "wco2": "weak CO2",
     "sco2": "strong CO2",
 }
+DEFAULT_ST_AOD_MAX = 0.01
 
 
 def _read(path: Path, dataset: str) -> np.ndarray:
     with h5py.File(path, "r") as handle:
         return handle[dataset][...]
+
+
+def _single_data_file(data_dir: Path, pattern: str) -> Path:
+    matches = sorted(data_dir.glob(pattern))
+    if len(matches) != 1:
+        preview = ", ".join(path.name for path in matches[:5])
+        if len(matches) > 5:
+            preview += ", ..."
+        raise FileNotFoundError(
+            f"expected exactly one {pattern!r} file in {data_dir}; "
+            f"found {len(matches)}" + (f": {preview}" if preview else "")
+        )
+    return matches[0]
 
 
 def _decode_array(values: np.ndarray) -> list[str]:
@@ -48,6 +63,31 @@ def _decode_array(values: np.ndarray) -> list[str]:
     ]
 
 
+def _retrieved_type_aod(
+    *,
+    aerosol_types: list[str],
+    aerosol_model: list[str],
+    aerosol_param: np.ndarray,
+    aerosol_retrieved: np.ndarray,
+    aerosol_type: str,
+) -> float:
+    try:
+        type_index = aerosol_types.index(aerosol_type)
+    except ValueError:
+        return 0.0
+    if not bool(aerosol_retrieved[type_index]):
+        return 0.0
+    model = aerosol_model[type_index].strip()
+    if not model:
+        return 0.0
+    if model != "gaussian_log":
+        return float("nan")
+    log_aod = float(aerosol_param[type_index, 0])
+    if not np.isfinite(log_aod):
+        return float("nan")
+    return float(np.exp(log_aod))
+
+
 def _band_slices(counts: np.ndarray) -> dict[str, slice]:
     start = 0
     out: dict[str, slice] = {}
@@ -56,6 +96,30 @@ def _band_slices(counts: np.ndarray) -> dict[str, slice]:
         out[band] = slice(start, stop)
         start = stop
     return out
+
+
+def _valid_linear_ocean_albedo_spectrum(
+    *,
+    base: float,
+    slope: float,
+    wavelength_um: np.ndarray,
+    reference_wavelength_um: float,
+) -> bool:
+    wavelength = np.asarray(wavelength_um, dtype=float)
+    if (
+        not np.isfinite(base)
+        or base < 0.0
+        or not np.isfinite(slope)
+        or not np.isfinite(reference_wavelength_um)
+        or reference_wavelength_um <= 0.0
+        or wavelength.size == 0
+        or not np.all(np.isfinite(wavelength))
+        or np.any(wavelength <= 0.0)
+    ):
+        return False
+    reference_wn = 1.0e4 / reference_wavelength_um
+    albedo = base + slope * (1.0e4 / wavelength - reference_wn)
+    return bool(np.all(np.isfinite(albedo)) and np.all(albedo >= 0.0))
 
 
 def _finite_positive_valid_spectrum(
@@ -73,7 +137,7 @@ def _finite_positive_valid_spectrum(
     return (
         all(np.isfinite(arr).all() for arr in (*spectral_arrays, samples))
         and all((arr > 0).all() for arr in spectral_arrays)
-        and (samples >= 0).all()
+        and (samples > 0).all()
     )
 
 
@@ -89,8 +153,13 @@ def _select_candidate_indices(
     snr_wco2_min: float,
     snr_sco2_min: float,
     aod_max: float,
+    st_aod_max: float,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     with h5py.File(l2std_path, "r") as std:
+        aerosol_types = _decode_array(std["Metadata/AllAerosolTypes"][...])
+        aerosol_model = std["AerosolResults/aerosol_model"][...]
+        aerosol_param = std["AerosolResults/aerosol_param"][...].astype(float)
+        aerosol_retrieved = std["AerosolResults/aerosol_type_retrieved"][...].astype(bool)
         data = {
             "sounding_id": std["RetrievalHeader/sounding_id"][...],
             "operation_mode": np.asarray(
@@ -111,6 +180,12 @@ def _select_candidate_indices(
             "surface_pressure_hpa": std["RetrievalResults/surface_pressure_fph"][...] / 100.0,
             "wind_speed": std["RetrievalResults/wind_speed"][...],
             "wind_speed_apriori": std["RetrievalResults/wind_speed_apriori"][...],
+            "albedo_o2": std["AlbedoResults/albedo_o2_fph"][...],
+            "albedo_wco2": std["AlbedoResults/albedo_weak_co2_fph"][...],
+            "albedo_sco2": std["AlbedoResults/albedo_strong_co2_fph"][...],
+            "albedo_slope_o2": std["AlbedoResults/albedo_slope_o2"][...],
+            "albedo_slope_wco2": std["AlbedoResults/albedo_slope_weak_co2"][...],
+            "albedo_slope_sco2": std["AlbedoResults/albedo_slope_strong_co2"][...],
             "xco2_ppm": std["RetrievalResults/xco2"][...] * 1.0e6,
             "h2o_scale_factor": std["RetrievalResults/h2o_scale_factor"][...],
             "temperature_offset_k": std["RetrievalResults/temperature_offset_fph"][...],
@@ -176,10 +251,21 @@ def _select_candidate_indices(
             "snr_wco2": std["L1bScSpectralParameters/snr_weak_co2_l1b"][...],
             "snr_sco2": std["L1bScSpectralParameters/snr_strong_co2_l1b"][...],
         }
-        aerosol_model = std["AerosolResults/aerosol_model"][...]
-        data["aerosol_models"] = np.asarray(
-            [";".join(_decode_array(row)) for row in aerosol_model], dtype=object
+        decoded_models = [_decode_array(row) for row in aerosol_model]
+        data["st_aod"] = np.asarray(
+            [
+                _retrieved_type_aod(
+                    aerosol_types=aerosol_types,
+                    aerosol_model=model_row,
+                    aerosol_param=aerosol_param[index],
+                    aerosol_retrieved=aerosol_retrieved[index],
+                    aerosol_type="ST",
+                )
+                for index, model_row in enumerate(decoded_models)
+            ],
+            dtype=float,
         )
+        data["aerosol_models"] = np.asarray([";".join(row) for row in decoded_models], dtype=object)
         data["surface_type"] = np.asarray(
             _decode_array(std["RetrievalResults/surface_type"][...]), dtype=object
         )
@@ -193,6 +279,7 @@ def _select_candidate_indices(
         wavelength = spectral["wavelength"]
         sample_index = spectral["sample_indexes"]
         valid_spectrum = np.zeros(num_colors.shape, dtype=bool)
+        valid_ocean_albedo = np.zeros(num_colors.shape, dtype=bool)
         for index, ncolors in enumerate(num_colors):
             valid_spectrum[index] = _finite_positive_valid_spectrum(
                 measured[index],
@@ -200,6 +287,16 @@ def _select_candidate_indices(
                 wavelength[index],
                 sample_index[index],
                 int(ncolors),
+            )
+            band_slices = _band_slices(num_colors_per_band[index])
+            valid_ocean_albedo[index] = all(
+                _valid_linear_ocean_albedo_spectrum(
+                    base=float(data[f"albedo_{band}"][index]),
+                    slope=float(data[f"albedo_slope_{band}"][index]),
+                    wavelength_um=wavelength[index, band_slices[band]],
+                    reference_wavelength_um=BAND_REFERENCE_WAVELENGTH_UM[band],
+                )
+                for band in BANDS
             )
 
     data["num_colors"] = num_colors
@@ -224,6 +321,7 @@ def _select_candidate_indices(
         (data["surface_type"] == "Coxmunk,Lambertian")
         & np.isfinite(data["wind_speed"])
         & (data["wind_speed"] > 0.0)
+        & valid_ocean_albedo
     )
 
     mask = (
@@ -241,6 +339,7 @@ def _select_candidate_indices(
         & (data["snr_sco2"] >= snr_sco2_min)
         & (data["aerosol_total_aod"] >= 0.0)
         & (data["aerosol_total_aod"] <= aod_max)
+        & (data["st_aod"] <= st_aod_max)
         & (land_surface_ok | ocean_surface_ok)
     )
     if land_fraction_max is not None:
@@ -274,6 +373,7 @@ def _write_selected_cases(path: Path, indices: np.ndarray, data: dict[str, np.nd
         "cloud_flag_abp",
         "cloud_flag_idp",
         "aerosol_total_aod",
+        "st_aod",
         "surface_pressure_hpa",
         "wind_speed",
         "wind_speed_apriori",
@@ -461,10 +561,27 @@ def main() -> None:
     parser.add_argument("--snr-wco2-min", type=float, default=100.0)
     parser.add_argument("--snr-sco2-min", type=float, default=50.0)
     parser.add_argument("--aod-max", type=float, default=0.30)
+    parser.add_argument(
+        "--st-aod-max",
+        type=float,
+        default=DEFAULT_ST_AOD_MAX,
+        help=(
+            "Reject cases with retrieved OCO ST/stratospheric aerosol AOD above this "
+            "limit. ST is treated as an operational proxy and is not used in the "
+            "default scalar py2sess aerosol replay."
+        ),
+    )
+    parser.add_argument(
+        "--skip-plot",
+        action="store_true",
+        help="Write selected-case CSV files without generating the diagnostic figure.",
+    )
     args = parser.parse_args()
+    if not np.isfinite(args.st_aod_max) or args.st_aod_max < 0.0:
+        raise ValueError("--st-aod-max must be finite and nonnegative")
 
-    l2std_path = args.data_dir / "oco3_L2StdSC_17767a_220624_B10313r_220919181911.h5"
-    l2dia_path = args.data_dir / "oco3_L2DiaSC_17767a_220624_B10313r_220919175057.h5"
+    l2std_path = _single_data_file(args.data_dir, "oco3_L2StdSC_*.h5")
+    l2dia_path = _single_data_file(args.data_dir, "oco3_L2DiaSC_*.h5")
     for path in (l2std_path, l2dia_path):
         if not path.exists():
             raise FileNotFoundError(path)
@@ -480,12 +597,14 @@ def main() -> None:
         snr_wco2_min=args.snr_wco2_min,
         snr_sco2_min=args.snr_sco2_min,
         aod_max=args.aod_max,
+        st_aod_max=args.st_aod_max,
     )
     selected = _sample_indices(candidates, args.count)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     _write_selected_cases(args.output_dir / "selected_soundings.csv", selected, data)
     _write_selected_spectra(args.output_dir / "selected_l2dia_spectra.csv", selected, l2dia_path)
-    _plot_selected_spectra(args.output_dir / "selected_l2dia_spectra.png", selected, l2dia_path)
+    if not args.skip_plot:
+        _plot_selected_spectra(args.output_dir / "selected_l2dia_spectra.png", selected, l2dia_path)
 
     print(f"candidate_count={candidates.size}")
     print(f"selected_count={selected.size}")
