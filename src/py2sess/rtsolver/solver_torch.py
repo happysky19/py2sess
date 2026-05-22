@@ -1377,30 +1377,13 @@ def fluxes_solar_torch(
 
 def two_stream_level_quads_torch(*, lcon, mcon, xpos, eigentrans, wupper, wlower):
     """Returns diffuse up/down two-stream quadrature values at all levels."""
-    dtype = lcon.dtype
-    device = lcon.device
-    nlay = int(lcon.shape[0])
-    up_quad = torch.zeros((nlay + 1,), dtype=dtype, device=device)
-    down_quad = torch.zeros((nlay + 1,), dtype=dtype, device=device)
-    for level in range(nlay):
-        down_quad[level] = (
-            wupper[0, level]
-            + lcon[level] * xpos[0, level]
-            + mcon[level] * xpos[1, level] * eigentrans[level]
-        )
-        up_quad[level] = (
-            wupper[1, level]
-            + lcon[level] * xpos[1, level]
-            + mcon[level] * xpos[0, level] * eigentrans[level]
-        )
-    last = nlay - 1
-    down_quad[nlay] = (
-        wlower[0, last] + lcon[last] * xpos[0, last] * eigentrans[last] + mcon[last] * xpos[1, last]
+    down_upper = wupper[0] + lcon * xpos[0] + mcon * xpos[1] * eigentrans
+    up_upper = wupper[1] + lcon * xpos[1] + mcon * xpos[0] * eigentrans
+    down_lower = wlower[0, -1] + lcon[-1] * xpos[0, -1] * eigentrans[-1] + mcon[-1] * xpos[1, -1]
+    up_lower = wlower[1, -1] + lcon[-1] * xpos[1, -1] * eigentrans[-1] + mcon[-1] * xpos[0, -1]
+    return torch.cat((up_upper, up_lower.reshape(1))), torch.cat(
+        (down_upper, down_lower.reshape(1))
     )
-    up_quad[nlay] = (
-        wlower[1, last] + lcon[last] * xpos[1, last] * eigentrans[last] + mcon[last] * xpos[0, last]
-    )
-    return up_quad, down_quad
 
 
 def flux_profile_from_quads_torch(

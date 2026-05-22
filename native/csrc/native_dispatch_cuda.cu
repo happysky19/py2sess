@@ -2,6 +2,7 @@
 #include <ATen/Dispatch.h>
 #include <ATen/TensorIterator.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
 
 #include "loops.cuh"
 #include "native_dispatch.hpp"
@@ -571,8 +572,9 @@ void solar_fo_cuda(at::TensorIterator& iter, const SolarFoParams& params) {
       const auto* exact_scatter = reinterpret_cast<const scalar_t*>(iter.data_ptr(6));
       const int64_t extinction_count = rows * static_cast<int64_t>(nlay);
       const int64_t fine_count = rows * static_cast<int64_t>(fine_slots);
+      const auto stream = c10::cuda::getCurrentCUDAStream();
       solar_fo_extinction_kernel<scalar_t>
-          <<<grid_1d(extinction_count), kBlock>>>(
+          <<<grid_1d(extinction_count), kBlock, 0, stream.stream()>>>(
               rows,
               nlay,
               tau,
@@ -582,7 +584,7 @@ void solar_fo_cuda(at::TensorIterator& iter, const SolarFoParams& params) {
               d_extinction);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
       solar_fo_fine_attenuation_kernel<scalar_t>
-          <<<grid_1d(fine_count), kBlock>>>(
+          <<<grid_1d(fine_count), kBlock, 0, stream.stream()>>>(
               rows,
               nlay,
               params.nfine,
@@ -593,7 +595,7 @@ void solar_fo_cuda(at::TensorIterator& iter, const SolarFoParams& params) {
               d_fine_attenuation);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
       solar_fo_nonnadir_endpoint_kernel<scalar_t>
-          <<<grid_1d(rows), kBlock>>>(
+          <<<grid_1d(rows), kBlock, 0, stream.stream()>>>(
               rows,
               nlay,
               params.nfine,

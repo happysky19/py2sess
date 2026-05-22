@@ -196,6 +196,66 @@ class ApiTests(unittest.TestCase):
             atol=1.0e-12,
         )
 
+    def test_scalar_torch_output_fluxes_match_numpy(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        cases = (
+            (
+                "solar",
+                dict(
+                    tau=np.array([0.01, 0.02, 0.03]),
+                    ssa=np.full(3, 0.2),
+                    g=np.full(3, 0.1),
+                    z=np.array([3.0, 2.0, 1.0, 0.0]),
+                    angles=[30.0, 20.0, 0.0],
+                    fbeam=1.1,
+                    albedo=0.2,
+                    delta_m_truncation_factor=np.zeros(3),
+                ),
+            ),
+            (
+                "thermal",
+                dict(
+                    tau=np.array([0.2, 0.3, 0.4]),
+                    ssa=np.array([0.15, 0.10, 0.05]),
+                    g=np.array([0.1, 0.2, 0.3]),
+                    z=np.array([3.0, 2.0, 1.0, 0.0]),
+                    angles=30.0,
+                    stream=0.5,
+                    planck=np.array([1.0, 1.1, 1.2, 1.3]),
+                    surface_planck=1.4,
+                    emissivity=0.9,
+                    albedo=0.05,
+                ),
+            ),
+        )
+        for mode, kwargs in cases:
+            with self.subTest(mode=mode):
+                reference = TwoStreamEss(
+                    TwoStreamEssOptions(nlyr=3, mode=mode, output_fluxes=True)
+                ).forward(**kwargs)
+                actual = TwoStreamEss(
+                    TwoStreamEssOptions(
+                        nlyr=3,
+                        mode=mode,
+                        backend="torch",
+                        torch_dtype="float64",
+                        output_fluxes=True,
+                    )
+                ).forward(**kwargs)
+
+                for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+                    actual_field = getattr(actual, field)
+                    self.assertTrue(torch.isfinite(actual_field).all().item())
+                    np.testing.assert_allclose(
+                        to_numpy(actual_field),
+                        getattr(reference, field),
+                        rtol=1.0e-11,
+                        atol=1.0e-12,
+                    )
+
     def test_fo_scatter_term_helper_matches_scalar_fo_phase_logic(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True))
         tau = np.array([0.01, 0.02, 0.03])

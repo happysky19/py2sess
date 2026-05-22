@@ -1,8 +1,10 @@
 #pragma once
 
+#include <ATen/ATen.h>
 #include <ATen/TensorIterator.h>
 #include <ATen/native/cuda/Loops.cuh>
 #include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 
 namespace py2sess_native {
@@ -48,12 +50,14 @@ void gpu_chunk_kernel(at::TensorIterator& iter, int work_size, const Func& f) {
     return;
   }
 
-  char* d_workspace = nullptr;
   const int64_t chunks = Chunks > numel ? numel : Chunks;
   const int64_t base = numel / chunks;
   const int64_t rem = numel % chunks;
   const size_t workspace_bytes = static_cast<size_t>(work_size) * (base + (rem > 0 ? 1 : 0));
-  C10_CUDA_CHECK(cudaMalloc(&d_workspace, workspace_bytes));
+  auto workspace =
+      at::empty({static_cast<int64_t>(workspace_bytes)}, iter.input(0).options().dtype(at::kByte));
+  auto* d_workspace = static_cast<char*>(workspace.data_ptr());
+  const auto stream = c10::cuda::getCurrentCUDAStream();
 
   int64_t chunk_start = 0;
   for (int64_t chunk = 0; chunk < chunks; ++chunk) {
@@ -66,12 +70,11 @@ void gpu_chunk_kernel(at::TensorIterator& iter, int work_size, const Func& f) {
       f(data.data(), offsets.data(), work + idx * work_size);
     };
 
-    element_kernel<<<grid, block>>>(chunk_numel, device_lambda, d_workspace);
+    element_kernel<<<grid, block, 0, stream.stream()>>>(
+        chunk_numel, device_lambda, d_workspace);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     chunk_start += chunk_numel;
   }
-
-  C10_CUDA_CHECK(cudaFree(d_workspace));
 }
 
 }  // namespace py2sess_native
