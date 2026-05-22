@@ -29,13 +29,12 @@ def _native_extension():
         return None
 
     _build_ext_cls = cpp_extension.BuildExtension
-    root = Path(__file__).parent
     sources = [
-        str(root / "native/csrc/native_dispatch.cpp"),
-        str(root / "native/csrc/native_module.cpp"),
-        str(root / "native/csrc/native_bindings.cpp"),
+        "native/csrc/native_dispatch.cpp",
+        "native/csrc/native_module.cpp",
+        "native/csrc/native_bindings.cpp",
     ]
-    include_dirs = [str(root / "native/csrc")]
+    include_dirs = ["native/csrc"]
     build_cuda = os.environ.get("PY2SESS_BUILD_CUDA", "0") == "1"
     define_macros = []
     extra_compile_args = {"cxx": ["-std=c++17"]}
@@ -43,7 +42,7 @@ def _native_extension():
     if build_cuda and cpp_extension.CUDA_HOME is None:
         raise RuntimeError("PY2SESS_BUILD_CUDA=1 requested, but torch could not find CUDA_HOME")
     if build_cuda:
-        sources.append(str(root / "native/csrc/native_dispatch_cuda.cu"))
+        sources.append("native/csrc/native_dispatch_cuda.cu")
         extension_cls = cpp_extension.CUDAExtension
         define_macros.append(("PY2SESS_WITH_CUDA", "1"))
         for name in ("PY2SESS_NATIVE_2S_CHUNKS", "PY2SESS_NATIVE_BLOCK_SIZE"):
