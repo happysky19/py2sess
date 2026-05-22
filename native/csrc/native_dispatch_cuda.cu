@@ -6,16 +6,9 @@
 
 #include "loops.cuh"
 #include "native_dispatch.hpp"
-#include "native_workspace.hpp"
 #include "thermal_2s_impl.hpp"
 
-#ifndef PY2SESS_NATIVE_2S_CHUNKS
-#define PY2SESS_NATIVE_2S_CHUNKS 8
-#endif
-
 namespace py2sess_native {
-
-static_assert(PY2SESS_NATIVE_2S_CHUNKS > 0, "PY2SESS_NATIVE_2S_CHUNKS must be positive");
 
 namespace {
 
@@ -159,7 +152,7 @@ void thermal_2s_cuda(at::TensorIterator& iter, const Thermal2sParams& params) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_thermal_2s_cuda", [&] {
     const int nlay = last_dim_size(iter.input(0));
     const int workspace_size = static_cast<int>(thermal_2s_workspace_bytes<scalar_t>(nlay));
-    gpu_chunk_kernel<PY2SESS_NATIVE_2S_CHUNKS, 11>(
+    gpu_chunk_kernel<8, 11>(
         iter,
         workspace_size,
         [=] __device__(char* const data[11], unsigned int offsets[11], char* work) {
@@ -209,7 +202,7 @@ void thermal_2s_flux_cuda(at::TensorIterator& iter, const Thermal2sParams& param
     const int packed_bytes = static_cast<int>(packed_cols * sizeof(scalar_t));
     const int workspace_size =
         packed_bytes + static_cast<int>(thermal_2s_workspace_bytes<scalar_t>(nlay));
-    gpu_chunk_kernel<PY2SESS_NATIVE_2S_CHUNKS, 11>(
+    gpu_chunk_kernel<8, 11>(
         iter,
         workspace_size,
         [=] __device__(char* const data[11], unsigned int offsets[11], char* work) {
@@ -268,7 +261,7 @@ void thermal_2s_prop_flux_cuda(at::TensorIterator& iter, const Thermal2sPropPara
         staging_size +
         static_cast<int>(two_stream_flux_pair_packed_cols<scalar_t>(nlay) * sizeof(scalar_t)) +
         static_cast<int>(thermal_2s_workspace_bytes<scalar_t>(nlay));
-    gpu_chunk_kernel<PY2SESS_NATIVE_2S_CHUNKS, 8>(
+    gpu_chunk_kernel<8, 8>(
         iter,
         workspace_size,
         [=] __device__(char* const data[8], unsigned int offsets[8], char* work) {
@@ -311,7 +304,7 @@ void solar_2s_cuda(at::TensorIterator& iter, const Solar2sParams& params) {
     const auto* chapman = reinterpret_cast<const scalar_t*>(params.chapman);
     const auto* pxsq = reinterpret_cast<const scalar_t*>(params.pxsq);
     const auto* px0x = reinterpret_cast<const scalar_t*>(params.px0x);
-    gpu_chunk_kernel<PY2SESS_NATIVE_2S_CHUNKS, 12>(
+    gpu_chunk_kernel<8, 12>(
         iter,
         workspace_size,
         [=] __device__(char* const data[12], unsigned int offsets[12], char* work) {
@@ -375,7 +368,7 @@ void solar_2s_flux_cuda(at::TensorIterator& iter, const Solar2sParams& params) {
     const auto* chapman = reinterpret_cast<const scalar_t*>(params.chapman);
     const auto* pxsq = reinterpret_cast<const scalar_t*>(params.pxsq);
     const auto* px0x = reinterpret_cast<const scalar_t*>(params.px0x);
-    gpu_chunk_kernel<PY2SESS_NATIVE_2S_CHUNKS, 12>(
+    gpu_chunk_kernel<8, 12>(
         iter,
         workspace_size,
         [=] __device__(char* const data[12], unsigned int offsets[12], char* work) {
@@ -448,7 +441,7 @@ void solar_2s_prop_flux_cuda(at::TensorIterator& iter, const Solar2sPropParams& 
     const auto* chapman = reinterpret_cast<const scalar_t*>(params.chapman);
     const auto* pxsq = reinterpret_cast<const scalar_t*>(params.pxsq);
     const auto* px0x = reinterpret_cast<const scalar_t*>(params.px0x);
-    gpu_chunk_kernel<PY2SESS_NATIVE_2S_CHUNKS, 9>(
+    gpu_chunk_kernel<8, 9>(
         iter,
         workspace_size,
         [=] __device__(char* const data[9], unsigned int offsets[9], char* work) {
@@ -666,22 +659,6 @@ void solar_fo_cuda(at::TensorIterator& iter, const SolarFoParams& params) {
               params.return_components,
               params.return_profile,
               work);
-        });
-  });
-}
-
-void cuda_dispatch_stub(at::TensorIterator& iter) {
-  at::cuda::CUDAGuard device_guard(iter.device());
-  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_cuda_dispatch_stub", [&] {
-    const int workspace_size = static_cast<int>(rt_workspace_bytes(1));
-    gpu_chunk_kernel<16, 2>(
-        iter,
-        workspace_size,
-        [] __device__(char* const data[2], unsigned int offsets[2], char* work) {
-          (void)work;
-          auto* out = reinterpret_cast<scalar_t*>(data[0] + offsets[0]);
-          auto* in = reinterpret_cast<const scalar_t*>(data[1] + offsets[1]);
-          *out = *in;
         });
   });
 }

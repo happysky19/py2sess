@@ -3,7 +3,6 @@
 #include <ATen/Tensor.h>
 #include <ATen/TensorIterator.h>
 
-#include <cstddef>
 #include <cstdint>
 
 namespace py2sess_native {
@@ -323,9 +322,6 @@ at::Tensor solar_fo(
     bool do_nadir,
     bool return_components,
     bool return_profile);
-
-at::Tensor tensoriterator_copy(at::Tensor input);
-std::size_t workspace_bytes(std::int64_t nlay);
 
 void thermal_2s_cpu(at::TensorIterator& iter, const Thermal2sParams& params);
 void solar_2s_cpu(at::TensorIterator& iter, const Solar2sParams& params);

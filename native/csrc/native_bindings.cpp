@@ -7,14 +7,6 @@
 #include <sstream>
 #include <string>
 
-#ifndef PY2SESS_NATIVE_2S_CHUNKS
-#define PY2SESS_NATIVE_2S_CHUNKS 8
-#endif
-
-#ifndef PY2SESS_NATIVE_BLOCK_SIZE
-#define PY2SESS_NATIVE_BLOCK_SIZE 64
-#endif
-
 namespace py2sess_native {
 namespace {
 
@@ -37,8 +29,6 @@ pybind11::dict backend_info() {
   info["cuda"] = false;
 #endif
   info["memory_model"] = "tensoriterator-row-workspace";
-  info["native_2s_chunks"] = PY2SESS_NATIVE_2S_CHUNKS;
-  info["native_block_size"] = PY2SESS_NATIVE_BLOCK_SIZE;
   info["thermal_2s"] = true;
   info["thermal_fo"] = true;
   info["solar_2s"] = true;
@@ -113,8 +103,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("prop"));
 
   m.def("backend_info", &py2sess_native::backend_info);
-  m.def("workspace_bytes", &py2sess_native::workspace_bytes, pybind11::arg("nlay"));
-  m.def("tensoriterator_copy", &py2sess_native::tensoriterator_copy, pybind11::arg("input"));
   m.def(
       "thermal_2s",
       &py2sess_native::thermal_2s,

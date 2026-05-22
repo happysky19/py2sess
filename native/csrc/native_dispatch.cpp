@@ -8,10 +8,8 @@
 
 #include <algorithm>
 #include <memory>
-#include <string>
 
 #include "native_dispatch.hpp"
-#include "native_workspace.hpp"
 #include "thermal_2s_impl.hpp"
 
 namespace py2sess_native {
@@ -1664,41 +1662,6 @@ at::Tensor solar_2s(
       optional_pair,
       params);
   return return_profile ? packed : packed.select(1, 0);
-}
-
-at::Tensor tensoriterator_copy(at::Tensor input) {
-  TORCH_CHECK(input.is_floating_point(), "tensoriterator_copy expects a floating tensor");
-  auto contiguous = input.contiguous();
-  auto output = at::empty_like(contiguous);
-
-  auto iter = at::TensorIteratorConfig()
-                  .check_all_same_dtype(true)
-                  .add_output(output)
-                  .add_input(contiguous)
-                  .build();
-
-  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_tensoriterator_copy_cpu", [&] {
-    const auto grain_size =
-        std::max<int64_t>(1, iter.numel() / std::max<int>(1, at::get_num_threads()));
-    const auto workspace_size = rt_workspace_bytes(1);
-    iter.for_each(
-        [&](char** data, const int64_t* strides, int64_t n) {
-          std::unique_ptr<char[]> work = std::make_unique<char[]>(workspace_size);
-          (void)work;
-          for (int64_t i = 0; i < n; ++i) {
-            auto* out = reinterpret_cast<scalar_t*>(data[0] + i * strides[0]);
-            auto* in = reinterpret_cast<const scalar_t*>(data[1] + i * strides[1]);
-            *out = *in;
-          }
-        },
-        grain_size);
-  });
-
-  return output;
-}
-
-std::size_t workspace_bytes(std::int64_t nlay) {
-  return rt_workspace_bytes(nlay);
 }
 
 }  // namespace py2sess_native
