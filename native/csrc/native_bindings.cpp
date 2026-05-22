@@ -7,6 +7,14 @@
 #include <sstream>
 #include <string>
 
+#ifndef PY2SESS_NATIVE_2S_CHUNKS
+#define PY2SESS_NATIVE_2S_CHUNKS 8
+#endif
+
+#ifndef PY2SESS_NATIVE_BLOCK_SIZE
+#define PY2SESS_NATIVE_BLOCK_SIZE 64
+#endif
+
 namespace py2sess_native {
 namespace {
 
@@ -29,6 +37,8 @@ pybind11::dict backend_info() {
   info["cuda"] = false;
 #endif
   info["memory_model"] = "tensoriterator-row-workspace";
+  info["native_2s_chunks"] = PY2SESS_NATIVE_2S_CHUNKS;
+  info["native_block_size"] = PY2SESS_NATIVE_BLOCK_SIZE;
   info["thermal_2s"] = true;
   info["thermal_fo"] = true;
   info["solar_2s"] = true;

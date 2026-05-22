@@ -7,7 +7,13 @@
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 
+#ifndef PY2SESS_NATIVE_BLOCK_SIZE
+#define PY2SESS_NATIVE_BLOCK_SIZE 64
+#endif
+
 namespace py2sess_native {
+
+static_assert(PY2SESS_NATIVE_BLOCK_SIZE > 0, "PY2SESS_NATIVE_BLOCK_SIZE must be positive");
 
 template <typename Func>
 __global__ void element_kernel(int64_t numel, Func f, char* work) {
@@ -63,7 +69,7 @@ void gpu_chunk_kernel(at::TensorIterator& iter, int work_size, const Func& f) {
   for (int64_t chunk = 0; chunk < chunks; ++chunk) {
     const int64_t chunk_numel = base + (chunk < rem ? 1 : 0);
 
-    dim3 block(64);
+    dim3 block(PY2SESS_NATIVE_BLOCK_SIZE);
     dim3 grid((chunk_numel + block.x - 1) / block.x);
     auto device_lambda = [=] __device__(int idx, char* work) {
       auto offsets = offset_calc.get(idx + chunk_start);

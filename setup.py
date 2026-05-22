@@ -8,6 +8,19 @@ from setuptools import setup
 _build_ext_cls = None
 
 
+def _positive_int_env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return str(parsed)
+
+
 def _native_extension():
     global _build_ext_cls
     try:
@@ -33,6 +46,10 @@ def _native_extension():
         sources.append(str(root / "native/csrc/native_dispatch_cuda.cu"))
         extension_cls = cpp_extension.CUDAExtension
         define_macros.append(("PY2SESS_WITH_CUDA", "1"))
+        for name in ("PY2SESS_NATIVE_2S_CHUNKS", "PY2SESS_NATIVE_BLOCK_SIZE"):
+            value = _positive_int_env(name)
+            if value is not None:
+                define_macros.append((name, value))
         extra_compile_args["nvcc"] = ["-std=c++17", "--extended-lambda"]
         torch_lib = Path(cpp_extension.__file__).resolve().parents[1] / "lib"
         extra_link_args.append(f"-Wl,-rpath,{torch_lib}")
