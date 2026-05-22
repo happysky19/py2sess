@@ -102,6 +102,7 @@ def solve_fo_solar_obs_eps_batch_torch(
     precomputed: FoSolarObsBatchPrecompute,
     dtype=None,
     device=None,
+    direct_surface_reflectance=None,
     return_profile: bool = False,
     return_components: bool = False,
 ):
@@ -124,9 +125,10 @@ def solve_fo_solar_obs_eps_batch_torch(
     """
     if torch is None:  # pragma: no cover
         raise RuntimeError("PyTorch is not installed")
-    dtype, device = _infer_context(
-        (tau, omega, scaling, albedo, flux_factor, exact_scatter), dtype=dtype, device=device
-    )
+    context_values = (tau, omega, scaling, albedo, flux_factor, exact_scatter)
+    if direct_surface_reflectance is not None:
+        context_values = (*context_values, direct_surface_reflectance)
+    dtype, device = _infer_context(context_values, dtype=dtype, device=device)
     tau_t = _as_tensor(tau, dtype=dtype, device=device)
     omega_t = _as_tensor(omega, dtype=dtype, device=device)
     scaling_t = _as_tensor(scaling, dtype=dtype, device=device)
@@ -144,6 +146,17 @@ def solve_fo_solar_obs_eps_batch_torch(
     if precomputed.inv_layer_thickness.shape[0] != nlayers:
         raise ValueError("precomputed geometry does not match tau layer count")
     albedo_t = _broadcast_rows("albedo", albedo, batch_size=batch_size, dtype=dtype, device=device)
+    surface_reflectance_t = (
+        albedo_t
+        if direct_surface_reflectance is None
+        else _broadcast_rows(
+            "direct_surface_reflectance",
+            direct_surface_reflectance,
+            batch_size=batch_size,
+            dtype=dtype,
+            device=device,
+        )
+    )
     flux_t = _broadcast_rows(
         "flux_factor", flux_factor, batch_size=batch_size, dtype=dtype, device=device
     )
@@ -155,7 +168,7 @@ def solve_fo_solar_obs_eps_batch_torch(
     total_tau = extinction[:, : precomputed.ntrav_nl] @ sunpathsnl
     attenuation_nl = _exp_cutoff_torch(total_tau)
     cumsource_up = torch.zeros(batch_size, dtype=dtype, device=device)
-    cumsource_db = 4.0 * precomputed.mu0 * albedo_t * attenuation_nl
+    cumsource_db = 4.0 * precomputed.mu0 * surface_reflectance_t * attenuation_nl
     profile_up_layers = []
     profile_db_layers = []
     surface_db = cumsource_db

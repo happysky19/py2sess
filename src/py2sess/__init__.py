@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from .api import TwoStreamEss, TwoStreamEssBatchResult, TwoStreamEssOptions, TwoStreamEssResult
+    from .rtsolver.native_backend import native_backend_info, native_extension_available
     from .scene import SceneForwardInputs, SceneRun, load_scene
     from .rtsolver.fo_solar_obs import FoSolarObsResult, fo_scatter_term_henyey_greenstein
     from .rtsolver.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch
@@ -49,6 +50,8 @@ __all__ = [
     "TwoStreamEssOptions",
     "TwoStreamEssResult",
     "TwoStreamEssBatchResult",
+    "native_backend_info",
+    "native_extension_available",
     "SceneForwardInputs",
     "SceneRun",
     "load_scene",
@@ -91,6 +94,10 @@ def __getattr__(name: str):
         from . import api
 
         value = getattr(api, name)
+    elif name in {"native_backend_info", "native_extension_available"}:
+        from .rtsolver import native_backend
+
+        value = getattr(native_backend, name)
     elif name in {"SceneForwardInputs", "SceneRun", "load_scene"}:
         from . import scene
 

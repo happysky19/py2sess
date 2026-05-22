@@ -367,3 +367,44 @@ def accumulate_flux_pair(
         fourier=fourier,
         azmfac=azmfac,
     )
+
+
+def accumulate_flux_profiles(
+    *,
+    flux_up,
+    flux_down,
+    flux_net,
+    flux_mean,
+    up,
+    down,
+    net,
+    mean,
+    index,
+    fourier,
+    azmfac,
+):
+    """Accumulates one Fourier contribution into level-resolved flux arrays."""
+    flux_up[index, :] = accumulate_fourier_term(
+        flux_up[index, :],
+        up,
+        fourier=fourier,
+        azmfac=azmfac,
+    )
+    flux_down[index, :] = accumulate_fourier_term(
+        flux_down[index, :],
+        down,
+        fourier=fourier,
+        azmfac=azmfac,
+    )
+    flux_net[index, :] = accumulate_fourier_term(
+        flux_net[index, :],
+        net,
+        fourier=fourier,
+        azmfac=azmfac,
+    )
+    flux_mean[index, :] = accumulate_fourier_term(
+        flux_mean[index, :],
+        mean,
+        fourier=fourier,
+        azmfac=azmfac,
+    )

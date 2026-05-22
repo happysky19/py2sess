@@ -9,6 +9,7 @@ from ..optical.delta_m_torch import delta_m_scale_optical_properties_torch
 from .solver_common import (
     accumulate_scalar_and_levels,
     accumulate_flux_pair,
+    accumulate_flux_profiles,
     include_surface_term,
     include_thermal_surface_term,
     prepare_thermal_boundary_terms,
@@ -43,6 +44,7 @@ def _initialize_torch_solution_storage(
     device,
     dtype,
     flux_geometry_count: int | None = None,
+    do_flux_output: bool = False,
 ):
     """Allocates the standard torch forward-solver output arrays.
 
@@ -64,7 +66,7 @@ def _initialize_torch_solution_storage(
         Fresh torch tensors for scalar radiances, fluxes, and level profiles.
     """
     flux_count = size if flux_geometry_count is None else flux_geometry_count
-    return {
+    solved = {
         "intensity_toa": torch.zeros((size,), dtype=dtype, device=device),
         "intensity_boa": torch.zeros((size,), dtype=dtype, device=device),
         "fluxes_toa": torch.zeros((2, flux_count), dtype=dtype, device=device),
@@ -72,6 +74,13 @@ def _initialize_torch_solution_storage(
         "radlevel_up": torch.zeros((size, nlay + 1), dtype=dtype, device=device),
         "radlevel_dn": torch.zeros((size, nlay + 1), dtype=dtype, device=device),
     }
+    if do_flux_output:
+        flux_shape = (flux_count, nlay + 1)
+        solved["flux_up"] = torch.zeros(flux_shape, dtype=dtype, device=device)
+        solved["flux_down"] = torch.zeros(flux_shape, dtype=dtype, device=device)
+        solved["flux_net"] = torch.zeros(flux_shape, dtype=dtype, device=device)
+        solved["flux_mean"] = torch.zeros(flux_shape, dtype=dtype, device=device)
+    return solved
 
 
 def _finalize_torch_solution_storage(solved, prepared):
@@ -97,6 +106,9 @@ def _finalize_torch_solution_storage(solved, prepared):
         )
         solved["fluxes_toa"] = solved["fluxes_toa"].index_select(1, indices)
         solved["fluxes_boa"] = solved["fluxes_boa"].index_select(1, indices)
+        for key in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+            if key in solved:
+                solved[key] = solved[key].index_select(0, indices)
     return solved
 
 
@@ -180,7 +192,15 @@ def solve_optimized_solar_obs_torch(
     )
 
     ngeoms, nlay = solar_problem_size(prepared)
-    solved = _initialize_torch_solution_storage(ngeoms, nlay, device=tau_arr.device, dtype=dtype)
+    solved = _initialize_torch_solution_storage(
+        ngeoms,
+        nlay,
+        device=tau_arr.device,
+        dtype=dtype,
+        do_flux_output=options.do_flux_output,
+    )
+    flux_do_upwelling = options.do_upwelling or options.do_flux_output
+    flux_do_dnwelling = options.do_dnwelling or options.do_flux_output
 
     for fourier in range(geom.n_fouriers + 1):
         (
@@ -222,11 +242,15 @@ def solve_optimized_solar_obs_torch(
             ),
         )
 
-        do_include_surface = include_surface_term(
-            fourier,
-            albedo=prepared.albedo,
-            do_brdf_surface=options.do_brdf_surface,
-        ) or _requires_grad(albedo)
+        do_include_surface = (
+            include_surface_term(
+                fourier,
+                albedo=prepared.albedo,
+                do_brdf_surface=options.do_brdf_surface,
+            )
+            or options.do_surface_leaving
+            or _requires_grad(albedo)
+        )
         direct_beam_terms = prepare_solar_direct_beam_terms(
             ngeoms=ngeoms,
             do_include_surface=do_include_surface,
@@ -431,10 +455,11 @@ def solve_optimized_solar_obs_torch(
                 )
 
             if geom.do_include_mvout[fourier]:
+                do_direct_flux = fourier == 0
                 toa, boa = fluxes_solar_torch(
-                    do_upwelling=options.do_upwelling,
-                    do_dnwelling=options.do_dnwelling,
-                    do_directbeamb=bool(do_include_surface),
+                    do_upwelling=flux_do_upwelling,
+                    do_dnwelling=flux_do_dnwelling,
+                    do_directbeamb=do_direct_flux,
                     pi4=geom.pi4,
                     stream_value=prepared.stream_value,
                     fluxfac=flux_factor,
@@ -459,6 +484,38 @@ def solve_optimized_solar_obs_torch(
                     fourier=fourier,
                     azmfac=geom.azmfac[ib],
                 )
+                if options.do_flux_output:
+                    up, down, net, mean = flux_profile_solar_torch(
+                        do_upwelling=flux_do_upwelling,
+                        do_dnwelling=flux_do_dnwelling,
+                        do_directbeamb=do_direct_flux,
+                        pi4=geom.pi4,
+                        stream_value=prepared.stream_value,
+                        fluxfac=flux_factor,
+                        fluxmult=geom.delta_factor[fourier],
+                        x0b=geom.x0[ib],
+                        initial_transb=misc["initial_trans"][:, ib],
+                        trans_solar_beamb=misc["trans_solar_beam"][ib],
+                        lcon=lcon,
+                        mcon=mcon,
+                        xpos=xpos,
+                        eigentrans=eigentrans,
+                        wupper=wupper,
+                        wlower=wlower,
+                    )
+                    accumulate_flux_profiles(
+                        flux_up=solved["flux_up"],
+                        flux_down=solved["flux_down"],
+                        flux_net=solved["flux_net"],
+                        flux_mean=solved["flux_mean"],
+                        up=up,
+                        down=down,
+                        net=net,
+                        mean=mean,
+                        index=ib,
+                        fourier=fourier,
+                        azmfac=geom.azmfac[ib],
+                    )
 
     return _finalize_torch_solution_storage(solved, prepared)
 
@@ -1318,6 +1375,126 @@ def fluxes_solar_torch(
     return toa, boa
 
 
+def two_stream_level_quads_torch(*, lcon, mcon, xpos, eigentrans, wupper, wlower):
+    """Returns diffuse up/down two-stream quadrature values at all levels."""
+    down_upper = wupper[0] + lcon * xpos[0] + mcon * xpos[1] * eigentrans
+    up_upper = wupper[1] + lcon * xpos[1] + mcon * xpos[0] * eigentrans
+    down_lower = wlower[0, -1] + lcon[-1] * xpos[0, -1] * eigentrans[-1] + mcon[-1] * xpos[1, -1]
+    up_lower = wlower[1, -1] + lcon[-1] * xpos[1, -1] * eigentrans[-1] + mcon[-1] * xpos[0, -1]
+    return torch.cat((up_upper, up_lower.reshape(1))), torch.cat(
+        (down_upper, down_lower.reshape(1))
+    )
+
+
+def flux_profile_from_quads_torch(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    pi4: float,
+    stream_value: float,
+    fluxmult: float,
+    up_quad,
+    down_quad,
+    direct_flux=None,
+    direct_mean=None,
+):
+    nlevels = int(up_quad.shape[0])
+    up = torch.zeros((nlevels,), dtype=up_quad.dtype, device=up_quad.device)
+    down = torch.zeros_like(up)
+    mean = torch.zeros_like(up)
+    pi2 = 0.5 * pi4
+    if do_upwelling:
+        up = pi2 * stream_value * fluxmult * up_quad
+        mean = mean + 0.5 * fluxmult * up_quad
+    if do_dnwelling:
+        down = pi2 * stream_value * fluxmult * down_quad
+        mean = mean + 0.5 * fluxmult * down_quad
+        if direct_flux is not None:
+            down = down + direct_flux
+        if direct_mean is not None:
+            mean = mean + direct_mean
+    return up, down, up - down, mean
+
+
+def flux_profile_solar_torch(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    do_directbeamb: bool,
+    pi4: float,
+    stream_value: float,
+    fluxfac,
+    fluxmult: float,
+    x0b: float,
+    initial_transb,
+    trans_solar_beamb,
+    lcon,
+    mcon,
+    xpos,
+    eigentrans,
+    wupper,
+    wlower,
+):
+    up_quad, down_quad = two_stream_level_quads_torch(
+        lcon=lcon,
+        mcon=mcon,
+        xpos=xpos,
+        eigentrans=eigentrans,
+        wupper=wupper,
+        wlower=wlower,
+    )
+    direct_flux = None
+    direct_mean = None
+    if do_directbeamb:
+        direct_trans = torch.cat((initial_transb, trans_solar_beamb.reshape(1)))
+        direct_mean = fluxfac * direct_trans / pi4
+        direct_flux = fluxfac * direct_trans * x0b
+    return flux_profile_from_quads_torch(
+        do_upwelling=do_upwelling,
+        do_dnwelling=do_dnwelling,
+        pi4=pi4,
+        stream_value=stream_value,
+        fluxmult=fluxmult,
+        up_quad=up_quad,
+        down_quad=down_quad,
+        direct_flux=direct_flux,
+        direct_mean=direct_mean,
+    )
+
+
+def flux_profile_thermal_torch(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    pi4: float,
+    stream_value: float,
+    fluxmult: float,
+    lcon,
+    mcon,
+    xpos,
+    eigentrans,
+    wupper,
+    wlower,
+):
+    up_quad, down_quad = two_stream_level_quads_torch(
+        lcon=lcon,
+        mcon=mcon,
+        xpos=xpos,
+        eigentrans=eigentrans,
+        wupper=wupper,
+        wlower=wlower,
+    )
+    return flux_profile_from_quads_torch(
+        do_upwelling=do_upwelling,
+        do_dnwelling=do_dnwelling,
+        pi4=pi4,
+        stream_value=stream_value,
+        fluxmult=fluxmult,
+        up_quad=up_quad,
+        down_quad=down_quad,
+    )
+
+
 def thermal_setup_torch(delta_tau, thermal_bb_input):
     """Builds linear-in-optical-depth thermal source coefficients."""
     if torch is None:  # pragma: no cover
@@ -1840,7 +2017,10 @@ def solve_optimized_thermal_torch(
         device=tau_arr.device,
         dtype=dtype,
         flux_geometry_count=1,
+        do_flux_output=options.do_flux_output,
     )
+    flux_do_upwelling = options.do_upwelling or options.do_flux_output
+    flux_do_dnwelling = options.do_dnwelling or options.do_flux_output
 
     eigenvalue, eigentrans, xpos, norm_saved = hom_solution_thermal_torch(
         stream_value=prepared.stream_value,
@@ -1979,8 +2159,8 @@ def solve_optimized_thermal_torch(
         )
     if geom.do_include_mvout[0]:
         toa, boa = fluxes_thermal_torch(
-            do_upwelling=options.do_upwelling,
-            do_dnwelling=options.do_dnwelling,
+            do_upwelling=flux_do_upwelling,
+            do_dnwelling=flux_do_dnwelling,
             pi4=geom.pi4,
             stream_value=prepared.stream_value,
             fluxmult=geom.delta_factor[0],
@@ -2002,5 +2182,32 @@ def solve_optimized_thermal_torch(
             fourier=0,
             azmfac=1.0,
         )
+        if options.do_flux_output:
+            up, down, net, mean = flux_profile_thermal_torch(
+                do_upwelling=flux_do_upwelling,
+                do_dnwelling=flux_do_dnwelling,
+                pi4=geom.pi4,
+                stream_value=prepared.stream_value,
+                fluxmult=geom.delta_factor[0],
+                lcon=lcon,
+                mcon=mcon,
+                xpos=xpos,
+                eigentrans=eigentrans,
+                wupper=t_wupper,
+                wlower=t_wlower,
+            )
+            accumulate_flux_profiles(
+                flux_up=solved["flux_up"],
+                flux_down=solved["flux_down"],
+                flux_net=solved["flux_net"],
+                flux_mean=solved["flux_mean"],
+                up=up,
+                down=down,
+                net=net,
+                mean=mean,
+                index=0,
+                fourier=0,
+                azmfac=1.0,
+            )
 
     return solved

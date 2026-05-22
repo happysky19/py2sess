@@ -13,6 +13,7 @@ from .preprocess import PreparedInputs
 from .solver_common import (
     accumulate_scalar_and_levels,
     accumulate_flux_pair,
+    accumulate_flux_profiles,
     include_surface_term,
     include_thermal_surface_term,
     prepare_thermal_boundary_terms,
@@ -37,6 +38,7 @@ def _initialize_solution_storage(
     nlay: int,
     *,
     flux_geometry_count: int | None = None,
+    do_flux_output: bool = False,
 ) -> dict[str, np.ndarray]:
     """Allocates the standard NumPy forward-solver output arrays.
 
@@ -56,7 +58,7 @@ def _initialize_solution_storage(
         Fresh output arrays for scalar radiances, fluxes, and level profiles.
     """
     flux_count = size if flux_geometry_count is None else flux_geometry_count
-    return {
+    solved = {
         "intensity_toa": np.zeros(size, dtype=float),
         "intensity_boa": np.zeros(size, dtype=float),
         "fluxes_toa": np.zeros((2, flux_count), dtype=float),
@@ -64,6 +66,13 @@ def _initialize_solution_storage(
         "radlevel_up": np.zeros((size, nlay + 1), dtype=float),
         "radlevel_dn": np.zeros((size, nlay + 1), dtype=float),
     }
+    if do_flux_output:
+        flux_shape = (flux_count, nlay + 1)
+        solved["flux_up"] = np.zeros(flux_shape, dtype=float)
+        solved["flux_down"] = np.zeros(flux_shape, dtype=float)
+        solved["flux_net"] = np.zeros(flux_shape, dtype=float)
+        solved["flux_mean"] = np.zeros(flux_shape, dtype=float)
+    return solved
 
 
 def _finalize_solution_storage(
@@ -87,8 +96,12 @@ def _finalize_solution_storage(
     if prepared.source_mode == "solar_lat" and prepared.lattice_counts is not None:
         nbeams, nusers, nazms = prepared.lattice_counts
         stride = nusers * nazms
-        solved["fluxes_toa"] = solved["fluxes_toa"][:, np.arange(nbeams, dtype=int) * stride]
-        solved["fluxes_boa"] = solved["fluxes_boa"][:, np.arange(nbeams, dtype=int) * stride]
+        indices = np.arange(nbeams, dtype=int) * stride
+        solved["fluxes_toa"] = solved["fluxes_toa"][:, indices]
+        solved["fluxes_boa"] = solved["fluxes_boa"][:, indices]
+        for key in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+            if key in solved:
+                solved[key] = solved[key][indices, :]
     return solved
 
 
@@ -1400,6 +1413,151 @@ def _fluxes_solar(
     return toa, boa
 
 
+def _two_stream_level_quads(
+    *,
+    lcon: np.ndarray,
+    mcon: np.ndarray,
+    xpos: np.ndarray,
+    eigentrans: np.ndarray,
+    wupper: np.ndarray,
+    wlower: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Returns diffuse up/down two-stream quadrature values at all levels."""
+    nlay = lcon.size
+    up_quad = np.zeros(nlay + 1, dtype=float)
+    down_quad = np.zeros(nlay + 1, dtype=float)
+    for level in range(nlay):
+        down_quad[level] = (
+            wupper[0, level]
+            + lcon[level] * xpos[0, level]
+            + mcon[level] * xpos[1, level] * eigentrans[level]
+        )
+        up_quad[level] = (
+            wupper[1, level]
+            + lcon[level] * xpos[1, level]
+            + mcon[level] * xpos[0, level] * eigentrans[level]
+        )
+    last = nlay - 1
+    down_quad[nlay] = (
+        wlower[0, last] + lcon[last] * xpos[0, last] * eigentrans[last] + mcon[last] * xpos[1, last]
+    )
+    up_quad[nlay] = (
+        wlower[1, last] + lcon[last] * xpos[1, last] * eigentrans[last] + mcon[last] * xpos[0, last]
+    )
+    return up_quad, down_quad
+
+
+def _flux_profile_from_quads(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    pi4: float,
+    stream_value: float,
+    fluxmult: float,
+    up_quad: np.ndarray,
+    down_quad: np.ndarray,
+    direct_flux: np.ndarray | None = None,
+    direct_mean: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    nlevels = up_quad.size
+    up = np.zeros(nlevels, dtype=float)
+    down = np.zeros(nlevels, dtype=float)
+    mean = np.zeros(nlevels, dtype=float)
+    pi2 = 0.5 * pi4
+    if do_upwelling:
+        up = pi2 * stream_value * fluxmult * up_quad
+        mean += 0.5 * fluxmult * up_quad
+    if do_dnwelling:
+        down = pi2 * stream_value * fluxmult * down_quad
+        mean += 0.5 * fluxmult * down_quad
+        if direct_flux is not None:
+            down += direct_flux
+        if direct_mean is not None:
+            mean += direct_mean
+    return up, down, up - down, mean
+
+
+def _flux_profile_solar(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    do_directbeamb: bool,
+    pi4: float,
+    stream_value: float,
+    fluxfac: float,
+    fluxmult: float,
+    x0b: float,
+    initial_transb: np.ndarray,
+    trans_solar_beamb: float,
+    lcon: np.ndarray,
+    mcon: np.ndarray,
+    xpos: np.ndarray,
+    eigentrans: np.ndarray,
+    wupper: np.ndarray,
+    wlower: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    up_quad, down_quad = _two_stream_level_quads(
+        lcon=lcon,
+        mcon=mcon,
+        xpos=xpos,
+        eigentrans=eigentrans,
+        wupper=wupper,
+        wlower=wlower,
+    )
+    direct_flux = None
+    direct_mean = None
+    if do_directbeamb:
+        direct_trans = np.empty(up_quad.size, dtype=float)
+        direct_trans[:-1] = initial_transb
+        direct_trans[-1] = trans_solar_beamb
+        direct_mean = fluxfac * direct_trans / pi4
+        direct_flux = fluxfac * direct_trans * x0b
+    return _flux_profile_from_quads(
+        do_upwelling=do_upwelling,
+        do_dnwelling=do_dnwelling,
+        pi4=pi4,
+        stream_value=stream_value,
+        fluxmult=fluxmult,
+        up_quad=up_quad,
+        down_quad=down_quad,
+        direct_flux=direct_flux,
+        direct_mean=direct_mean,
+    )
+
+
+def _flux_profile_thermal(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    pi4: float,
+    stream_value: float,
+    fluxmult: float,
+    lcon: np.ndarray,
+    mcon: np.ndarray,
+    xpos: np.ndarray,
+    eigentrans: np.ndarray,
+    wupper: np.ndarray,
+    wlower: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    up_quad, down_quad = _two_stream_level_quads(
+        lcon=lcon,
+        mcon=mcon,
+        xpos=xpos,
+        eigentrans=eigentrans,
+        wupper=wupper,
+        wlower=wlower,
+    )
+    return _flux_profile_from_quads(
+        do_upwelling=do_upwelling,
+        do_dnwelling=do_dnwelling,
+        pi4=pi4,
+        stream_value=stream_value,
+        fluxmult=fluxmult,
+        up_quad=up_quad,
+        down_quad=down_quad,
+    )
+
+
 def _fluxes_thermal(
     do_upwelling: bool,
     do_dnwelling: bool,
@@ -1453,7 +1611,14 @@ def _solve_optimized_thermal(prepared: PreparedInputs, options) -> dict[str, np.
     delta_tau, omega_total, asymm_total = _apply_delta_scaling(prepared, options.do_delta_scaling)
     thermal_coeffs = _thermal_setup(delta_tau, prepared.thermal.thermal_bb_input)
     n_users, nlay = thermal_problem_size(prepared)
-    solved = _initialize_solution_storage(n_users, nlay, flux_geometry_count=1)
+    solved = _initialize_solution_storage(
+        n_users,
+        nlay,
+        flux_geometry_count=1,
+        do_flux_output=options.do_flux_output,
+    )
+    flux_do_upwelling = options.do_upwelling or options.do_flux_output
+    flux_do_dnwelling = options.do_dnwelling or options.do_flux_output
 
     eigenvalue, eigentrans, xpos, norm_saved = _hom_solution_thermal(
         stream_value=prepared.stream_value,
@@ -1587,8 +1752,8 @@ def _solve_optimized_thermal(prepared: PreparedInputs, options) -> dict[str, np.
         mcon_xvec21 = mcon[0] * xpos[0, 0]
         wupper21 = t_wupper[1, 0]
         toa, boa = _fluxes_thermal(
-            do_upwelling=options.do_upwelling,
-            do_dnwelling=options.do_dnwelling,
+            do_upwelling=flux_do_upwelling,
+            do_dnwelling=flux_do_dnwelling,
             pi4=geom.pi4,
             stream_value=prepared.stream_value,
             fluxmult=geom.delta_factor[0],
@@ -1610,6 +1775,33 @@ def _solve_optimized_thermal(prepared: PreparedInputs, options) -> dict[str, np.
             fourier=0,
             azmfac=1.0,
         )
+        if options.do_flux_output:
+            up, down, net, mean = _flux_profile_thermal(
+                do_upwelling=flux_do_upwelling,
+                do_dnwelling=flux_do_dnwelling,
+                pi4=geom.pi4,
+                stream_value=prepared.stream_value,
+                fluxmult=geom.delta_factor[0],
+                lcon=lcon,
+                mcon=mcon,
+                xpos=xpos,
+                eigentrans=eigentrans,
+                wupper=t_wupper,
+                wlower=t_wlower,
+            )
+            accumulate_flux_profiles(
+                flux_up=solved["flux_up"],
+                flux_down=solved["flux_down"],
+                flux_net=solved["flux_net"],
+                flux_mean=solved["flux_mean"],
+                up=up,
+                down=down,
+                net=net,
+                mean=mean,
+                index=0,
+                fourier=0,
+                azmfac=1.0,
+            )
     return _finalize_solution_storage(solved, prepared)
 
 
@@ -1657,7 +1849,9 @@ def solve_optimized_solar_obs(prepared: PreparedInputs, options) -> dict[str, np
     )
 
     ngeoms, nlay = solar_problem_size(prepared)
-    solved = _initialize_solution_storage(ngeoms, nlay)
+    solved = _initialize_solution_storage(ngeoms, nlay, do_flux_output=options.do_flux_output)
+    flux_do_upwelling = options.do_upwelling or options.do_flux_output
+    flux_do_dnwelling = options.do_dnwelling or options.do_flux_output
 
     for fourier in range(geom.n_fouriers + 1):
         pxsq = geom.pxsq[fourier]
@@ -1703,10 +1897,13 @@ def solve_optimized_solar_obs(prepared: PreparedInputs, options) -> dict[str, np
             ),
         )
 
-        do_include_surface = include_surface_term(
-            fourier,
-            albedo=prepared.albedo,
-            do_brdf_surface=options.do_brdf_surface,
+        do_include_surface = (
+            include_surface_term(
+                fourier,
+                albedo=prepared.albedo,
+                do_brdf_surface=options.do_brdf_surface,
+            )
+            or options.do_surface_leaving
         )
         direct_beam_terms = prepare_solar_direct_beam_terms(
             ngeoms=ngeoms,
@@ -1885,10 +2082,11 @@ def solve_optimized_solar_obs(prepared: PreparedInputs, options) -> dict[str, np
                 )
 
             if geom.do_include_mvout[fourier]:
+                do_direct_flux = fourier == 0
                 toa, boa = _fluxes_solar(
-                    do_upwelling=options.do_upwelling,
-                    do_dnwelling=options.do_dnwelling,
-                    do_directbeamb=do_include_surface,
+                    do_upwelling=flux_do_upwelling,
+                    do_dnwelling=flux_do_dnwelling,
+                    do_directbeamb=do_direct_flux,
                     pi4=geom.pi4,
                     stream_value=prepared.stream_value,
                     fluxfac=prepared.flux_factor,
@@ -1913,5 +2111,37 @@ def solve_optimized_solar_obs(prepared: PreparedInputs, options) -> dict[str, np
                     fourier=fourier,
                     azmfac=geom.azmfac[ib],
                 )
+                if options.do_flux_output:
+                    up, down, net, mean = _flux_profile_solar(
+                        do_upwelling=flux_do_upwelling,
+                        do_dnwelling=flux_do_dnwelling,
+                        do_directbeamb=do_direct_flux,
+                        pi4=geom.pi4,
+                        stream_value=prepared.stream_value,
+                        fluxfac=prepared.flux_factor,
+                        fluxmult=delta_factor,
+                        x0b=geom.x0[ib],
+                        initial_transb=misc["initial_trans"][:, ib],
+                        trans_solar_beamb=misc["trans_solar_beam"][ib],
+                        lcon=lcon,
+                        mcon=mcon,
+                        xpos=xpos,
+                        eigentrans=eigentrans,
+                        wupper=wupper,
+                        wlower=wlower,
+                    )
+                    accumulate_flux_profiles(
+                        flux_up=solved["flux_up"],
+                        flux_down=solved["flux_down"],
+                        flux_net=solved["flux_net"],
+                        flux_mean=solved["flux_mean"],
+                        up=up,
+                        down=down,
+                        net=net,
+                        mean=mean,
+                        index=ib,
+                        fourier=fourier,
+                        azmfac=geom.azmfac[ib],
+                    )
 
     return _finalize_solution_storage(solved, prepared)

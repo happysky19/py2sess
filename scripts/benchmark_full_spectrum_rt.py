@@ -48,6 +48,13 @@ from py2sess.rtsolver.solar_obs_batch_torch import solve_solar_obs_batch_torch  
 from py2sess.rtsolver.fo_solar_obs_batch_torch import (  # noqa: E402
     solve_fo_solar_obs_eps_batch_torch,
 )
+from py2sess.rtsolver.native_backend import (  # noqa: E402
+    native_backend_supports_device,
+    solve_solar_2s,
+    solve_solar_fo,
+    solve_thermal_2s,
+    solve_thermal_fo,
+)
 from py2sess.rtsolver.thermal_batch_numpy import (  # noqa: E402
     precompute_fo_thermal_geometry_numpy,
 )
@@ -282,6 +289,34 @@ def _backend_configs(
                     compile_mode=torch_compile_mode,
                 )
             )
+            if native_backend_supports_device("cpu"):
+                configs.append(BackendConfig("native", "Native CPU", "cpu", dtype))
+            else:
+                manifest.append(
+                    _manifest_row(
+                        created_utc,
+                        "backend",
+                        f"native-cpu-{dtype}",
+                        "unavailable",
+                        status="skipped",
+                        reason="native extension is not built for CPU",
+                    )
+                )
+    if backend_set == "native":
+        for dtype in torch_dtypes:
+            if native_backend_supports_device("cpu"):
+                configs.append(BackendConfig("native", "Native CPU", "cpu", dtype))
+            else:
+                manifest.append(
+                    _manifest_row(
+                        created_utc,
+                        "backend",
+                        f"native-cpu-{dtype}",
+                        "unavailable",
+                        status="skipped",
+                        reason="native extension is not built for CPU",
+                    )
+                )
     if backend_set in {"all", "cuda"}:
         if torch.cuda.is_available():
             for dtype in torch_dtypes:
@@ -296,6 +331,19 @@ def _backend_configs(
                         compile_mode=torch_compile_mode,
                     )
                 )
+                if native_backend_supports_device("cuda"):
+                    configs.append(BackendConfig("native", "Native CUDA", "cuda", dtype))
+                else:
+                    manifest.append(
+                        _manifest_row(
+                            created_utc,
+                            "backend",
+                            f"native-cuda-{dtype}",
+                            "unavailable",
+                            status="skipped",
+                            reason="native extension is not built for CUDA",
+                        )
+                    )
         else:
             for dtype in torch_dtypes:
                 manifest.append(
@@ -358,14 +406,14 @@ def _load_scene_and_inputs(spec: CaseSpec) -> tuple[Any, Any, float, dict[str, f
 
 
 def _sync_if_cuda(config: BackendConfig) -> None:
-    if config.backend == "torch" and config.device == "cuda":
+    if config.backend in {"torch", "native"} and config.device == "cuda":
         torch = _torch_module()
         if torch is not None:
             torch.cuda.synchronize(torch.device(config.device))
 
 
 def _cuda_peak(config: BackendConfig) -> str:
-    if config.backend == "torch" and config.device == "cuda":
+    if config.backend in {"torch", "native"} and config.device == "cuda":
         torch = _torch_module()
         if torch is not None:
             return str(int(torch.cuda.max_memory_allocated(torch.device(config.device))))
@@ -373,7 +421,7 @@ def _cuda_peak(config: BackendConfig) -> str:
 
 
 def _reset_cuda_peak(config: BackendConfig) -> None:
-    if config.backend == "torch" and config.device == "cuda":
+    if config.backend in {"torch", "native"} and config.device == "cuda":
         torch = _torch_module()
         if torch is not None:
             torch.cuda.reset_peak_memory_stats(torch.device(config.device))
@@ -437,15 +485,17 @@ def _run_scene_forward_once(
     torch_bvp_engine: str,
     numpy_bvp_engine: str,
 ) -> dict[str, Any]:
-    if config.backend == "torch":
+    if config.backend in {"torch", "native"}:
         torch = _torch_module()
         if torch is None:
             raise RuntimeError("PyTorch is not installed")
         if config.device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
+        if config.backend == "native" and not native_backend_supports_device(config.device):
+            raise RuntimeError(f"native extension is not built for {config.device!r}")
         torch.set_num_threads(torch_threads)
         options = {
-            "backend": "torch",
+            "backend": config.backend,
             "torch_device": config.device,
             "torch_dtype": config.dtype,
             "torch_enable_grad": False,
@@ -604,6 +654,26 @@ def _run_torch_components_once(
     )
 
 
+def _run_native_components_once(
+    scene: Any,
+    inputs: Any,
+    config: BackendConfig,
+) -> dict[str, Any]:
+    del scene
+    torch = _torch_module()
+    if torch is None:
+        raise RuntimeError("PyTorch is not installed")
+    if config.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available")
+    if not native_backend_supports_device(config.device):
+        raise RuntimeError(f"native extension is not built for {config.device!r}")
+    device = torch.device(config.device)
+    dtype = _torch_dtype(config.dtype)
+    if inputs.mode == "solar":
+        return _run_native_solar_components_once(inputs, dtype=dtype, device=device, config=config)
+    return _run_native_thermal_components_once(inputs, dtype=dtype, device=device, config=config)
+
+
 def _run_torch_solar_components_once(
     inputs: Any,
     *,
@@ -744,6 +814,119 @@ def _run_torch_solar_components_once(
     }
 
 
+def _run_native_solar_components_once(
+    inputs: Any,
+    *,
+    dtype: Any,
+    device: Any,
+    config: BackendConfig,
+) -> dict[str, Any]:
+    torch = _torch_module()
+    if torch is None:
+        raise RuntimeError("PyTorch is not installed")
+    kwargs = inputs.kwargs
+    wavelengths = int(inputs.wavelengths.shape[0])
+    layers = int(np.asarray(kwargs["tau"]).shape[-1])
+    chunk_size = recommended_chunk_size(
+        total_rows=wavelengths,
+        nlayers=layers,
+        backend="native",
+        workload="solar_obs",
+    )
+    heights = np.asarray(kwargs["z"], dtype=float)
+    angles = np.asarray(kwargs["angles"], dtype=float)
+    geoms = angles.reshape(1, 3) if angles.ndim == 1 else angles
+    if geoms.shape[0] != 1:
+        raise ValueError("component timing supports one solar geometry")
+    stream = float(kwargs.get("stream", 1.0 / np.sqrt(3.0)))
+    sza, vza, raz = geoms[0]
+    x0 = np.array([np.cos(np.deg2rad(sza))], dtype=float)
+    user_stream = np.array([np.cos(np.deg2rad(vza))], dtype=float)
+    px11, pxsq, px0x, ulp = auxgeom_solar_obs(
+        x0=x0,
+        user_streams=user_stream,
+        stream_value=stream,
+        do_postprocessing=True,
+    )
+    chapman = chapman_factors(heights, 6371.0, float(sza))
+    azmfac = np.array([np.cos(np.deg2rad(raz))], dtype=float)
+    fo_precomputed = fo_solar_obs_batch_precompute(
+        user_obsgeom=geoms,
+        heights=heights,
+        earth_radius=6371.0,
+        nfine=3,
+    )
+    fo_precomputed_t = _torch_fo_solar_precompute(fo_precomputed, dtype=dtype, device=device)
+    chapman_t = _tensor(chapman, dtype=dtype, device=device)
+    pxsq_t = _tensor(np.asarray(pxsq, dtype=float), dtype=dtype, device=device)
+    px0x_t = _tensor(np.asarray(px0x[0], dtype=float), dtype=dtype, device=device)
+    bundle = dict(kwargs)
+
+    fo_seconds = 0.0
+    two_stream_seconds = 0.0
+    total_parts = []
+    wall_start = time.perf_counter()
+    with torch.no_grad():
+        for start in range(0, wavelengths, chunk_size):
+            stop = min(start + chunk_size, wavelengths)
+            chunk = slice_spectral_rows(bundle, SOLAR_COMPONENT_KEYS, start, stop)
+            tau = _tensor(chunk["tau"], dtype=dtype, device=device)
+            omega = _tensor(chunk["ssa"], dtype=dtype, device=device)
+            scaling = _tensor(chunk["delta_m_truncation_factor"], dtype=dtype, device=device)
+            albedo = _tensor(chunk["albedo"], dtype=dtype, device=device)
+            fbeam = _tensor(chunk["fbeam"], dtype=dtype, device=device)
+            fo, elapsed = _timed_torch_call(
+                device,
+                solve_solar_fo,
+                tau=tau,
+                omega=omega,
+                scaling=scaling,
+                albedo=albedo,
+                flux_factor=fbeam,
+                exact_scatter=_tensor(chunk["fo_scatter_term"], dtype=dtype, device=device),
+                precomputed=fo_precomputed_t,
+            )
+            fo_seconds += elapsed
+            two_stream, elapsed = _timed_torch_call(
+                device,
+                solve_solar_2s,
+                tau=tau,
+                omega=omega,
+                asymm=_tensor(chunk["g"], dtype=dtype, device=device),
+                scaling=scaling,
+                albedo=albedo,
+                flux_factor=fbeam,
+                chapman=chapman_t,
+                pxsq=pxsq_t,
+                px0x=px0x_t,
+                stream_value=stream,
+                x0=scalar_value(x0),
+                user_stream=scalar_value(user_stream),
+                user_secant=1.0 / scalar_value(user_stream),
+                azmfac=scalar_value(azmfac),
+                px11=px11,
+                ulp=scalar_value(ulp),
+                return_profile=False,
+            )
+            two_stream_seconds += elapsed
+            total_parts.append((fo + two_stream).detach().cpu().numpy())
+    wall_seconds = time.perf_counter() - wall_start
+    total = np.concatenate(total_parts)
+    max_abs, max_rel = accuracy_summary(total, inputs.reference_total)
+    seconds = fo_seconds + two_stream_seconds
+    return {
+        "seconds": seconds,
+        "wall_seconds": wall_seconds,
+        "fo_seconds": fo_seconds,
+        "two_stream_seconds": two_stream_seconds,
+        "chunk_size": chunk_size,
+        "rows_per_second": wavelengths / seconds,
+        "max_abs_diff": max_abs,
+        "max_rel_diff_pct": max_rel,
+        "source": _cuda_peak(config),
+    }
+
+
 def _run_torch_thermal_components_once(
     inputs: Any,
     *,
@@ -849,6 +1032,102 @@ def _run_torch_thermal_components_once(
                 planck,
                 surfbb,
                 emissivity,
+            )
+            fo_seconds += elapsed
+            total_parts.append((fo + two_stream).detach().cpu().numpy())
+    wall_seconds = time.perf_counter() - wall_start
+    total = np.concatenate(total_parts)
+    max_abs, max_rel = accuracy_summary(total, inputs.reference_total)
+    seconds = fo_seconds + two_stream_seconds
+    return {
+        "seconds": seconds,
+        "wall_seconds": wall_seconds,
+        "fo_seconds": fo_seconds,
+        "two_stream_seconds": two_stream_seconds,
+        "chunk_size": chunk_size,
+        "rows_per_second": wavelengths / seconds,
+        "max_abs_diff": max_abs,
+        "max_rel_diff_pct": max_rel,
+        "source": _cuda_peak(config),
+    }
+
+
+def _run_native_thermal_components_once(
+    inputs: Any,
+    *,
+    dtype: Any,
+    device: Any,
+    config: BackendConfig,
+) -> dict[str, Any]:
+    torch = _torch_module()
+    if torch is None:
+        raise RuntimeError("PyTorch is not installed")
+    kwargs = inputs.kwargs
+    wavelengths = int(inputs.wavelengths.shape[0])
+    layers = int(np.asarray(kwargs["tau"]).shape[-1])
+    chunk_size = recommended_chunk_size(
+        total_rows=wavelengths,
+        nlayers=layers,
+        backend="native",
+        workload="thermal",
+    )
+    heights = np.asarray(kwargs["z"], dtype=float)
+    user_angle = scalar_value(kwargs["angles"])
+    user_stream = float(np.cos(np.deg2rad(user_angle)))
+    stream = float(kwargs.get("stream", 0.5))
+    geometry = precompute_fo_thermal_geometry_numpy(
+        heights=heights,
+        user_angle_degrees=user_angle,
+        earth_radius=6371.0,
+        nfine=3,
+    )
+    fo_geometry = fo_thermal_geometry_to_torch(geometry, dtype=dtype, device=device)
+    heights_t = _tensor(heights, dtype=dtype, device=device)
+    bundle = dict(kwargs)
+
+    fo_seconds = 0.0
+    two_stream_seconds = 0.0
+    total_parts = []
+    wall_start = time.perf_counter()
+    with torch.no_grad():
+        for start in range(0, wavelengths, chunk_size):
+            stop = min(start + chunk_size, wavelengths)
+            chunk = slice_spectral_rows(bundle, THERMAL_COMPONENT_KEYS, start, stop)
+            tau = _tensor(chunk["tau"], dtype=dtype, device=device)
+            omega = _tensor(chunk["ssa"], dtype=dtype, device=device)
+            scaling = _tensor(chunk["delta_m_truncation_factor"], dtype=dtype, device=device)
+            planck = _tensor(chunk["planck"], dtype=dtype, device=device)
+            surfbb = _tensor(chunk["surface_planck"], dtype=dtype, device=device)
+            emissivity = _tensor(chunk["emissivity"], dtype=dtype, device=device)
+            albedo = _tensor(chunk["albedo"], dtype=dtype, device=device)
+            two_stream, elapsed = _timed_torch_call(
+                device,
+                solve_thermal_2s,
+                tau=tau,
+                omega=omega,
+                asymm=_tensor(chunk["g"], dtype=dtype, device=device),
+                scaling=scaling,
+                planck=planck,
+                surfbb=surfbb,
+                emissivity=emissivity,
+                albedo=albedo,
+                stream_value=stream,
+                user_stream=user_stream,
+                thermal_tcutoff=1.0e-8,
+                return_profile=False,
+            )
+            two_stream_seconds += elapsed
+            fo, elapsed = _timed_torch_call(
+                device,
+                solve_thermal_fo,
+                tau=tau,
+                omega=omega,
+                scaling=scaling,
+                planck=planck,
+                surfbb=surfbb,
+                emissivity=emissivity,
+                heights=heights_t,
+                geometry=fo_geometry,
             )
             fo_seconds += elapsed
             total_parts.append((fo + two_stream).detach().cpu().numpy())
@@ -1128,9 +1407,10 @@ def _print_summary_table(rows: list[dict[str, Any]]) -> None:
     print("Mean full-spectrum RT timing summary")
     print(
         f"{'case':<4} {'system/backend':<28} {'kind':<10} "
-        f"{'n':>3} {'mean total (s)':>15} {'mean 2S (s)':>12} {'mean FO (s)':>12}"
+        f"{'n':>3} {'mean total (s)':>15} {'mean 2S (s)':>12} {'mean FO (s)':>12} "
+        f"{'max abs diff':>12} {'max rel diff (%)':>16}"
     )
-    print("-" * 91)
+    print("-" * 121)
     for row in rows:
         label = str(row["system"])
         if row["system"] == "py2sess":
@@ -1141,7 +1421,9 @@ def _print_summary_table(rows: list[dict[str, Any]]) -> None:
             f"{row['case']:<4} {label:<28} {row['timing_kind']:<10} "
             f"{int(row['n_repeats']):>3d} {_format_optional(row.get('total_mean_s')):>15} "
             f"{_format_optional(row.get('two_stream_mean_s')):>12} "
-            f"{_format_optional(row.get('fo_mean_s')):>12}"
+            f"{_format_optional(row.get('fo_mean_s')):>12} "
+            f"{_format_optional(row.get('max_abs_diff')):>12} "
+            f"{_format_optional(row.get('max_rel_diff_pct')):>16}"
         )
 
 
@@ -1177,7 +1459,11 @@ def main() -> None:
             "for explicit reproducibility and currently accepts only components."
         ),
     )
-    parser.add_argument("--backend-set", choices=["all", "cpu", "numpy", "cuda"], default="all")
+    parser.add_argument(
+        "--backend-set",
+        choices=["all", "cpu", "numpy", "native", "cuda"],
+        default="all",
+    )
     parser.add_argument("--torch-dtypes", default=",".join(DEFAULT_TORCH_DTYPES))
     parser.add_argument("--torch-threads", type=int, default=1)
     parser.add_argument(
@@ -1276,6 +1562,10 @@ def main() -> None:
                                 inputs,
                                 numpy_bvp_engine=args.numpy_bvp_engine,
                             )
+                    elif config.backend == "native":
+
+                        def run_once(scene=scene, inputs=inputs, config=config):
+                            return _run_native_components_once(scene, inputs, config)
                     else:
 
                         def run_once(scene=scene, inputs=inputs, config=config):
