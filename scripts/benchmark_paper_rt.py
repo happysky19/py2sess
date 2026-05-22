@@ -26,6 +26,7 @@ if str(SRC) not in sys.path:
 from py2sess import TwoStreamEss, TwoStreamEssOptions  # noqa: E402
 from py2sess.optical.planck import thermal_source_from_temperature_profile  # noqa: E402
 from py2sess.rtsolver.backend import has_torch, to_numpy  # noqa: E402
+from py2sess.rtsolver.native_backend import native_backend_supports_device  # noqa: E402
 from py2sess.rtsolver.fo_solar_obs_batch_numpy import (  # noqa: E402
     fo_solar_obs_batch_precompute,
 )
@@ -470,6 +471,37 @@ def _backend_configs(
                     compile_mode=torch_compile_mode,
                 )
             )
+            if native_backend_supports_device("cpu"):
+                configs.append(BackendConfig("native", "Native CPU", "cpu", dtype))
+            else:
+                manifest.append(
+                    _manifest_row(
+                        created_utc,
+                        kind="backend",
+                        backend=f"Native CPU {dtype}",
+                        device="cpu",
+                        dtype=dtype,
+                        status="skipped",
+                        reason="native extension is not built for CPU",
+                    )
+                )
+
+    if backend_set == "native":
+        for dtype in torch_dtypes:
+            if native_backend_supports_device("cpu"):
+                configs.append(BackendConfig("native", "Native CPU", "cpu", dtype))
+            else:
+                manifest.append(
+                    _manifest_row(
+                        created_utc,
+                        kind="backend",
+                        backend=f"Native CPU {dtype}",
+                        device="cpu",
+                        dtype=dtype,
+                        status="skipped",
+                        reason="native extension is not built for CPU",
+                    )
+                )
 
     if backend_set in {"all", "cuda"}:
         if torch.cuda.is_available():
@@ -485,6 +517,20 @@ def _backend_configs(
                         compile_mode=torch_compile_mode,
                     )
                 )
+                if native_backend_supports_device("cuda"):
+                    configs.append(BackendConfig("native", "Native CUDA", "cuda", dtype))
+                else:
+                    manifest.append(
+                        _manifest_row(
+                            created_utc,
+                            kind="backend",
+                            backend=f"Native CUDA {dtype}",
+                            device="cuda",
+                            dtype=dtype,
+                            status="skipped",
+                            reason="native extension is not built for CUDA",
+                        )
+                    )
         else:
             for dtype in torch_dtypes:
                 manifest.append(
@@ -792,21 +838,21 @@ def _checksum(array: np.ndarray) -> float:
 
 
 def _sync_if_cuda(config: BackendConfig) -> None:
-    if config.backend == "torch" and config.device == "cuda":
+    if config.backend in {"torch", "native"} and config.device == "cuda":
         torch = _torch_module()
         if torch is not None:
             torch.cuda.synchronize()
 
 
 def _reset_peak_memory(config: BackendConfig) -> None:
-    if config.backend == "torch" and config.device == "cuda":
+    if config.backend in {"torch", "native"} and config.device == "cuda":
         torch = _torch_module()
         if torch is not None:
             torch.cuda.reset_peak_memory_stats(torch.device(config.device))
 
 
 def _peak_memory(config: BackendConfig) -> int | None:
-    if config.backend == "torch" and config.device == "cuda":
+    if config.backend in {"torch", "native"} and config.device == "cuda":
         torch = _torch_module()
         if torch is not None:
             return int(torch.cuda.max_memory_allocated(torch.device(config.device)))
@@ -850,7 +896,7 @@ def _make_solver(case: RtCase, config: BackendConfig, *, enable_grad: bool) -> T
             mode=case.mode,
             backend=config.backend,
             torch_device=config.device or None,
-            torch_dtype=config.dtype if config.backend == "torch" else None,
+            torch_dtype=config.dtype if config.backend in {"torch", "native"} else None,
             torch_enable_grad=enable_grad,
         )
     )
@@ -879,7 +925,7 @@ def _forward_runtime_rows(
                 status="skipped",
             )
         ]
-    if config.backend == "torch":
+    if config.backend in {"torch", "native"}:
         kwargs, _ = _float_fields_to_torch(case.kwargs, dtype=config.dtype, device=config.device)
     else:
         kwargs = case.kwargs
@@ -2034,7 +2080,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=5)
-    parser.add_argument("--backend-set", choices=("all", "cpu", "numpy", "cuda"), default="all")
+    parser.add_argument(
+        "--backend-set",
+        choices=("all", "cpu", "numpy", "native", "cuda"),
+        default="all",
+    )
     parser.add_argument("--torch-dtypes", default="float64")
     parser.add_argument("--torch-threads", type=int, default=1)
     parser.add_argument(
