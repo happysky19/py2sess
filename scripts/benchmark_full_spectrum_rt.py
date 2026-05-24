@@ -1541,12 +1541,18 @@ def main() -> None:
         args.output_levels = True
         args.output_fluxes = True
 
+    if has_torch():
+        torch = _torch_module()
+        if torch is not None:
+            torch.set_num_threads(args.torch_threads)
+
     created_utc = datetime.now(timezone.utc).isoformat()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest = [
         _manifest_row(created_utc, "platform", "python", sys.version.replace("\n", " ")),
         _manifest_row(created_utc, "platform", "machine", platform.platform()),
         _manifest_row(created_utc, "repo", "root", str(ROOT)),
+        _manifest_row(created_utc, "metadata", "torch_threads", str(args.torch_threads)),
         _manifest_row(created_utc, "metadata", "torch_compile", str(args.torch_compile)),
         _manifest_row(created_utc, "metadata", "torch_compile_mode", args.torch_compile_mode),
         _manifest_row(created_utc, "metadata", "timing_kinds", ",".join(timing_kinds)),
