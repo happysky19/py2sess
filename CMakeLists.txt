@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.18)
 if(DEFINED SKBUILD_PROJECT_VERSION)
   set(PY2SESS_VERSION "${SKBUILD_PROJECT_VERSION}")
 else()
-  set(PY2SESS_VERSION "0.4.0")
+  set(PY2SESS_VERSION "0.4.1")
 endif()
 
 project(py2sess_native

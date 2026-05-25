@@ -65,6 +65,11 @@ target_include_directories(py2sess_native_pybind
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc
 )
 
+target_compile_definitions(py2sess_native_pybind
+  PRIVATE
+    TORCH_EXTENSION_NAME=_native
+)
+
 target_link_libraries(py2sess_native_pybind
   PRIVATE
     py2sess_native_core
