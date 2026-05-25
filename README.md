@@ -38,6 +38,9 @@ python3 -m pip install build scikit-build-core setuptools-scm torch
 python3 -m build --wheel --no-isolation -Ccmake.define.PY2SESS_BUILD_NATIVE=ON
 ```
 
+Native wheels link against the PyTorch shared libraries supplied by the
+installed `torch` package.
+
 Releases are tagged from merged PRs by GitHub Actions. Add a `release:major`,
 `release:minor`, or `release:patch` label to the PR before merging; the default
 is `release:patch`.
