@@ -25,6 +25,7 @@ endif()
 set_target_properties(py2sess_native_core
   PROPERTIES
     POSITION_INDEPENDENT_CODE ON
+    INSTALL_RPATH "$ORIGIN;@loader_path"
 )
 
 if(PY2SESS_NATIVE_CUDA)
@@ -87,4 +88,11 @@ set_target_properties(py2sess_native_pybind
     PREFIX ""
     OUTPUT_NAME "_native"
     POSITION_INDEPENDENT_CODE ON
+    INSTALL_RPATH "$ORIGIN;@loader_path"
+)
+
+install(TARGETS py2sess_native_core py2sess_native_pybind
+  LIBRARY DESTINATION py2sess
+  RUNTIME DESTINATION py2sess
+  ARCHIVE DESTINATION py2sess
 )

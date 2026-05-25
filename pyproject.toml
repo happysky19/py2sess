@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.12", "setuptools-scm>=8"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "py2sess"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Standalone Python implementation of the optimized 2S-ESS forward model."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,22 +45,29 @@ plot = [
 ]
 dev = [
   "build",
+  "cibuildwheel",
   "matplotlib",
   "numba",
   "pre-commit",
   "ruff",
+  "scikit-build-core",
   "torch",
+  "twine",
 ]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[project.urls]
+Homepage = "https://github.com/happysky19/py2sess"
+Repository = "https://github.com/happysky19/py2sess"
+Issues = "https://github.com/happysky19/py2sess/issues"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["py2sess*"]
+[tool.scikit-build]
+minimum-version = "0.12"
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+wheel.packages = ["src/py2sess"]
+sdist.include = ["CMakeLists.txt", "native/**", "src/py2sess/data/benchmark/*.npz"]
 
-[tool.setuptools.package-data]
-py2sess = ["data/benchmark/*.npz"]
+[tool.setuptools_scm]
+fallback_version = "0.4.0"
 
 [tool.ruff]
 target-version = "py310"
