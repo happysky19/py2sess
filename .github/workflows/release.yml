@@ -163,6 +163,7 @@ jobs:
     needs: [build-macos, build-linux, build-sdist]
     runs-on: ubuntu-latest
     if: ${{ always() }}
+    environment: pypi
     permissions:
       contents: read
       id-token: write
@@ -185,6 +186,3 @@ jobs:
       - name: Publish to PyPI
         if: ${{ needs.build-sdist.result == 'success' && (needs.build-macos.result == 'success' || needs.build-linux.result == 'success') }}
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          user: __token__
-          password: ${{ secrets.PYPI_API_TOKEN }}

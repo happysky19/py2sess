@@ -25,14 +25,14 @@ cmake --build build
 python3 -m build
 ```
 
-To publish a release to PyPI after checking the files in `dist/`:
+Releases are tagged from merged PRs by GitHub Actions. Add a `release:major`,
+`release:minor`, or `release:patch` label to the PR before merging; the default
+is `release:patch`.
 
-```bash
-git tag -a v0.4.0 -m "py2sess 0.4.0"
-git push origin v0.4.0
-```
-
-Then run the `Publish to PyPI` GitHub Actions workflow for that tag.
+PyPI publication uses Trusted Publishing. Configure PyPI to trust
+`happysky19/py2sess`, workflow `.github/workflows/release.yml`, and the `pypi`
+GitHub environment, then run the `Publish to PyPI` GitHub Actions workflow for
+the tag.
 
 ## Quick Start
 
