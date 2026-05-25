@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import torch
 
 
@@ -186,6 +187,81 @@ def _run_parity(native: Any, args: argparse.Namespace, dtype: torch.dtype) -> No
         _assert_close("solar module CPU vs CUDA", solar_cuda.cpu(), solar_cpu, dtype)
 
 
+def _assert_public_fluxes(label: str, result: Any, nlevels: int, dtype: torch.dtype) -> None:
+    for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+        value = getattr(result, field)
+        if value is None:
+            raise AssertionError(f"{label}: missing {field}")
+        if int(value.shape[-1]) != nlevels:
+            raise AssertionError(f"{label}: {field} final axis is not nlyr + 1")
+        if not torch.isfinite(value).all().item():
+            raise AssertionError(f"{label}: {field} contains non-finite values")
+    _assert_close(
+        f"{label} flux_net convention",
+        result.flux_net,
+        result.flux_up - result.flux_down,
+        dtype,
+    )
+
+
+def _run_public_flux_smoke(args: argparse.Namespace, dtype: torch.dtype) -> None:
+    from py2sess import TwoStreamEss, TwoStreamEssOptions
+
+    rows = min(args.parity_rows, 64)
+    if rows % args.ncol:
+        rows = args.ncol * max(1, rows // args.ncol)
+    nlay = args.layers
+    z = np.linspace(float(nlay), 0.0, nlay + 1)
+    layer = np.linspace(0.0, 1.0, nlay, dtype=float)
+    tau = np.broadcast_to(0.004 + 0.05 * layer, (rows, nlay)).copy()
+    ssa = np.broadcast_to(0.08 + 0.18 * layer, (rows, nlay)).copy()
+    g = np.broadcast_to(0.04 + 0.15 * layer, (rows, nlay)).copy()
+
+    solar = TwoStreamEss(
+        TwoStreamEssOptions(
+            nlyr=nlay,
+            mode="solar",
+            backend="native",
+            torch_device="cuda",
+            torch_dtype=args.dtype,
+            output_fluxes=True,
+        )
+    ).forward(
+        tau=tau,
+        ssa=ssa,
+        g=g,
+        z=z,
+        angles=[30.0, 20.0, 0.0],
+        albedo=np.full(rows, 0.08, dtype=float),
+        fbeam=np.ones(rows, dtype=float),
+        delta_m_truncation_factor=np.zeros_like(tau),
+    )
+    _assert_public_fluxes("public solar native CUDA", solar, nlay + 1, dtype)
+
+    level = np.linspace(0.0, 1.0, nlay + 1, dtype=float)
+    thermal = TwoStreamEss(
+        TwoStreamEssOptions(
+            nlyr=nlay,
+            mode="thermal",
+            backend="native",
+            torch_device="cuda",
+            torch_dtype=args.dtype,
+            output_fluxes=True,
+        )
+    ).forward(
+        tau=tau,
+        ssa=ssa,
+        g=g,
+        z=z,
+        angles=30.0,
+        planck=np.broadcast_to(1.0 + 0.25 * level, (rows, nlay + 1)).copy(),
+        surface_planck=np.full(rows, 1.32, dtype=float),
+        emissivity=np.full(rows, 0.94, dtype=float),
+        albedo=np.full(rows, 0.04, dtype=float),
+    )
+    _assert_public_fluxes("public thermal native CUDA", thermal, nlay + 1, dtype)
+
+
 def _time_call(
     *,
     label: str,
@@ -324,6 +400,7 @@ def main() -> None:
         )
 
     _run_parity(native, args, dtype)
+    _run_public_flux_smoke(args, dtype)
     if not args.skip_speed:
         _run_speed(native, args, dtype)
 

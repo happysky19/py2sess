@@ -91,6 +91,226 @@ def _exp_cutoff_torch(values):
     return torch.where(values >= MAX_TAU_PATH, torch.zeros_like(result), result)
 
 
+def _exp1_positive_torch(x):
+    """Evaluates E1(x) for positive torch tensors."""
+    fpmin = 1.0e-20 if x.dtype in {torch.float16, torch.bfloat16, torch.float32} else 1.0e-30
+    x_safe = torch.clamp(x, min=torch.finfo(x.dtype).tiny)
+
+    b = x_safe + 1.0
+    c = torch.full_like(x_safe, 1.0 / fpmin)
+    d = 1.0 / b
+    h = d
+    for i in range(1, 101):
+        a = float(-(i * i))
+        b = b + 2.0
+        d = 1.0 / (a * d + b)
+        c = b + a / c
+        delta = c * d
+        h = h * delta
+    continued = h * torch.exp(-x_safe)
+
+    ans = -torch.log(x_safe) - 0.577215664901532860606512090082402431
+    fact = torch.ones_like(x_safe)
+    for i in range(1, 101):
+        fact = fact * (-x_safe / float(i))
+        term = -fact / float(i)
+        ans = ans + term
+    series = ans
+    return torch.where(x_safe > 1.0, continued, series)
+
+
+def _expn2_positive_torch(x):
+    value = torch.exp(-x) - x * _exp1_positive_torch(x)
+    value = torch.where(x > MAX_TAU_PATH, torch.zeros_like(value), value)
+    return torch.where(x <= 0.0, torch.ones_like(value), value)
+
+
+def _expn3_positive_torch(x):
+    e2 = _expn2_positive_torch(x)
+    value = 0.5 * (torch.exp(-x) - x * e2)
+    value = torch.where(x > MAX_TAU_PATH, torch.zeros_like(value), value)
+    return torch.where(x <= 0.0, torch.full_like(value, 0.5), value)
+
+
+def solve_fo_solar_obs_plane_parallel_batch_torch(
+    *,
+    tau,
+    omega,
+    scaling,
+    surface_reflectance,
+    flux_factor,
+    exact_scatter,
+    mu0: float,
+    user_stream: float,
+    dtype=None,
+    device=None,
+    return_profile: bool = False,
+    return_components: bool = False,
+):
+    """Evaluates plane-parallel solar FO radiance for a spectral batch."""
+    if torch is None:  # pragma: no cover
+        raise RuntimeError("PyTorch is not installed")
+    dtype, device = _infer_context(
+        (tau, omega, scaling, surface_reflectance, flux_factor, exact_scatter),
+        dtype=dtype,
+        device=device,
+    )
+    tau_t = _as_tensor(tau, dtype=dtype, device=device)
+    omega_t = _as_tensor(omega, dtype=dtype, device=device)
+    scaling_t = _as_tensor(scaling, dtype=dtype, device=device)
+    phase_terms = _as_tensor(exact_scatter, dtype=dtype, device=device)
+    if tau_t.ndim != 2:
+        raise ValueError("tau must have shape (n_spectral, n_layers)")
+    if omega_t.shape != tau_t.shape:
+        raise ValueError("omega must have the same shape as tau")
+    if scaling_t.shape != tau_t.shape:
+        raise ValueError("scaling must have the same shape as tau")
+    if phase_terms.shape != tau_t.shape:
+        raise ValueError("exact_scatter must have the same shape as tau")
+
+    batch_size, nlayers = tau_t.shape
+    surface = _broadcast_rows(
+        "surface_reflectance",
+        surface_reflectance,
+        batch_size=batch_size,
+        dtype=dtype,
+        device=device,
+    )
+    flux = _broadcast_rows(
+        "flux_factor", flux_factor, batch_size=batch_size, dtype=dtype, device=device
+    )
+    delta = tau_t * (1.0 - omega_t * scaling_t)
+    zero_level = torch.zeros((batch_size, 1), dtype=dtype, device=device)
+    cumulative = torch.cat((zero_level, torch.cumsum(delta, dim=1)), dim=1)
+    attenuation = _exp_cutoff_torch(cumulative / float(mu0))
+    previous_attenuation = attenuation[:, :-1]
+    current_attenuation = attenuation[:, 1:]
+    solutions = phase_terms * previous_attenuation
+
+    if abs(float(user_stream)) <= 1.0e-12:
+        lostrans = torch.zeros_like(delta)
+        sources = solutions
+    else:
+        lostrans = _exp_cutoff_torch(delta / float(user_stream))
+        factor1 = torch.where(
+            previous_attenuation != 0.0,
+            current_attenuation / previous_attenuation,
+            torch.zeros_like(current_attenuation),
+        )
+        sources = solutions * (1.0 - factor1 * lostrans) / (float(user_stream) / float(mu0) + 1.0)
+
+    cumsource_up = torch.zeros(batch_size, dtype=dtype, device=device)
+    cumsource_db = 4.0 * float(mu0) * surface * attenuation[:, -1]
+    scale = 0.25 * flux / math.pi
+
+    if return_profile:
+        profile_up = torch.zeros((batch_size, nlayers + 1), dtype=dtype, device=device)
+        profile_db = torch.empty((batch_size, nlayers + 1), dtype=dtype, device=device)
+        profile_db[:, nlayers] = cumsource_db
+        for n in range(nlayers - 1, -1, -1):
+            cumsource_db = lostrans[:, n] * cumsource_db
+            cumsource_up = lostrans[:, n] * cumsource_up + sources[:, n]
+            profile_up[:, n] = cumsource_up
+            profile_db[:, n] = cumsource_db
+        single_scatter_profile = scale.unsqueeze(1) * profile_up
+        direct_beam_profile = scale.unsqueeze(1) * profile_db
+        total_profile = single_scatter_profile + direct_beam_profile
+        if return_components:
+            return FoSolarObsBatchTorchResult(
+                total=total_profile[:, 0],
+                single_scatter=single_scatter_profile[:, 0],
+                direct_beam=direct_beam_profile[:, 0],
+                total_profile=total_profile,
+                single_scatter_profile=single_scatter_profile,
+                direct_beam_profile=direct_beam_profile,
+            )
+        return total_profile
+
+    for n in range(nlayers - 1, -1, -1):
+        cumsource_db = lostrans[:, n] * cumsource_db
+        cumsource_up = lostrans[:, n] * cumsource_up + sources[:, n]
+    single_scatter = scale * cumsource_up
+    direct_beam = scale * cumsource_db
+    if return_components:
+        return FoSolarObsBatchTorchResult(
+            total=single_scatter + direct_beam,
+            single_scatter=single_scatter,
+            direct_beam=direct_beam,
+        )
+    return single_scatter + direct_beam
+
+
+def solar_fo_flux_correction_torch(
+    *,
+    tau,
+    omega,
+    scaling,
+    surface_reflectance,
+    flux_factor,
+    stream_value: float,
+    mu0: float,
+    dtype=None,
+    device=None,
+    do_optical_deltam_scaling: bool = True,
+):
+    """Direct-surface solar FO flux source replacement for a spectral batch."""
+    if torch is None:  # pragma: no cover
+        raise RuntimeError("PyTorch is not installed")
+    dtype, device = _infer_context(
+        (tau, omega, scaling, surface_reflectance, flux_factor), dtype=dtype, device=device
+    )
+    tau_t = _as_tensor(tau, dtype=dtype, device=device)
+    omega_t = _as_tensor(omega, dtype=dtype, device=device)
+    scaling_t = _as_tensor(scaling, dtype=dtype, device=device)
+    if tau_t.ndim != 2:
+        raise ValueError("tau must have shape (n_spectral, n_layers)")
+    if omega_t.shape != tau_t.shape:
+        raise ValueError("omega must have the same shape as tau")
+    if scaling_t.shape != tau_t.shape:
+        raise ValueError("scaling must have the same shape as tau")
+
+    batch_size, _ = tau_t.shape
+    surface = _broadcast_rows(
+        "surface_reflectance",
+        surface_reflectance,
+        batch_size=batch_size,
+        dtype=dtype,
+        device=device,
+    )
+    flux = _broadcast_rows(
+        "flux_factor", flux_factor, batch_size=batch_size, dtype=dtype, device=device
+    )
+    embedded_delta = tau_t * (1.0 - omega_t * scaling_t)
+    exact_delta = embedded_delta if do_optical_deltam_scaling else tau_t
+    zero_level = torch.zeros((batch_size, 1), dtype=dtype, device=device)
+    embedded_levels = torch.cat((zero_level, torch.cumsum(embedded_delta, dim=1)), dim=1)
+    exact_levels = torch.cat((zero_level, torch.cumsum(exact_delta, dim=1)), dim=1)
+    embedded_total = embedded_levels[:, -1]
+    exact_total = exact_levels[:, -1]
+    embedded_distance = embedded_total.unsqueeze(1) - embedded_levels
+    exact_distance = exact_total.unsqueeze(1) - exact_levels
+
+    exact_surface_flux = flux * float(mu0) * surface * _exp_cutoff_torch(exact_total / float(mu0))
+    embedded_surface_flux = (
+        flux * float(mu0) * surface * _exp_cutoff_torch(embedded_total / float(mu0))
+    )
+    exact_up = 2.0 * exact_surface_flux.unsqueeze(1) * _expn3_positive_torch(exact_distance)
+    exact_mean = (
+        0.5 * exact_surface_flux.unsqueeze(1) * _expn2_positive_torch(exact_distance) / math.pi
+    )
+    embedded_trans = _exp_cutoff_torch(embedded_distance / float(stream_value))
+    embedded_up = 2.0 * float(stream_value) * embedded_surface_flux.unsqueeze(1) * embedded_trans
+    embedded_mean = embedded_surface_flux.unsqueeze(1) * embedded_trans / (2.0 * math.pi)
+    flux_up = exact_up - embedded_up
+    flux_down = torch.zeros_like(flux_up)
+    return {
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up - flux_down,
+        "flux_mean": exact_mean - embedded_mean,
+    }
+
+
 def solve_fo_solar_obs_eps_batch_torch(
     *,
     tau,

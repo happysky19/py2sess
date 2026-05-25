@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from importlib.util import find_spec
 
 import numpy as np
+from scipy.special import expn
 
 from examples._full_spectrum_benchmark_common import public_bvp_solver
 from py2sess import (
@@ -11,7 +13,88 @@ from py2sess import (
     TwoStreamEssBatchResult,
     fo_scatter_term_henyey_greenstein,
 )
+from py2sess.optical.phase import build_solar_fo_scatter_term
 from py2sess.rtsolver.backend import has_torch, to_numpy
+
+
+def _direct_surface_reflection_reference(
+    tau: np.ndarray,
+    *,
+    sza: float,
+    fbeam: float,
+    albedo: float,
+) -> dict[str, np.ndarray]:
+    mu0 = np.cos(np.deg2rad(sza))
+    levels = np.concatenate(([0.0], np.cumsum(tau)))
+    distance_to_surface = levels[-1] - levels
+    reflected_flux_boa = fbeam * mu0 * albedo * np.exp(-levels[-1] / mu0)
+    flux_up = 2.0 * reflected_flux_boa * expn(3, distance_to_surface)
+    flux_down = np.zeros_like(flux_up)
+    flux_mean = 0.5 * reflected_flux_boa / np.pi * expn(2, distance_to_surface)
+    return {
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up,
+        "flux_mean": flux_mean,
+    }
+
+
+def _solar_clear_surface_reference(
+    tau: np.ndarray,
+    *,
+    sza: float,
+    fbeam: float,
+    albedo: float,
+) -> dict[str, np.ndarray]:
+    mu0 = np.cos(np.deg2rad(sza))
+    levels = np.concatenate(([0.0], np.cumsum(tau)))
+    direct_down = fbeam * mu0 * np.exp(-levels / mu0)
+    direct_mean = fbeam * np.exp(-levels / mu0) / (4.0 * np.pi)
+    reflected = _direct_surface_reflection_reference(
+        tau,
+        sza=sza,
+        fbeam=fbeam,
+        albedo=albedo,
+    )
+    return {
+        "flux_up": reflected["flux_up"],
+        "flux_down": direct_down,
+        "flux_net": reflected["flux_up"] - direct_down,
+        "flux_mean": direct_mean + reflected["flux_mean"],
+    }
+
+
+def _thermal_surface_emission_reference(
+    tau: np.ndarray,
+    *,
+    surface_radiance: float,
+) -> dict[str, np.ndarray]:
+    levels = np.concatenate(([0.0], np.cumsum(tau)))
+    distance_to_surface = levels[-1] - levels
+    flux_up = 2.0 * np.pi * surface_radiance * expn(3, distance_to_surface)
+    flux_down = np.zeros_like(flux_up)
+    flux_mean = 0.5 * surface_radiance * expn(2, distance_to_surface)
+    return {
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up,
+        "flux_mean": flux_mean,
+    }
+
+
+def _rayleigh_scatter_term(ssa: np.ndarray, angles: np.ndarray) -> np.ndarray:
+    aerosol_moments = np.zeros((2, 3, 1), dtype=float)
+    aerosol_moments[:, 0, :] = 1.0
+    return build_solar_fo_scatter_term(
+        ssa=ssa,
+        depol=0.0,
+        rayleigh_fraction=np.ones_like(ssa),
+        aerosol_fraction=np.zeros(ssa.shape + (1,), dtype=float),
+        aerosol_moments=aerosol_moments,
+        aerosol_interp_fraction=0.0,
+        angles=angles,
+        delta_m_truncation_factor=np.zeros_like(ssa),
+    )
 
 
 class ApiTests(unittest.TestCase):
@@ -61,6 +144,7 @@ class ApiTests(unittest.TestCase):
             result.radiance_profile_total,
             result.radiance_profile_2s + result.radiance_profile_fo,
         )
+        self.assertIsNone(result.flux_up)
 
     def test_scalar_forward_accepts_transparent_atmosphere(self) -> None:
         z = np.array([3.0, 2.0, 1.0, 0.0])
@@ -256,6 +340,825 @@ class ApiTests(unittest.TestCase):
                         atol=1.0e-12,
                     )
 
+    def test_scalar_output_fluxes_follow_level_and_net_conventions(self) -> None:
+        sza = 30.0
+        mu0 = np.cos(np.deg2rad(sza))
+        tau = np.array([0.1, 0.2], dtype=float)
+        result = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="solar",
+                plane_parallel=True,
+                delta_scaling=False,
+                downwelling=True,
+                output_levels=True,
+                output_fluxes=True,
+            )
+        ).forward(
+            tau=tau,
+            ssa=np.zeros(2, dtype=float),
+            g=np.zeros(2, dtype=float),
+            z=np.array([2.0, 1.0, 0.0], dtype=float),
+            angles=[sza, 20.0, 0.0],
+            fbeam=np.pi,
+            albedo=0.0,
+            delta_m_truncation_factor=np.zeros(2, dtype=float),
+        )
+
+        cumulative_tau = np.array([0.0, 0.1, 0.3], dtype=float)
+        expected_down = np.pi * mu0 * np.exp(-cumulative_tau / mu0)
+        expected_mean = 0.25 * np.exp(-cumulative_tau / mu0)
+        self.assertEqual(result.radiance_profile.shape, (1, 3))
+        np.testing.assert_allclose(result.radiance_profile, np.zeros((1, 3)), atol=1.0e-16)
+        np.testing.assert_allclose(result.radlevel_dn, np.zeros((1, 3)), atol=1.0e-16)
+        self.assertEqual(result.flux_down.shape, (1, 3))
+        np.testing.assert_allclose(result.flux_down[0], expected_down, rtol=0.0, atol=1.0e-9)
+        np.testing.assert_allclose(result.flux_mean[0], expected_mean, rtol=0.0, atol=1.0e-10)
+        np.testing.assert_allclose(
+            result.flux_net, result.flux_up - result.flux_down, rtol=0.0, atol=0.0
+        )
+
+        disort = result.as_disort_flux()
+        np.testing.assert_allclose(disort["flux_down"], result.flux_down)
+        np.testing.assert_allclose(disort["down"], result.flux_down)
+        np.testing.assert_allclose(disort["flux_net"], result.flux_net)
+        np.testing.assert_allclose(disort["net"], result.flux_net)
+
+    def test_scalar_fisot_absorbing_flux_boundary(self) -> None:
+        tau = np.array([0.1], dtype=float)
+        for stream in (0.5, 1.0 / np.sqrt(3.0)):
+            with self.subTest(stream=stream):
+                result = TwoStreamEss(
+                    TwoStreamEssOptions(
+                        nlyr=1,
+                        mode="solar",
+                        plane_parallel=True,
+                        delta_scaling=False,
+                        downwelling=True,
+                        output_fluxes=True,
+                    )
+                ).forward(
+                    tau=tau,
+                    ssa=np.zeros(1, dtype=float),
+                    g=np.zeros(1, dtype=float),
+                    z=np.array([1.0, 0.0], dtype=float),
+                    angles=[0.0, 20.0, 0.0],
+                    fbeam=0.0,
+                    fisot=1.0 / np.pi,
+                    albedo=0.0,
+                    stream=stream,
+                    delta_m_truncation_factor=np.zeros(1, dtype=float),
+                )
+
+                expected_down = np.array([1.0, np.exp(-tau[0] / stream)], dtype=float)
+                np.testing.assert_allclose(
+                    result.flux_down[0],
+                    expected_down,
+                    rtol=0.0,
+                    atol=1.0e-10,
+                )
+                np.testing.assert_allclose(result.flux_up[0], np.zeros(2), rtol=0.0, atol=1.0e-10)
+                np.testing.assert_allclose(result.flux_net, result.flux_up - result.flux_down)
+
+    @unittest.skipUnless(
+        find_spec("pydisort") is not None and has_torch(),
+        "pydisort or torch is not installed",
+    )
+    def test_absorbing_solar_flux_matches_pydisort_reference(self) -> None:
+        from py2sess.benchmarks import run_pydisort_absorbing_solar_flux
+
+        sza = 30.0
+        tau = np.array([0.1, 0.2], dtype=float)
+        result = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="solar",
+                plane_parallel=True,
+                delta_scaling=False,
+                downwelling=True,
+                output_levels=True,
+                output_fluxes=True,
+            )
+        ).forward(
+            tau=tau,
+            ssa=np.zeros(2, dtype=float),
+            g=np.zeros(2, dtype=float),
+            z=np.array([2.0, 1.0, 0.0], dtype=float),
+            angles=[sza, 20.0, 0.0],
+            fbeam=np.pi,
+            albedo=0.0,
+            delta_m_truncation_factor=np.zeros(2, dtype=float),
+        )
+        reference = run_pydisort_absorbing_solar_flux(
+            tau,
+            mu0=float(np.cos(np.deg2rad(sza))),
+            fbeam=float(np.pi),
+        )
+
+        self.assertEqual(result.radiance_profile.shape, (1, 3))
+        np.testing.assert_allclose(result.radiance_profile, np.zeros((1, 3)), atol=1.0e-16)
+        np.testing.assert_allclose(result.flux_down[0], reference["flux_down"][0, 0], atol=1.0e-12)
+        np.testing.assert_allclose(result.flux_mean[0], reference["flux_mean"][0, 0], atol=1.0e-12)
+        np.testing.assert_allclose(result.flux_up[0], reference["flux_up"][0, 0], atol=1.0e-8)
+        np.testing.assert_allclose(result.flux_net[0], reference["flux_net"][0, 0], atol=1.0e-8)
+
+    def test_solar_include_fo_flux_replaces_direct_surface_quadrature(self) -> None:
+        sza = 30.0
+        tau = np.array([0.2, 0.3], dtype=float)
+        common = dict(
+            tau=tau,
+            ssa=np.zeros(2, dtype=float),
+            g=np.zeros(2, dtype=float),
+            z=np.array([2.0, 1.0, 0.0], dtype=float),
+            angles=[sza, 20.0, 0.0],
+            fbeam=2.0,
+            albedo=0.3,
+            delta_m_truncation_factor=np.zeros(2, dtype=float),
+        )
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="solar",
+                plane_parallel=True,
+                delta_scaling=False,
+                downwelling=True,
+                output_fluxes=True,
+            )
+        )
+        total = solver.forward(**common, include_fo=True)
+        reference = _solar_clear_surface_reference(
+            tau,
+            sza=sza,
+            fbeam=2.0,
+            albedo=0.3,
+        )
+
+        np.testing.assert_allclose(total.flux_up, reference["flux_up"][np.newaxis, :], atol=5.0e-8)
+        np.testing.assert_allclose(
+            total.flux_down, reference["flux_down"][np.newaxis, :], atol=1.0e-12
+        )
+        np.testing.assert_allclose(
+            total.flux_mean, reference["flux_mean"][np.newaxis, :], atol=5.0e-8
+        )
+        np.testing.assert_allclose(total.flux_net, total.flux_up - total.flux_down)
+
+    def test_thermal_include_fo_flux_replaces_source_quadrature(self) -> None:
+        tau = np.array([0.2, 0.3], dtype=float)
+        surface_planck = 1.2
+        emissivity = 0.8
+        common = dict(
+            tau=tau,
+            ssa=np.zeros(2, dtype=float),
+            g=np.zeros(2, dtype=float),
+            z=np.array([2.0, 1.0, 0.0], dtype=float),
+            angles=30.0,
+            planck=np.zeros(3, dtype=float),
+            surface_planck=surface_planck,
+            emissivity=emissivity,
+            albedo=0.0,
+            delta_m_truncation_factor=np.zeros(2, dtype=float),
+        )
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="thermal",
+                plane_parallel=True,
+                downwelling=True,
+                output_fluxes=True,
+                fo_flux_n_mu=48,
+            )
+        )
+        total = solver.forward(**common, include_fo=True)
+        reference = _thermal_surface_emission_reference(
+            tau,
+            surface_radiance=surface_planck * emissivity,
+        )
+
+        np.testing.assert_allclose(total.flux_up, reference["flux_up"][np.newaxis, :], atol=2.0e-10)
+        np.testing.assert_allclose(
+            total.flux_down, reference["flux_down"][np.newaxis, :], atol=1.0e-9
+        )
+        np.testing.assert_allclose(
+            total.flux_mean, reference["flux_mean"][np.newaxis, :], atol=2.0e-10
+        )
+        np.testing.assert_allclose(total.flux_net, total.flux_up - total.flux_down)
+
+    def test_thermal_include_fo_flux_accepts_custom_angular_quadrature(self) -> None:
+        tau = np.array([0.2, 0.3], dtype=float)
+        surface_planck = 1.2
+        emissivity = 0.8
+        common = dict(
+            tau=tau,
+            ssa=np.zeros(2, dtype=float),
+            g=np.zeros(2, dtype=float),
+            z=np.array([2.0, 1.0, 0.0], dtype=float),
+            angles=30.0,
+            planck=np.zeros(3, dtype=float),
+            surface_planck=surface_planck,
+            emissivity=emissivity,
+            albedo=0.0,
+            delta_m_truncation_factor=np.zeros(2, dtype=float),
+        )
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="thermal",
+                plane_parallel=True,
+                downwelling=True,
+                output_fluxes=True,
+                fo_flux_n_mu=64,
+                fo_flux_n_phi=7,
+            )
+        )
+        total = solver.forward(**common, include_fo=True)
+        reference = _thermal_surface_emission_reference(
+            tau,
+            surface_radiance=surface_planck * emissivity,
+        )
+
+        np.testing.assert_allclose(total.flux_up, reference["flux_up"][np.newaxis, :], atol=2.0e-10)
+        np.testing.assert_allclose(
+            total.flux_mean, reference["flux_mean"][np.newaxis, :], atol=2.0e-10
+        )
+        np.testing.assert_allclose(total.flux_net, total.flux_up - total.flux_down)
+
+    def test_thermal_include_fo_flux_is_stable_for_tiny_optical_depths(self) -> None:
+        kwargs = dict(
+            tau=np.full(4, 1.0e-14, dtype=float),
+            ssa=np.array([0.45, 0.55, 0.60, 0.50], dtype=float),
+            g=np.zeros(4, dtype=float),
+            z=np.array([4.0, 3.0, 2.0, 1.0, 0.0], dtype=float),
+            angles=30.0,
+            stream=1.0 / np.sqrt(3.0),
+            planck=np.array([0.09, 0.07, 0.06, 0.055, 0.052], dtype=float),
+            surface_planck=0.08,
+            emissivity=0.9,
+            albedo=0.0,
+            delta_m_truncation_factor=np.zeros(4, dtype=float),
+        )
+        no_flux = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=4,
+                mode="thermal",
+                plane_parallel=True,
+            )
+        ).forward(**kwargs, include_fo=True)
+        with_flux = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=4,
+                mode="thermal",
+                plane_parallel=True,
+                output_fluxes=True,
+                fo_flux_n_mu=8,
+            )
+        ).forward(**kwargs, include_fo=True)
+
+        np.testing.assert_allclose(with_flux.radiance, no_flux.radiance, rtol=0.0, atol=0.0)
+        self.assertGreaterEqual(float(np.min(with_flux.flux_down)), -1.0e-14)
+        self.assertGreaterEqual(float(np.min(with_flux.flux_up)), -1.0e-14)
+        self.assertGreaterEqual(float(np.min(with_flux.flux_mean)), -1.0e-14)
+        np.testing.assert_allclose(with_flux.flux_down[..., 0], 0.0, rtol=0.0, atol=1.0e-14)
+        np.testing.assert_allclose(with_flux.flux_net, with_flux.flux_up - with_flux.flux_down)
+
+        if has_torch():
+            import torch
+
+            torch_kwargs = dict(kwargs)
+            for key in ("tau", "ssa", "g", "planck", "delta_m_truncation_factor"):
+                torch_kwargs[key] = torch.as_tensor(
+                    kwargs[key][np.newaxis, ...], dtype=torch.float64
+                )
+            for key in ("surface_planck", "emissivity", "albedo"):
+                torch_kwargs[key] = torch.as_tensor([kwargs[key]], dtype=torch.float64)
+            torch_result = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=4,
+                    mode="thermal",
+                    backend="torch",
+                    torch_dtype="float64",
+                    plane_parallel=True,
+                    output_fluxes=True,
+                    fo_flux_n_mu=8,
+                )
+            ).forward(**torch_kwargs, include_fo=True)
+            np.testing.assert_allclose(
+                to_numpy(torch_result.flux_down),
+                with_flux.flux_down,
+                rtol=1.0e-12,
+                atol=1.0e-14,
+            )
+
+    def test_solar_include_fo_flux_keeps_disort_style_scattering_flux(self) -> None:
+        sza = 30.0
+        tau = np.array([0.12, 0.18], dtype=float)
+        ssa = np.array([0.05, 0.08], dtype=float)
+        common = dict(
+            tau=tau,
+            ssa=ssa,
+            g=np.zeros(2, dtype=float),
+            z=np.array([2.0, 1.0, 0.0], dtype=float),
+            angles=[sza, 20.0, 0.0],
+            fbeam=1.7,
+            albedo=0.0,
+            delta_m_truncation_factor=np.zeros(2, dtype=float),
+        )
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="solar",
+                plane_parallel=True,
+                delta_scaling=False,
+                downwelling=True,
+                output_fluxes=True,
+            )
+        )
+        total = solver.forward(**common, include_fo=True, fo_n_moments=1)
+        base = solver.forward(**common)
+
+        np.testing.assert_allclose(total.flux_up, base.flux_up, atol=1.0e-14)
+        np.testing.assert_allclose(total.flux_down, base.flux_down, atol=1.0e-14)
+        np.testing.assert_allclose(total.flux_mean, base.flux_mean, atol=1.0e-14)
+        np.testing.assert_allclose(total.flux_net, total.flux_up - total.flux_down)
+
+    def test_solar_include_fo_flux_accepts_rayleigh_scatter_term(
+        self,
+    ) -> None:
+        sza = 30.0
+        tau = np.array([0.12, 0.18], dtype=float)
+        ssa = np.array([0.05, 0.08], dtype=float)
+        angles = np.array([[sza, 20.0, 0.0], [sza, 50.0, 120.0]], dtype=float)
+        common = dict(
+            tau=tau,
+            ssa=ssa,
+            g=np.zeros(2, dtype=float),
+            z=np.array([2.0, 1.0, 0.0], dtype=float),
+            angles=angles,
+            fbeam=1.7,
+            albedo=0.0,
+            delta_m_truncation_factor=np.zeros(2, dtype=float),
+        )
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="solar",
+                plane_parallel=True,
+                delta_scaling=False,
+                downwelling=True,
+                output_fluxes=True,
+            )
+        )
+        total = solver.forward(
+            **common,
+            include_fo=True,
+            fo_scatter_term=_rayleigh_scatter_term(ssa, angles),
+        )
+        base = solver.forward(**common)
+
+        np.testing.assert_allclose(total.flux_up, base.flux_up, atol=1.0e-14)
+        np.testing.assert_allclose(total.flux_down, base.flux_down, atol=1.0e-14)
+        np.testing.assert_allclose(total.flux_mean, base.flux_mean, atol=1.0e-14)
+        self.assertTrue(np.all(np.isfinite(total.flux_up)))
+        self.assertTrue(np.all(np.isfinite(total.flux_down)))
+        self.assertTrue(np.all(np.isfinite(total.flux_mean)))
+        np.testing.assert_allclose(total.flux_net, total.flux_up - total.flux_down)
+
+    @unittest.skipUnless(
+        find_spec("pydisort") is not None and has_torch(),
+        "pydisort or torch is not installed",
+    )
+    def test_solar_surface_flux_total_matches_pydisort_flux_up(self) -> None:
+        from py2sess.benchmarks import run_pydisort_absorbing_solar_flux
+
+        sza = 30.0
+        tau = np.array([0.2, 0.3], dtype=float)
+        common = dict(
+            tau=tau,
+            ssa=np.zeros(2, dtype=float),
+            g=np.zeros(2, dtype=float),
+            z=np.array([2.0, 1.0, 0.0], dtype=float),
+            angles=[sza, 20.0, 0.0],
+            fbeam=2.0,
+            albedo=0.3,
+            delta_m_truncation_factor=np.zeros(2, dtype=float),
+        )
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="solar",
+                plane_parallel=True,
+                delta_scaling=False,
+                downwelling=True,
+                output_fluxes=True,
+            )
+        )
+        total = solver.forward(**common, include_fo=True)
+        reference = run_pydisort_absorbing_solar_flux(
+            tau,
+            mu0=float(np.cos(np.deg2rad(sza))),
+            fbeam=2.0,
+            albedo=0.3,
+            nstr=32,
+            nmom=32,
+        )
+
+        np.testing.assert_allclose(
+            total.flux_up,
+            reference["flux_up"][0, 0][np.newaxis, :],
+            rtol=0.0,
+            atol=5.0e-5,
+        )
+
+    def test_batched_torch_output_fluxes_match_scalar_numpy(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        solar_kwargs = dict(
+            tau=torch.tensor(
+                [[0.01, 0.02, 0.03], [0.015, 0.025, 0.035]],
+                dtype=torch.float64,
+            ),
+            ssa=torch.full((2, 3), 0.2, dtype=torch.float64),
+            g=torch.full((2, 3), 0.1, dtype=torch.float64),
+            z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+            angles=[30.0, 20.0, 0.0],
+            fbeam=torch.tensor([1.0, 0.8], dtype=torch.float64),
+            albedo=torch.tensor([0.1, 0.2], dtype=torch.float64),
+            delta_m_truncation_factor=torch.zeros((2, 3), dtype=torch.float64),
+        )
+        solar = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="torch",
+                torch_dtype="float64",
+                output_fluxes=True,
+            )
+        ).forward(**solar_kwargs)
+        for row in range(2):
+            scalar = TwoStreamEss(
+                TwoStreamEssOptions(nlyr=3, mode="solar", output_fluxes=True)
+            ).forward(
+                tau=to_numpy(solar_kwargs["tau"])[row],
+                ssa=to_numpy(solar_kwargs["ssa"])[row],
+                g=to_numpy(solar_kwargs["g"])[row],
+                z=solar_kwargs["z"],
+                angles=solar_kwargs["angles"],
+                fbeam=float(to_numpy(solar_kwargs["fbeam"])[row]),
+                albedo=float(to_numpy(solar_kwargs["albedo"])[row]),
+                delta_m_truncation_factor=to_numpy(solar_kwargs["delta_m_truncation_factor"])[row],
+            )
+            for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+                np.testing.assert_allclose(
+                    to_numpy(getattr(solar, field))[row],
+                    getattr(scalar, field)[0],
+                    rtol=1.0e-11,
+                    atol=1.0e-12,
+                )
+
+        thermal_kwargs = dict(
+            tau=torch.tensor(
+                [[0.0, 0.3, 0.4], [0.15, 0.25, 0.35]],
+                dtype=torch.float64,
+            ),
+            ssa=torch.full((2, 3), 0.1, dtype=torch.float64),
+            g=torch.full((2, 3), 0.2, dtype=torch.float64),
+            z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+            angles=30.0,
+            stream=0.5,
+            planck=torch.tensor(
+                [[1.0, 1.1, 1.2, 1.3], [0.8, 0.9, 1.0, 1.1]],
+                dtype=torch.float64,
+            ),
+            surface_planck=torch.tensor([1.4, 1.2], dtype=torch.float64),
+            emissivity=torch.tensor([0.9, 0.85], dtype=torch.float64),
+            albedo=torch.tensor([0.05, 0.08], dtype=torch.float64),
+            delta_m_truncation_factor=torch.zeros((2, 3), dtype=torch.float64),
+        )
+        thermal = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="thermal",
+                backend="torch",
+                torch_dtype="float64",
+                output_fluxes=True,
+            )
+        ).forward(**thermal_kwargs)
+        for row in range(2):
+            scalar = TwoStreamEss(
+                TwoStreamEssOptions(nlyr=3, mode="thermal", output_fluxes=True)
+            ).forward(
+                tau=to_numpy(thermal_kwargs["tau"])[row],
+                ssa=to_numpy(thermal_kwargs["ssa"])[row],
+                g=to_numpy(thermal_kwargs["g"])[row],
+                z=thermal_kwargs["z"],
+                angles=thermal_kwargs["angles"],
+                stream=thermal_kwargs["stream"],
+                planck=to_numpy(thermal_kwargs["planck"])[row],
+                surface_planck=float(to_numpy(thermal_kwargs["surface_planck"])[row]),
+                emissivity=float(to_numpy(thermal_kwargs["emissivity"])[row]),
+                albedo=float(to_numpy(thermal_kwargs["albedo"])[row]),
+                delta_m_truncation_factor=to_numpy(thermal_kwargs["delta_m_truncation_factor"])[
+                    row
+                ],
+            )
+            for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+                np.testing.assert_allclose(
+                    to_numpy(getattr(thermal, field))[row],
+                    getattr(scalar, field)[0],
+                    rtol=1.0e-11,
+                    atol=1.0e-12,
+                )
+
+    def test_batched_torch_transparent_flux_accepts_scalar_surface_terms(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        from py2sess.rtsolver.thermal_batch_torch import _two_stream_thermal_toa_batch
+
+        result = _two_stream_thermal_toa_batch(
+            tau=torch.zeros((2, 3), dtype=torch.float64),
+            omega=torch.zeros((2, 3), dtype=torch.float64),
+            asymm=torch.zeros((2, 3), dtype=torch.float64),
+            scaling=torch.zeros((2, 3), dtype=torch.float64),
+            thermal_bb_input=torch.ones((2, 4), dtype=torch.float64),
+            surfbb=torch.tensor(1.4, dtype=torch.float64),
+            emissivity=torch.tensor(0.9, dtype=torch.float64),
+            albedo=torch.tensor(0.1, dtype=torch.float64),
+            stream_value=0.5,
+            user_stream=1.0,
+            pxsq=0.25,
+            thermal_tcutoff=1.0e-8,
+            return_fluxes=True,
+            do_upwelling=True,
+            do_dnwelling=True,
+        )
+
+        expected_up = 2.0 * np.pi * 0.5 * 1.4 * 0.9
+        expected_mean = 0.5 * 1.4 * 0.9
+        self.assertEqual(result["flux_up"].shape, (2, 4))
+        np.testing.assert_allclose(to_numpy(result["flux_up"]), expected_up)
+        np.testing.assert_allclose(to_numpy(result["flux_down"]), 0.0)
+        np.testing.assert_allclose(to_numpy(result["flux_mean"]), expected_mean)
+
+    def test_batched_numpy_output_fluxes_match_scalar_numpy(self) -> None:
+        solar_kwargs = dict(
+            tau=np.array([[0.01, 0.02, 0.03], [0.015, 0.025, 0.035]], dtype=float),
+            ssa=np.full((2, 3), 0.2, dtype=float),
+            g=np.full((2, 3), 0.1, dtype=float),
+            z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+            angles=[30.0, 20.0, 0.0],
+            fbeam=np.array([1.0, 0.8], dtype=float),
+            albedo=np.array([0.1, 0.2], dtype=float),
+            delta_m_truncation_factor=np.zeros((2, 3), dtype=float),
+        )
+        solar = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar", output_fluxes=True)).forward(
+            **solar_kwargs
+        )
+        for row in range(2):
+            scalar = TwoStreamEss(
+                TwoStreamEssOptions(nlyr=3, mode="solar", output_fluxes=True)
+            ).forward(
+                tau=solar_kwargs["tau"][row],
+                ssa=solar_kwargs["ssa"][row],
+                g=solar_kwargs["g"][row],
+                z=solar_kwargs["z"],
+                angles=solar_kwargs["angles"],
+                fbeam=solar_kwargs["fbeam"][row],
+                albedo=solar_kwargs["albedo"][row],
+                delta_m_truncation_factor=solar_kwargs["delta_m_truncation_factor"][row],
+            )
+            for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+                np.testing.assert_allclose(
+                    getattr(solar, field)[row],
+                    getattr(scalar, field)[0],
+                    rtol=1.0e-11,
+                    atol=1.0e-12,
+                )
+
+        thermal_kwargs = dict(
+            tau=np.array([[0.0, 0.3, 0.4], [0.15, 0.25, 0.35]], dtype=float),
+            ssa=np.full((2, 3), 0.1, dtype=float),
+            g=np.full((2, 3), 0.2, dtype=float),
+            z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+            angles=30.0,
+            stream=0.5,
+            planck=np.array([[1.0, 1.0, 1.2, 1.3], [0.8, 0.9, 1.0, 1.1]], dtype=float),
+            surface_planck=np.array([1.4, 1.2], dtype=float),
+            emissivity=np.array([0.9, 0.85], dtype=float),
+            albedo=np.array([0.05, 0.08], dtype=float),
+            delta_m_truncation_factor=np.zeros((2, 3), dtype=float),
+        )
+        thermal = TwoStreamEss(
+            TwoStreamEssOptions(nlyr=3, mode="thermal", output_fluxes=True)
+        ).forward(**thermal_kwargs)
+        for row in range(2):
+            scalar = TwoStreamEss(
+                TwoStreamEssOptions(nlyr=3, mode="thermal", output_fluxes=True)
+            ).forward(
+                tau=thermal_kwargs["tau"][row],
+                ssa=thermal_kwargs["ssa"][row],
+                g=thermal_kwargs["g"][row],
+                z=thermal_kwargs["z"],
+                angles=thermal_kwargs["angles"],
+                stream=thermal_kwargs["stream"],
+                planck=thermal_kwargs["planck"][row],
+                surface_planck=thermal_kwargs["surface_planck"][row],
+                emissivity=thermal_kwargs["emissivity"][row],
+                albedo=thermal_kwargs["albedo"][row],
+                delta_m_truncation_factor=thermal_kwargs["delta_m_truncation_factor"][row],
+            )
+            for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+                np.testing.assert_allclose(
+                    getattr(thermal, field)[row],
+                    getattr(scalar, field)[0],
+                    rtol=1.0e-11,
+                    atol=1.0e-12,
+                )
+
+    def test_batched_thermal_include_fo_fluxes_match_scalar_numpy(self) -> None:
+        kwargs = dict(
+            tau=np.array([[0.02, 0.3, 0.4], [0.15, 0.25, 0.35]], dtype=float),
+            ssa=np.full((2, 3), 0.1, dtype=float),
+            g=np.full((2, 3), 0.2, dtype=float),
+            z=np.array([3.0, 2.0, 1.0, 0.0], dtype=float),
+            angles=30.0,
+            stream=0.5,
+            planck=np.array([[1.0, 1.1, 1.2, 1.3], [0.8, 0.9, 1.0, 1.1]], dtype=float),
+            surface_planck=np.array([1.4, 1.2], dtype=float),
+            emissivity=np.array([0.9, 0.85], dtype=float),
+            albedo=np.array([0.05, 0.08], dtype=float),
+            delta_m_truncation_factor=np.zeros((2, 3), dtype=float),
+        )
+        numpy_result = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="thermal",
+                plane_parallel=True,
+                output_fluxes=True,
+            )
+        ).forward(**kwargs, include_fo=True)
+        torch_result = None
+        if has_torch():
+            import torch
+
+            torch_kwargs = {
+                key: torch.as_tensor(value, dtype=torch.float64)
+                if isinstance(value, np.ndarray) and key != "z"
+                else value
+                for key, value in kwargs.items()
+            }
+            torch_result = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=3,
+                    mode="thermal",
+                    backend="torch",
+                    torch_dtype="float64",
+                    plane_parallel=True,
+                    output_fluxes=True,
+                )
+            ).forward(**torch_kwargs, include_fo=True)
+
+        for row in range(2):
+            scalar = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=3,
+                    mode="thermal",
+                    plane_parallel=True,
+                    output_fluxes=True,
+                )
+            ).forward(
+                tau=kwargs["tau"][row],
+                ssa=kwargs["ssa"][row],
+                g=kwargs["g"][row],
+                z=kwargs["z"],
+                angles=kwargs["angles"],
+                stream=kwargs["stream"],
+                planck=kwargs["planck"][row],
+                surface_planck=kwargs["surface_planck"][row],
+                emissivity=kwargs["emissivity"][row],
+                albedo=kwargs["albedo"][row],
+                delta_m_truncation_factor=kwargs["delta_m_truncation_factor"][row],
+                include_fo=True,
+            )
+            for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+                np.testing.assert_allclose(
+                    getattr(numpy_result, field)[row],
+                    getattr(scalar, field)[0],
+                    rtol=1.0e-11,
+                    atol=1.0e-12,
+                )
+                if torch_result is not None:
+                    np.testing.assert_allclose(
+                        to_numpy(getattr(torch_result, field))[row],
+                        getattr(scalar, field)[0],
+                        rtol=1.0e-11,
+                        atol=1.0e-12,
+                    )
+
+    def test_batched_solar_include_fo_fluxes_match_scalar_numpy(self) -> None:
+        kwargs = dict(
+            tau=np.array([[0.02, 0.03], [0.015, 0.025]], dtype=float),
+            ssa=np.array([[0.12, 0.10], [0.08, 0.12]], dtype=float),
+            g=np.array([[0.1, 0.2], [0.05, 0.1]], dtype=float),
+            z=np.array([2.0, 1.0, 0.0], dtype=float),
+            angles=[30.0, 20.0, 0.0],
+            stream=0.5,
+            albedo=np.array([0.15, 0.25], dtype=float),
+            fbeam=np.array([1.0, 0.8], dtype=float),
+            delta_m_truncation_factor=np.zeros((2, 2), dtype=float),
+        )
+        numpy_result = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="solar",
+                plane_parallel=True,
+                output_levels=True,
+                output_fluxes=True,
+            )
+        ).forward(**kwargs, include_fo=True, fo_n_moments=3)
+        torch_result = None
+        if has_torch():
+            import torch
+
+            torch_kwargs = {
+                key: torch.as_tensor(value, dtype=torch.float64)
+                if isinstance(value, np.ndarray) and key != "z"
+                else value
+                for key, value in kwargs.items()
+            }
+            torch_result = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=2,
+                    mode="solar",
+                    backend="torch",
+                    torch_dtype="float64",
+                    plane_parallel=True,
+                    output_levels=True,
+                    output_fluxes=True,
+                )
+            ).forward(**torch_kwargs, include_fo=True, fo_n_moments=3)
+
+        for row in range(2):
+            scalar = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=2,
+                    mode="solar",
+                    plane_parallel=True,
+                    output_levels=True,
+                    output_fluxes=True,
+                )
+            ).forward(
+                tau=kwargs["tau"][row],
+                ssa=kwargs["ssa"][row],
+                g=kwargs["g"][row],
+                z=kwargs["z"],
+                angles=kwargs["angles"],
+                stream=kwargs["stream"],
+                albedo=kwargs["albedo"][row],
+                fbeam=kwargs["fbeam"][row],
+                delta_m_truncation_factor=kwargs["delta_m_truncation_factor"][row],
+                include_fo=True,
+                fo_n_moments=3,
+            )
+            for field in (
+                "radiance_profile_total",
+                "radiance_total",
+                "flux_up",
+                "flux_down",
+                "flux_net",
+                "flux_mean",
+            ):
+                np.testing.assert_allclose(
+                    getattr(numpy_result, field)[row],
+                    getattr(scalar, field)[0],
+                    rtol=1.0e-11,
+                    atol=1.0e-12,
+                )
+                if torch_result is not None:
+                    np.testing.assert_allclose(
+                        to_numpy(getattr(torch_result, field))[row],
+                        getattr(scalar, field)[0],
+                        rtol=1.0e-9,
+                        atol=1.0e-11,
+                    )
+
+    def test_batched_solar_include_fo_fluxes_require_plane_parallel(self) -> None:
+        solver = TwoStreamEss(TwoStreamEssOptions(nlyr=2, mode="solar", output_fluxes=True))
+        with self.assertRaisesRegex(NotImplementedError, "requires plane_parallel=True"):
+            solver.forward(
+                tau=np.zeros((2, 2), dtype=float),
+                ssa=np.zeros((2, 2), dtype=float),
+                g=np.zeros((2, 2), dtype=float),
+                z=np.array([2.0, 1.0, 0.0], dtype=float),
+                angles=[30.0, 20.0, 0.0],
+                fbeam=1.0,
+                albedo=0.0,
+                delta_m_truncation_factor=np.zeros((2, 2), dtype=float),
+                include_fo=True,
+            )
+
     def test_fo_scatter_term_helper_matches_scalar_fo_phase_logic(self) -> None:
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar", output_levels=True))
         tau = np.array([0.01, 0.02, 0.03])
@@ -411,8 +1314,13 @@ class ApiTests(unittest.TestCase):
             )
 
     def test_invalid_public_numeric_controls_fail_early(self) -> None:
+        self.assertEqual(TwoStreamEssOptions(nlyr=3).fo_flux_n_mu, 8)
         with self.assertRaisesRegex(ValueError, "thermal_tcutoff"):
             TwoStreamEssOptions(nlyr=3, mode="thermal", thermal_tcutoff=0.0)
+        with self.assertRaisesRegex(ValueError, "fo_flux_n_mu"):
+            TwoStreamEssOptions(nlyr=3, fo_flux_n_mu=0)
+        with self.assertRaisesRegex(ValueError, "fo_flux_n_phi"):
+            TwoStreamEssOptions(nlyr=3, fo_flux_n_phi=0)
 
         solver = TwoStreamEss(TwoStreamEssOptions(nlyr=3, mode="solar"))
         kwargs = dict(

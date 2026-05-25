@@ -67,6 +67,53 @@ result = solver.forward(
 print(result.radiance.shape)  # (100,)
 ```
 
+Level fluxes use the final axis for TOA-to-BOA levels. This clear absorbing
+solar case has an analytic Beer-Lambert flux solution:
+
+```python
+import numpy as np
+from py2sess import TwoStreamEss, TwoStreamEssOptions
+
+sza = 30.0
+mu0 = np.cos(np.deg2rad(sza))
+fbeam = 1.0
+tau = np.array([0.1, 0.2])
+z = np.array([2.0, 1.0, 0.0])
+
+solver = TwoStreamEss(
+    TwoStreamEssOptions(
+        nlyr=tau.size,
+        mode="solar",
+        plane_parallel=True,
+        delta_scaling=False,
+        downwelling=True,
+        output_levels=True,
+        output_fluxes=True,
+        fo_flux_n_mu=8,
+    )
+)
+result = solver.forward(
+    tau=tau,
+    ssa=np.zeros_like(tau),  # pure absorption
+    g=np.zeros_like(tau),
+    z=z,
+    angles=[sza, 0.0, 0.0],
+    fbeam=fbeam,
+    albedo=0.0,  # black surface: no upward reflected flux
+    delta_m_truncation_factor=np.zeros_like(tau),
+    include_fo=True,
+)
+
+level_tau = np.concatenate(([0.0], np.cumsum(tau)))
+analytic_down = fbeam * mu0 * np.exp(-level_tau / mu0)
+
+np.testing.assert_allclose(result.flux_down[0], analytic_down, atol=1.0e-9)
+np.testing.assert_allclose(result.flux_up[0], 0.0, atol=1.0e-8)
+np.testing.assert_allclose(result.flux_net, result.flux_up - result.flux_down)
+
+print(result.flux_down[0])
+```
+
 Torch CPU float64:
 
 ```python
@@ -84,10 +131,13 @@ bottom.
 
 See [`docs/api_arguments.md`](docs/api_arguments.md) for the full argument
 table and conventions.
+Level-flux conventions are summarized in
+[`docs/level_fluxes.md`](docs/level_fluxes.md).
 
 ## Examples
 
 ```bash
+python3 examples/level_flux_beer_lambert.py
 python3 examples/build_thermal_source_from_temperature.py
 python3 examples/retrieve_synthetic_spectra.py --case uv --noise-level 0
 ```
@@ -103,7 +153,6 @@ result = scene.forward(backend="numpy", include_fo=True)
 
 Full-spectrum benchmark details are in
 [`docs/full_spectrum_benchmarks.md`](docs/full_spectrum_benchmarks.md).
-Retrieval notes are in [`docs/retrieval.md`](docs/retrieval.md).
 
 ## Tests
 

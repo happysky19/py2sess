@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import numpy as np
+from scipy.special import expn
 
 from .fo_solar_obs import _fo_eps_geometry
 
@@ -84,6 +85,16 @@ def _direct_surface_reflectance_array(values: np.ndarray, batch_size: int) -> np
     arr = arr.reshape(batch_size)
     if not np.all(np.isfinite(arr)):
         raise ValueError("direct_surface_reflectance must contain only finite values")
+    return arr
+
+
+def _row_array(name: str, values: np.ndarray, batch_size: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    if arr.size != batch_size:
+        raise ValueError(f"{name} must have one finite value per spectral batch row")
+    arr = arr.reshape(batch_size)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must contain only finite values")
     return arr
 
 
@@ -249,6 +260,157 @@ def fo_solar_obs_batch_precompute(
         float(earth_radius),
         int(nfine),
     )
+
+
+def solve_fo_solar_obs_plane_parallel_batch_numpy(
+    *,
+    tau: np.ndarray,
+    omega: np.ndarray,
+    scaling: np.ndarray,
+    surface_reflectance: np.ndarray,
+    flux_factor: np.ndarray,
+    exact_scatter: np.ndarray,
+    mu0: float,
+    user_stream: float,
+    return_profile: bool = False,
+    return_components: bool = False,
+) -> np.ndarray | FoSolarObsBatchResult:
+    """Evaluates plane-parallel solar FO radiance for a spectral batch."""
+    tau_arr = np.asarray(tau, dtype=float)
+    omega_arr = np.asarray(omega, dtype=float)
+    scaling_arr = np.asarray(scaling, dtype=float)
+    phase_terms = np.asarray(exact_scatter, dtype=float)
+    if tau_arr.ndim != 2:
+        raise ValueError("tau must have shape (n_spectral, n_layers)")
+    if omega_arr.shape != tau_arr.shape:
+        raise ValueError("omega must have the same shape as tau")
+    if scaling_arr.shape != tau_arr.shape:
+        raise ValueError("scaling must have the same shape as tau")
+    if phase_terms.shape != tau_arr.shape:
+        raise ValueError("exact_scatter must have the same shape as tau")
+
+    batch_size, nlayers = tau_arr.shape
+    surface = _row_array("surface_reflectance", surface_reflectance, batch_size)
+    flux = _row_array("flux_factor", flux_factor, batch_size)
+    delta = tau_arr * (1.0 - omega_arr * scaling_arr)
+    cumulative = np.concatenate(
+        (np.zeros((batch_size, 1), dtype=float), np.cumsum(delta, axis=1)),
+        axis=1,
+    )
+    attenuation = _exp_cutoff(cumulative / float(mu0))
+    previous_attenuation = attenuation[:, :-1]
+    current_attenuation = attenuation[:, 1:]
+    solutions = phase_terms * previous_attenuation
+
+    if abs(float(user_stream)) <= 1.0e-12:
+        lostrans = np.zeros_like(delta)
+        sources = solutions
+    else:
+        lostrans = _exp_cutoff(delta / float(user_stream))
+        factor1 = np.divide(
+            current_attenuation,
+            previous_attenuation,
+            out=np.zeros_like(current_attenuation),
+            where=previous_attenuation != 0.0,
+        )
+        sources = solutions * (1.0 - factor1 * lostrans) / (float(user_stream) / float(mu0) + 1.0)
+
+    cumsource_up = np.zeros(batch_size, dtype=float)
+    cumsource_db = 4.0 * float(mu0) * surface * attenuation[:, -1]
+    scale = 0.25 * flux / math.pi
+
+    if return_profile:
+        profile_up = np.zeros((batch_size, nlayers + 1), dtype=float)
+        profile_db = np.empty((batch_size, nlayers + 1), dtype=float)
+        profile_db[:, nlayers] = cumsource_db
+        for n in range(nlayers - 1, -1, -1):
+            cumsource_db = lostrans[:, n] * cumsource_db
+            cumsource_up = lostrans[:, n] * cumsource_up + sources[:, n]
+            profile_up[:, n] = cumsource_up
+            profile_db[:, n] = cumsource_db
+        single_scatter_profile = scale[:, np.newaxis] * profile_up
+        direct_beam_profile = scale[:, np.newaxis] * profile_db
+        total_profile = single_scatter_profile + direct_beam_profile
+        if return_components:
+            return FoSolarObsBatchResult(
+                total=total_profile[:, 0],
+                single_scatter=single_scatter_profile[:, 0],
+                direct_beam=direct_beam_profile[:, 0],
+                total_profile=total_profile,
+                single_scatter_profile=single_scatter_profile,
+                direct_beam_profile=direct_beam_profile,
+            )
+        return total_profile
+
+    for n in range(nlayers - 1, -1, -1):
+        cumsource_db = lostrans[:, n] * cumsource_db
+        cumsource_up = lostrans[:, n] * cumsource_up + sources[:, n]
+    single_scatter = scale * cumsource_up
+    direct_beam = scale * cumsource_db
+    if return_components:
+        return FoSolarObsBatchResult(
+            total=single_scatter + direct_beam,
+            single_scatter=single_scatter,
+            direct_beam=direct_beam,
+        )
+    return single_scatter + direct_beam
+
+
+def solar_fo_flux_correction_numpy(
+    *,
+    tau: np.ndarray,
+    omega: np.ndarray,
+    scaling: np.ndarray,
+    surface_reflectance: np.ndarray,
+    flux_factor: np.ndarray,
+    stream_value: float,
+    mu0: float,
+    do_optical_deltam_scaling: bool = True,
+) -> dict[str, np.ndarray]:
+    """Direct-surface solar FO flux source replacement for a spectral batch."""
+    tau_arr = np.asarray(tau, dtype=float)
+    omega_arr = np.asarray(omega, dtype=float)
+    scaling_arr = np.asarray(scaling, dtype=float)
+    if tau_arr.ndim != 2:
+        raise ValueError("tau must have shape (n_spectral, n_layers)")
+    if omega_arr.shape != tau_arr.shape:
+        raise ValueError("omega must have the same shape as tau")
+    if scaling_arr.shape != tau_arr.shape:
+        raise ValueError("scaling must have the same shape as tau")
+
+    batch_size, nlayers = tau_arr.shape
+    surface = _row_array("surface_reflectance", surface_reflectance, batch_size)
+    flux = _row_array("flux_factor", flux_factor, batch_size)
+    embedded_delta = tau_arr * (1.0 - omega_arr * scaling_arr)
+    exact_delta = embedded_delta if do_optical_deltam_scaling else tau_arr
+    embedded_levels = np.concatenate(
+        (np.zeros((batch_size, 1), dtype=float), np.cumsum(embedded_delta, axis=1)),
+        axis=1,
+    )
+    exact_levels = np.concatenate(
+        (np.zeros((batch_size, 1), dtype=float), np.cumsum(exact_delta, axis=1)),
+        axis=1,
+    )
+    embedded_total = embedded_levels[:, -1]
+    exact_total = exact_levels[:, -1]
+    embedded_distance = embedded_total[:, np.newaxis] - embedded_levels
+    exact_distance = exact_total[:, np.newaxis] - exact_levels
+
+    exact_surface_flux = flux * float(mu0) * surface * _exp_cutoff(exact_total / float(mu0))
+    embedded_surface_flux = flux * float(mu0) * surface * _exp_cutoff(embedded_total / float(mu0))
+    exact_up = 2.0 * exact_surface_flux[:, np.newaxis] * expn(3, exact_distance)
+    exact_mean = 0.5 * exact_surface_flux[:, np.newaxis] * expn(2, exact_distance) / math.pi
+    embedded_trans = _exp_cutoff(embedded_distance / float(stream_value))
+    embedded_up = 2.0 * float(stream_value) * embedded_surface_flux[:, np.newaxis] * embedded_trans
+    embedded_mean = embedded_surface_flux[:, np.newaxis] * embedded_trans / (2.0 * math.pi)
+    flux_up = exact_up - embedded_up
+    flux_down = np.zeros_like(flux_up)
+    return {
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up - flux_down,
+        "flux_mean": exact_mean - embedded_mean,
+    }
 
 
 def solve_fo_solar_obs_eps_batch_numpy(

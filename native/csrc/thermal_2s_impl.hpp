@@ -30,6 +30,69 @@ PY2SESS_HD T exp_cutoff(T value, T cutoff) {
 }
 
 template <typename T>
+PY2SESS_HD T exp1_positive(T x) {
+  const T euler = T(0.577215664901532860606512090082402431);
+  const T eps = T(1.0e-14);
+  const T fpmin = T(1.0e-30);
+  if (x <= T(0)) {
+    return T(1) / T(0);
+  }
+  if (x > T(1)) {
+    T b = x + T(1);
+    T c = T(1) / fpmin;
+    T d = T(1) / b;
+    T h = d;
+    for (int i = 1; i <= 100; ++i) {
+      const T a = -static_cast<T>(i * i);
+      b += T(2);
+      d = T(1) / (a * d + b);
+      c = b + a / c;
+      const T del = c * d;
+      h *= del;
+      if (fabs(del - T(1)) <= eps) {
+        break;
+      }
+    }
+    return h * exp(-x);
+  }
+
+  T ans = -log(x) - euler;
+  T fact = T(1);
+  for (int i = 1; i <= 100; ++i) {
+    fact *= -x / static_cast<T>(i);
+    const T del = -fact / static_cast<T>(i);
+    ans += del;
+    if (fabs(del) < fabs(ans) * eps) {
+      break;
+    }
+  }
+  return ans;
+}
+
+template <typename T>
+PY2SESS_HD T expn2_positive(T x) {
+  if (x <= T(0)) {
+    return T(1);
+  }
+  if (x > T(88)) {
+    return T(0);
+  }
+  return exp(-x) - x * exp1_positive(x);
+}
+
+template <typename T>
+PY2SESS_HD T expn3_positive(T x) {
+  if (x <= T(0)) {
+    return T(0.5);
+  }
+  if (x > T(88)) {
+    return T(0);
+  }
+  const T e2 = expn2_positive(x);
+  return T(0.5) * (exp(-x) - x * e2);
+}
+
+template <typename T>
 PY2SESS_HD T taylor_series_1(int order, T eps, T delta, T udel, T sm) {
   const int mterms = order + 1;
   T dm1 = delta;
@@ -135,9 +198,198 @@ PY2SESS_HD std::size_t solar_fo_workspace_bytes(std::int64_t nlay, bool return_p
 }
 
 template <typename T>
+PY2SESS_HD std::size_t solar_fo_pp_workspace_bytes(std::int64_t nlay) {
+  const auto layers = nlay > 0 ? static_cast<std::size_t>(nlay) : 1;
+  const auto levels = layers + 1;
+  return (4 * layers + levels + 8) * sizeof(T);
+}
+
+template <typename T>
 PY2SESS_HD std::size_t thermal_fo_workspace_bytes(std::int64_t nlay) {
   const auto layers = nlay > 0 ? static_cast<std::size_t>(nlay) : 1;
   return (2 * layers + 8) * sizeof(T);
+}
+
+template <typename T>
+PY2SESS_HD std::size_t thermal_fo_flux_workspace_bytes(std::int64_t nlay) {
+  const auto layers = nlay > 0 ? static_cast<std::size_t>(nlay) : 1;
+  const auto levels = layers + 1;
+  return (3 * layers + 2 * levels + 8) * sizeof(T);
+}
+
+template <typename T>
+PY2SESS_HD void gauss_legendre_8_positive(int index, T* mu, T* weight) {
+  const T mu_values[8] = {
+      T(0.019855071751231884),
+      T(0.10166676129318664),
+      T(0.2372337950418355),
+      T(0.4082826787521751),
+      T(0.5917173212478249),
+      T(0.7627662049581645),
+      T(0.8983332387068134),
+      T(0.9801449282487681),
+  };
+  const T weight_values[8] = {
+      T(0.05061426814518813),
+      T(0.11119051722668724),
+      T(0.15685332293894363),
+      T(0.18134189168918099),
+      T(0.18134189168918099),
+      T(0.15685332293894363),
+      T(0.11119051722668724),
+      T(0.05061426814518813),
+  };
+  *mu = mu_values[index];
+  *weight = weight_values[index];
+}
+
+template <typename T>
+PY2SESS_HD void thermal_fo_profiles_for_mu(
+    int nlay,
+    const T* deltaus,
+    const T* therm0,
+    const T* therm1,
+    T mu,
+    T surface_source,
+    T* up,
+    T* down) {
+  T cumulative = surface_source;
+  up[nlay] = cumulative;
+  for (int n = nlay - 1; n >= 0; --n) {
+    const T lostau = deltaus[n] / mu;
+    if (lostau <= T(1.0e-10)) {
+      up[n] = cumulative;
+      continue;
+    }
+    T trans = T(0);
+    T one_minus_trans = T(1);
+    if (lostau <= T(88)) {
+      trans = exp(-lostau);
+      if (fabs(lostau) < T(1.0e-4)) {
+        const T x = lostau;
+        one_minus_trans =
+            x * (T(1) - x * (T(0.5) - x * (T(1.0 / 6.0) - x * T(1.0 / 24.0))));
+      } else {
+        one_minus_trans = T(1) - trans;
+      }
+    }
+    const T ratio = lostau == T(0) ? T(1) : one_minus_trans / lostau;
+    const T source_delta = therm1[n] * deltaus[n];
+    const T source = therm0[n] * one_minus_trans + source_delta * (ratio - trans);
+    cumulative = trans * cumulative + source;
+    up[n] = cumulative;
+  }
+
+  cumulative = T(0);
+  down[0] = cumulative;
+  for (int n = 0; n < nlay; ++n) {
+    const T lostau = deltaus[n] / mu;
+    if (lostau <= T(1.0e-10)) {
+      down[n + 1] = cumulative;
+      continue;
+    }
+    T trans = T(0);
+    T one_minus_trans = T(1);
+    if (lostau <= T(88)) {
+      trans = exp(-lostau);
+      if (fabs(lostau) < T(1.0e-4)) {
+        const T x = lostau;
+        one_minus_trans =
+            x * (T(1) - x * (T(0.5) - x * (T(1.0 / 6.0) - x * T(1.0 / 24.0))));
+      } else {
+        one_minus_trans = T(1) - trans;
+      }
+    }
+    const T ratio = lostau == T(0) ? T(1) : one_minus_trans / lostau;
+    const T source_delta = therm1[n] * deltaus[n];
+    const T source = therm0[n] * one_minus_trans + source_delta * (T(1) - ratio);
+    cumulative = source + trans * cumulative;
+    down[n + 1] = cumulative;
+  }
+}
+
+template <typename T>
+PY2SESS_HD void thermal_fo_flux_correction_row(
+    int nlay,
+    T stream_value,
+    bool do_optical_deltam_scaling,
+    bool do_source_deltam_scaling,
+    int n_mu,
+    const T* mu_nodes,
+    const T* mu_weights,
+    const T* tau,
+    const T* omega,
+    const T* scaling,
+    const T* planck,
+    const T* surfbb,
+    const T* emissivity,
+    T* out,
+    char* work) {
+  const int nlev = nlay + 1;
+  const T pi = T(3.141592653589793238462643383279502884);
+  const T pi2 = T(2) * pi;
+  T* flux_up = out;
+  T* flux_down = flux_up + nlev;
+  T* flux_net = flux_down + nlev;
+  T* flux_mean = flux_net + nlev;
+  T* deltaus = alloc_from<T>(work, nlay);
+  T* therm0 = alloc_from<T>(work, nlay);
+  T* therm1 = alloc_from<T>(work, nlay);
+  T* up = alloc_from<T>(work, nlev);
+  T* down = alloc_from<T>(work, nlev);
+
+  for (int level = 0; level < nlev; ++level) {
+    flux_up[level] = T(0);
+    flux_down[level] = T(0);
+    flux_net[level] = T(0);
+    flux_mean[level] = T(0);
+  }
+
+  for (int n = 0; n < nlay; ++n) {
+    const T omfac = T(1) - omega[n] * scaling[n];
+    T delta = do_optical_deltam_scaling ? tau[n] * omfac : tau[n];
+    if (delta <= T(0)) {
+      delta = T(1.0e-12);
+    }
+    deltaus[n] = delta;
+    T source_scale = T(1) - omega[n];
+    if (do_source_deltam_scaling) {
+      source_scale = source_scale / omfac;
+    }
+    therm0[n] = planck[n] * source_scale;
+    therm1[n] = (planck[n + 1] - planck[n]) * source_scale / delta;
+  }
+
+  const T surface_source = (*surfbb) * (*emissivity);
+  for (int q = 0; q < n_mu; ++q) {
+    const T mu = mu_nodes[q];
+    const T weight = mu_weights[q];
+    thermal_fo_profiles_for_mu(nlay, deltaus, therm0, therm1, mu, surface_source, up, down);
+    for (int level = 0; level < nlev; ++level) {
+      flux_up[level] += pi2 * weight * mu * up[level];
+      flux_down[level] += pi2 * weight * mu * down[level];
+      flux_mean[level] += T(0.5) * weight * (up[level] + down[level]);
+    }
+  }
+
+  thermal_fo_profiles_for_mu(
+      nlay, deltaus, therm0, therm1, stream_value, surface_source, up, down);
+  for (int level = 0; level < nlev; ++level) {
+    flux_up[level] -= pi2 * stream_value * up[level];
+    flux_down[level] -= pi2 * stream_value * down[level];
+    flux_mean[level] -= T(0.5) * (up[level] + down[level]);
+    flux_net[level] = flux_up[level] - flux_down[level];
+  }
+  for (int level = nlay - 1; level >= 0; --level) {
+    const T omfac = T(1) - omega[level] * scaling[level];
+    const T delta = do_optical_deltam_scaling ? tau[level] * omfac : tau[level];
+    if (delta <= T(0)) {
+      flux_up[level] = flux_up[level + 1];
+      flux_down[level] = flux_down[level + 1];
+      flux_mean[level] = flux_mean[level + 1];
+      flux_net[level] = flux_up[level] - flux_down[level];
+    }
+  }
 }
 
 template <typename T>
@@ -370,6 +622,135 @@ PY2SESS_HD void solar_fo_row(
   if (return_components) {
     out[1] = single_scatter;
     out[2] = direct_beam;
+  }
+}
+
+template <typename T>
+PY2SESS_HD void solar_fo_pp_row(
+    int nlay,
+    T mu0,
+    T user_stream,
+    const T* tau,
+    const T* omega,
+    const T* scaling,
+    const T* surface_reflectance,
+    const T* flux_factor,
+    const T* exact_scatter,
+    T* out,
+    bool return_profile,
+    char* work) {
+  const int nlev = nlay + 1;
+  T* delta = alloc_from<T>(work, nlay);
+  T* attenuation = alloc_from<T>(work, nlev);
+  T* lostrans = alloc_from<T>(work, nlay);
+  T* sources = alloc_from<T>(work, nlay);
+  T* solutions = alloc_from<T>(work, nlay);
+
+  T cumulative_tau = T(0);
+  attenuation[0] = T(1);
+  for (int n = 0; n < nlay; ++n) {
+    delta[n] = tau[n] * (T(1) - omega[n] * scaling[n]);
+    cumulative_tau += delta[n];
+    attenuation[n + 1] = exp_cutoff(cumulative_tau / mu0, T(88));
+  }
+
+  T previous_attenuation = attenuation[0];
+  if (fabs(user_stream) <= T(1.0e-12)) {
+    for (int n = 0; n < nlay; ++n) {
+      solutions[n] = exact_scatter[n] * previous_attenuation;
+      sources[n] = solutions[n];
+      lostrans[n] = T(0);
+      previous_attenuation = attenuation[n + 1];
+    }
+  } else {
+    const T factor2 = user_stream / mu0;
+    for (int n = 0; n < nlay; ++n) {
+      const T trans = exp_cutoff(delta[n] / user_stream, T(88));
+      const T current_attenuation = attenuation[n + 1];
+      const T factor1 =
+          previous_attenuation == T(0) ? T(0) : current_attenuation / previous_attenuation;
+      solutions[n] = exact_scatter[n] * previous_attenuation;
+      sources[n] = solutions[n] * (T(1) - factor1 * trans) / (factor2 + T(1));
+      lostrans[n] = trans;
+      previous_attenuation = current_attenuation;
+    }
+  }
+
+  const T pi = T(3.141592653589793238462643383279502884);
+  const T scale = T(0.25) * (*flux_factor) / pi;
+  T cumsource_up = T(0);
+  T cumsource_db = T(4) * mu0 * (*surface_reflectance) * attenuation[nlay];
+  const T surface_db = cumsource_db;
+
+  if (return_profile) {
+    out[nlay] = scale * surface_db;
+    for (int n = nlay - 1; n >= 0; --n) {
+      cumsource_db = lostrans[n] * cumsource_db;
+      cumsource_up = lostrans[n] * cumsource_up + sources[n];
+      out[n] = scale * (cumsource_up + cumsource_db);
+    }
+    return;
+  }
+
+  for (int n = nlay - 1; n >= 0; --n) {
+    cumsource_db = lostrans[n] * cumsource_db;
+    cumsource_up = lostrans[n] * cumsource_up + sources[n];
+  }
+  out[0] = scale * (cumsource_up + cumsource_db);
+}
+
+template <typename T>
+PY2SESS_HD void solar_fo_flux_correction_row(
+    int nlay,
+    T stream_value,
+    T mu0,
+    bool do_optical_deltam_scaling,
+    const T* tau,
+    const T* omega,
+    const T* scaling,
+    const T* surface_reflectance,
+    const T* flux_factor,
+    T* out) {
+  const int nlev = nlay + 1;
+  const T pi = T(3.141592653589793238462643383279502884);
+  const T surface = *surface_reflectance;
+  T exact_total = T(0);
+  T embedded_total = T(0);
+  for (int n = 0; n < nlay; ++n) {
+    const T twostream_delta = tau[n] * (T(1) - omega[n] * scaling[n]);
+    embedded_total += twostream_delta;
+    exact_total += do_optical_deltam_scaling ? twostream_delta : tau[n];
+  }
+
+  const T exact_surface_flux =
+      (*flux_factor) * mu0 * surface * exp_cutoff(exact_total / mu0, T(88));
+  const T embedded_surface_flux =
+      (*flux_factor) * mu0 * surface * exp_cutoff(embedded_total / mu0, T(88));
+
+  T exact_distance = exact_total;
+  T embedded_distance = embedded_total;
+  T* flux_up = out;
+  T* flux_down = flux_up + nlev;
+  T* flux_net = flux_down + nlev;
+  T* flux_mean = flux_net + nlev;
+  for (int level = 0; level < nlev; ++level) {
+    const T exact_up = T(2) * exact_surface_flux * expn3_positive(exact_distance);
+    const T exact_mean =
+        T(0.5) * exact_surface_flux * expn2_positive(exact_distance) / pi;
+    const T embedded_trans = exp_cutoff(embedded_distance / stream_value, T(88));
+    const T embedded_up = T(2) * stream_value * embedded_surface_flux * embedded_trans;
+    const T embedded_mean = embedded_surface_flux * embedded_trans / (T(2) * pi);
+
+    flux_up[level] = exact_up - embedded_up;
+    flux_down[level] = T(0);
+    flux_net[level] = flux_up[level];
+    flux_mean[level] = exact_mean - embedded_mean;
+
+    if (level < nlay) {
+      const T twostream_delta = tau[level] * (T(1) - omega[level] * scaling[level]);
+      exact_distance -= do_optical_deltam_scaling ? twostream_delta : tau[level];
+      embedded_distance -= twostream_delta;
+    }
   }
 }
 
@@ -780,6 +1161,15 @@ PY2SESS_HD void thermal_2s_row(
     flux_net[bottom] = up_value - down_value;
     flux_mean[bottom] = (do_upwelling ? T(0.5) * up_quad : T(0)) +
                         (do_dnwelling ? T(0.5) * down_quad : T(0));
+    for (int level = nlay - 1; level >= 0; --level) {
+      const T omfac = T(1) - omega[level] * scaling[level];
+      if (tau[level] * omfac <= thermal_tcutoff) {
+        flux_up[level] = flux_up[level + 1];
+        flux_down[level] = flux_down[level + 1];
+        flux_mean[level] = flux_mean[level + 1];
+        flux_net[level] = flux_up[level] - flux_down[level];
+      }
+    }
   }
 
   const int last = nlay - 1;

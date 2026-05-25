@@ -20,6 +20,7 @@ from ..optical.delta_m_torch import delta_m_scale_optical_properties_torch
 from .taylor_torch import taylor_series_1_torch
 
 torch = _load_torch()
+_OPTICAL_THICKNESS_MIN = 1.0e-12
 
 
 @dataclass(frozen=True)
@@ -209,6 +210,103 @@ def _thermal_layer_sources_up_batch(
     return torch.where(delta_tau > tcutoff, source, torch.zeros_like(source))
 
 
+def _transparent_thermal_flux_batch(
+    *,
+    tau,
+    surfbb,
+    emissivity,
+    stream_value: float,
+    return_profile: bool,
+    return_fluxes: bool,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+):
+    nrows, nlay = tau.shape
+    nlev = nlay + 1
+    radiance = torch.zeros(
+        (nrows, nlev) if return_profile else (nrows,),
+        dtype=tau.dtype,
+        device=tau.device,
+    )
+    if not return_fluxes:
+        return radiance
+
+    surface_source = _as_tensor(surfbb, dtype=tau.dtype, device=tau.device) * _as_tensor(
+        emissivity,
+        dtype=tau.dtype,
+        device=tau.device,
+    )
+    if surface_source.ndim == 0:
+        surface_source = surface_source.expand(nrows)
+    else:
+        surface_source = torch.broadcast_to(surface_source.reshape(-1), (nrows,))
+    flux_up = torch.zeros((nrows, nlev), dtype=tau.dtype, device=tau.device)
+    flux_down = torch.zeros_like(flux_up)
+    flux_mean = torch.zeros_like(flux_up)
+    if do_upwelling:
+        flux_up = flux_up + 2.0 * np.pi * stream_value * surface_source[:, None]
+        flux_mean = flux_mean + 0.5 * surface_source[:, None]
+    if do_dnwelling:
+        flux_down = flux_down + 0.0
+    return {
+        "radiance": radiance,
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up - flux_down,
+        "flux_mean": flux_mean,
+    }
+
+
+def _flux_profile_thermal_batch_torch(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    stream_value: float,
+    active_layers,
+    lcon,
+    mcon,
+    xpos1,
+    xpos2,
+    eigentrans,
+    wupper,
+    wlower,
+):
+    """Builds DISORT-style level fluxes from batched thermal 2S quadrature values."""
+    wupper0, wupper1 = wupper
+    wlower0, wlower1 = wlower
+    up_upper = wupper1 + lcon * xpos2 + mcon * xpos1 * eigentrans
+    down_upper = wupper0 + lcon * xpos1 + mcon * xpos2 * eigentrans
+    up_lower = (
+        wlower1[:, -1] + lcon[:, -1] * xpos2[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos1[:, -1]
+    )
+    down_lower = (
+        wlower0[:, -1] + lcon[:, -1] * xpos1[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos2[:, -1]
+    )
+    up_quad = torch.cat((up_upper, up_lower[:, None]), dim=1)
+    down_quad = torch.cat((down_upper, down_lower[:, None]), dim=1)
+
+    flux_up = torch.zeros_like(up_quad)
+    flux_down = torch.zeros_like(down_quad)
+    flux_mean = torch.zeros_like(up_quad)
+    if do_upwelling:
+        flux_up = 2.0 * np.pi * stream_value * up_quad
+        flux_mean = flux_mean + 0.5 * up_quad
+    if do_dnwelling:
+        flux_down = 2.0 * np.pi * stream_value * down_quad
+        flux_mean = flux_mean + 0.5 * down_quad
+    inactive_layers = ~active_layers
+    if bool(inactive_layers.any()):
+        flux_up = flux_up.clone()
+        flux_down = flux_down.clone()
+        flux_mean = flux_mean.clone()
+        for level in range(inactive_layers.shape[1] - 1, -1, -1):
+            mask = inactive_layers[:, level]
+            flux_up[:, level] = torch.where(mask, flux_up[:, level + 1], flux_up[:, level])
+            flux_down[:, level] = torch.where(mask, flux_down[:, level + 1], flux_down[:, level])
+            flux_mean[:, level] = torch.where(mask, flux_mean[:, level + 1], flux_mean[:, level])
+    return flux_up, flux_down, flux_up - flux_down, flux_mean
+
+
 def _two_stream_thermal_toa_batch(
     *,
     tau,
@@ -227,6 +325,9 @@ def _two_stream_thermal_toa_batch(
     bvp_dtype=None,
     bvp_engine: str = "auto",
     return_profile: bool = False,
+    return_fluxes: bool = False,
+    do_upwelling: bool = True,
+    do_dnwelling: bool = False,
 ):
     """Computes batched 2S thermal upwelling TOA radiance."""
     delta_tau, omega_total, asymm_total = delta_m_scale_optical_properties_torch(
@@ -237,28 +338,31 @@ def _two_stream_thermal_toa_batch(
     )
     transparent_rows = torch.all(delta_tau == 0.0, dim=1)
     if bool(transparent_rows.all()):
-        if return_profile:
-            return torch.zeros(
-                (tau.shape[0], tau.shape[1] + 1),
-                dtype=tau.dtype,
-                device=tau.device,
-            )
-        return torch.zeros((tau.shape[0],), dtype=tau.dtype, device=tau.device)
+        return _transparent_thermal_flux_batch(
+            tau=tau,
+            surfbb=surfbb,
+            emissivity=emissivity,
+            stream_value=stream_value,
+            return_profile=return_profile,
+            return_fluxes=return_fluxes,
+            do_upwelling=do_upwelling,
+            do_dnwelling=do_dnwelling,
+        )
     if bool(transparent_rows.any()):
-        good = ~transparent_rows
+        active_rows = ~transparent_rows
         subset = _two_stream_thermal_toa_batch(
-            tau=tau[good],
-            omega=omega[good],
-            asymm=asymm[good],
-            scaling=scaling[good],
-            thermal_bb_input=thermal_bb_input[good],
-            surfbb=surfbb[good] if torch.is_tensor(surfbb) and surfbb.ndim > 0 else surfbb,
+            tau=tau[active_rows],
+            omega=omega[active_rows],
+            asymm=asymm[active_rows],
+            scaling=scaling[active_rows],
+            thermal_bb_input=thermal_bb_input[active_rows],
+            surfbb=(surfbb[active_rows] if torch.is_tensor(surfbb) and surfbb.ndim > 0 else surfbb),
             emissivity=(
-                emissivity[good]
+                emissivity[active_rows]
                 if torch.is_tensor(emissivity) and emissivity.ndim > 0
                 else emissivity
             ),
-            albedo=albedo[good] if torch.is_tensor(albedo) and albedo.ndim > 0 else albedo,
+            albedo=(albedo[active_rows] if torch.is_tensor(albedo) and albedo.ndim > 0 else albedo),
             stream_value=stream_value,
             user_stream=user_stream,
             pxsq=pxsq,
@@ -267,17 +371,29 @@ def _two_stream_thermal_toa_batch(
             bvp_dtype=bvp_dtype,
             bvp_engine=bvp_engine,
             return_profile=return_profile,
+            return_fluxes=return_fluxes,
+            do_upwelling=do_upwelling,
+            do_dnwelling=do_dnwelling,
         )
-        if return_profile:
-            result = torch.zeros(
-                (tau.shape[0], tau.shape[1] + 1),
-                dtype=tau.dtype,
-                device=tau.device,
-            )
-            result[good] = subset
+        result = _transparent_thermal_flux_batch(
+            tau=tau,
+            surfbb=surfbb,
+            emissivity=emissivity,
+            stream_value=stream_value,
+            return_profile=return_profile,
+            return_fluxes=return_fluxes,
+            do_upwelling=do_upwelling,
+            do_dnwelling=do_dnwelling,
+        )
+        if return_fluxes:
+            result["radiance"][active_rows] = subset["radiance"]
+            for key in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+                result[key][active_rows] = subset[key]
             return result
-        result = torch.zeros((tau.shape[0],), dtype=tau.dtype, device=tau.device)
-        result[good] = subset
+        if return_profile:
+            result[active_rows] = subset
+            return result
+        result[active_rows] = subset
         return result
     therm0, therm1 = _thermal_coefficients_batch(delta_tau, thermal_bb_input)
     eigenvalue, eigentrans, xpos1, xpos2, norm_saved = _hom_solution_thermal_batch(
@@ -357,6 +473,24 @@ def _two_stream_thermal_toa_batch(
         solve_device=bvp_device,
         solve_dtype=bvp_dtype,
     )
+    flux_up = None
+    flux_down = None
+    flux_net = None
+    flux_mean = None
+    if return_fluxes:
+        flux_up, flux_down, flux_net, flux_mean = _flux_profile_thermal_batch_torch(
+            do_upwelling=do_upwelling,
+            do_dnwelling=do_dnwelling,
+            stream_value=stream_value,
+            active_layers=delta_tau > thermal_tcutoff,
+            lcon=lcon,
+            mcon=mcon,
+            xpos1=xpos1,
+            xpos2=xpos2,
+            eigentrans=eigentrans,
+            wupper=t_wupper,
+            wlower=t_wlower,
+        )
     wlower0, _wlower1 = t_wlower
     idownsurf = (
         wlower0[:, -1] + lcon[:, -1] * xpos1[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos2[:, -1]
@@ -364,14 +498,26 @@ def _two_stream_thermal_toa_batch(
     boa_source = surface_factor * albedo * idownsurf
     layersource = lcon * u_xpos * hmult_2 + mcon * u_xneg * hmult_1 + layer_tsup_up
     if return_profile:
-        return _accumulate_upwelling_profile_torch(
+        radiance = _accumulate_upwelling_profile_torch(
             layer_source=layersource,
             layer_trans=t_delt_userm,
             surface_source=boa_source,
         )
-    trans_prefix = torch.cumprod(t_delt_userm, dim=1)
-    layer_weights = torch.cat((torch.ones_like(trans_prefix[:, :1]), trans_prefix[:, :-1]), dim=1)
-    return torch.sum(layersource * layer_weights, dim=1) + trans_prefix[:, -1] * boa_source
+    else:
+        trans_prefix = torch.cumprod(t_delt_userm, dim=1)
+        layer_weights = torch.cat(
+            (torch.ones_like(trans_prefix[:, :1]), trans_prefix[:, :-1]), dim=1
+        )
+        radiance = torch.sum(layersource * layer_weights, dim=1) + trans_prefix[:, -1] * boa_source
+    if return_fluxes:
+        return {
+            "radiance": radiance,
+            "flux_up": flux_up,
+            "flux_down": flux_down,
+            "flux_net": flux_net,
+            "flux_mean": flux_mean,
+        }
+    return radiance
 
 
 def _fo_thermal_toa_batch(
@@ -462,6 +608,127 @@ def _fo_thermal_toa_batch(
     cum_atmos = torch.sum(sources_up * layer_weights, dim=1)
     cum_surface = trans_prefix[:, -1] * surfbb * emissivity
     return cum_atmos + cum_surface
+
+
+def _mu_quadrature_torch(n_mu: int, *, dtype, device):
+    if int(n_mu) <= 0:
+        raise ValueError("n_mu must be a positive integer")
+    nodes, weights = np.polynomial.legendre.leggauss(int(n_mu))
+    mu = 0.5 * (nodes + 1.0)
+    w = 0.5 * weights
+    return (
+        torch.as_tensor(mu, dtype=dtype, device=device),
+        torch.as_tensor(w, dtype=dtype, device=device),
+    )
+
+
+def _thermal_fo_profiles_for_mu_torch(
+    *,
+    deltaus,
+    therm0,
+    therm1,
+    mu,
+    surface_source,
+):
+    lostau = deltaus / mu
+    lostrans = torch.where(lostau < 88.0, torch.exp(-lostau), torch.zeros_like(lostau))
+    one_minus_trans = torch.where(
+        lostau < 88.0,
+        -torch.expm1(-lostau),
+        torch.ones_like(lostau),
+    )
+    ratio = one_minus_trans / lostau
+    source_delta = therm1 * deltaus
+    sources_up = therm0 * one_minus_trans + source_delta * (ratio - lostrans)
+    sources_down = therm0 * one_minus_trans + source_delta * (1.0 - ratio)
+
+    batch, nlay = deltaus.shape
+    up = torch.zeros((batch, nlay + 1), dtype=deltaus.dtype, device=deltaus.device)
+    down = torch.zeros_like(up)
+    cumulative = surface_source
+    up[:, nlay] = cumulative
+    for n in range(nlay - 1, -1, -1):
+        cumulative = lostrans[:, n] * cumulative + sources_up[:, n]
+        up[:, n] = cumulative
+
+    cumulative = torch.zeros(batch, dtype=deltaus.dtype, device=deltaus.device)
+    down[:, 0] = cumulative
+    for n in range(nlay):
+        cumulative = sources_down[:, n] + lostrans[:, n] * cumulative
+        down[:, n + 1] = cumulative
+    return up, down
+
+
+def thermal_fo_flux_correction_torch(
+    *,
+    tau,
+    omega,
+    scaling,
+    thermal_bb_input,
+    surfbb,
+    emissivity,
+    stream_value: float,
+    do_optical_deltam_scaling: bool,
+    do_source_deltam_scaling: bool,
+    n_mu: int = 8,
+    n_phi: int | None = None,
+):
+    """Returns exact-minus-2S thermal FO level-flux correction for a batch."""
+    if n_phi is not None and int(n_phi) <= 0:
+        raise ValueError("n_phi must be a positive integer")
+    deltaus = tau * (1.0 - omega * scaling) if do_optical_deltam_scaling else tau
+    deltaus = torch.where(
+        deltaus <= 0.0,
+        torch.full_like(deltaus, _OPTICAL_THICKNESS_MIN),
+        deltaus,
+    )
+    lower_bb = thermal_bb_input[:, :-1]
+    upper_bb = thermal_bb_input[:, 1:]
+    single_scatter_scale = 1.0 - omega
+    if do_source_deltam_scaling:
+        single_scatter_scale = single_scatter_scale / (1.0 - omega * scaling)
+    therm0 = lower_bb * single_scatter_scale
+    therm1 = ((upper_bb - lower_bb) / deltaus) * single_scatter_scale
+    surface_source = surfbb * emissivity
+
+    batch, nlay = tau.shape
+    nlev = nlay + 1
+    exact_up = torch.zeros((batch, nlev), dtype=tau.dtype, device=tau.device)
+    exact_down = torch.zeros_like(exact_up)
+    exact_mean = torch.zeros_like(exact_up)
+    mu_nodes, mu_weights = _mu_quadrature_torch(n_mu, dtype=tau.dtype, device=tau.device)
+    for mu, weight in zip(mu_nodes, mu_weights):
+        up, down = _thermal_fo_profiles_for_mu_torch(
+            deltaus=deltaus,
+            therm0=therm0,
+            therm1=therm1,
+            mu=mu,
+            surface_source=surface_source,
+        )
+        exact_up = exact_up + 2.0 * np.pi * weight * mu * up
+        exact_down = exact_down + 2.0 * np.pi * weight * mu * down
+        exact_mean = exact_mean + 0.5 * weight * (up + down)
+
+    up_2s, down_2s = _thermal_fo_profiles_for_mu_torch(
+        deltaus=deltaus,
+        therm0=therm0,
+        therm1=therm1,
+        mu=torch.as_tensor(stream_value, dtype=tau.dtype, device=tau.device),
+        surface_source=surface_source,
+    )
+    embedded_up = 2.0 * np.pi * stream_value * up_2s
+    embedded_down = 2.0 * np.pi * stream_value * down_2s
+    embedded_mean = 0.5 * (up_2s + down_2s)
+
+    flux_up = exact_up - embedded_up
+    flux_down = exact_down - embedded_down
+    flux_mean = exact_mean - embedded_mean
+    return {
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up - flux_down,
+        "flux_mean": flux_mean,
+    }
 
 
 def solve_thermal_batch_torch(

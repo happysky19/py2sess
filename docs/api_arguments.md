@@ -4,8 +4,8 @@
 column gives the closest Fortran or internal name for code comparison.
 
 `2S` is the two-stream multiple-scattering/emission solve. `FO` is the
-first-order solar single-scatter/direct-beam or thermal source-transmission
-correction. With `include_fo=True`, `result.radiance_total` is `2S + FO`.
+first-order radiance correction. With `include_fo=True`,
+`result.radiance_total` is `2S + FO`.
 
 Conventions: angles are degrees; solar geometry is `[sza, vza, raz]`; thermal
 geometry is viewing zenith angle only; heights `z` are km from top to bottom;
@@ -18,13 +18,18 @@ dimensions are preserved in `result.radiance`; multiple solar or thermal
 geometries append one final geometry axis. The default batched path returns TOA
 `radiance_2s`, optional `radiance_fo`, and `radiance_total`, but not BOA fluxes.
 Set `TwoStreamEssOptions(output_levels=True)` only when level radiance profiles
-are needed; profile arrays use the final axis for TOA-to-BOA levels.
+are needed; profile arrays use the final axis for TOA-to-BOA levels. Set
+`TwoStreamEssOptions(output_fluxes=True)` when DISORT-style level fluxes are
+needed; flux arrays use that same final level axis with length `nlyr + 1`.
 
 | Public name | Meaning | Shape | Default | Fortran/internal name |
 |---|---|---:|---|---|
 | `nlyr` | Number of atmospheric layers | scalar | required | `NLAYERS` |
 | `mode` | Source mode: `solar`, `solar_lattice`, or `thermal` | scalar | `solar` | source-mode branch |
 | `output_levels` | Return level-by-level radiance profiles | scalar | `False` | `DO_LEVEL_OUTPUT` |
+| `output_fluxes` | Return level flux arrays `flux_up`, `flux_down`, `flux_net`, and `flux_mean` | scalar | `False` | `DO_MVOUT_ONLY` / `DO_ADDITIONAL_MVOUT` |
+| `fo_flux_n_mu` | Positive-hemisphere polar quadrature nodes for FO flux source-replacement integrals | scalar | `8` | py2sess FO flux post-processing |
+| `fo_flux_n_phi` | Optional azimuth quadrature nodes for future non-axisymmetric FO flux integrals | scalar or `None` | `None` | py2sess FO flux post-processing |
 | `upwelling` | Compute upwelling outputs | scalar | `True` | `DO_UPWELLING` |
 | `downwelling` | Compute downwelling outputs | scalar | `False` | `DO_DNWELLING` |
 | `plane_parallel` | Use plane-parallel geometry instead of spherical geometry | scalar | `False` | `DO_PLANE_PARALLEL` |
@@ -41,6 +46,7 @@ are needed; profile arrays use the final axis for TOA-to-BOA levels.
 | `relazms` | Advanced solar-lattice relative azimuth angles, degrees | `(nazm,)` | required for `mode="solar_lattice"` | `USER_RELAZMS` |
 | `stream` | Two-stream quadrature cosine | scalar | `1/sqrt(3)` | `STREAM_VALUE` |
 | `fbeam` | Direct solar beam/source normalization | scalar or `(...)` | `1.0` | `FLUX_FACTOR` / `FLUXFAC` |
+| `fisot` | Isotropic downward intensity incident at the top boundary | scalar | `0.0` | `FISOT` |
 | `albedo` | Lambertian surface albedo | scalar or `(...)` | `0.0` | `LAMBERTIAN_ALBEDO` |
 | `delta_m_truncation_factor` | Delta-M truncation factor `f` | `(..., nlyr)` | `None` -> `g**2` | `D2S_SCALING` / `TRUNCFAC` |
 | `planck` | Thermal Planck/source value at level boundaries | `(..., nlyr+1)` | required for `mode="thermal"` | `THERMAL_BB_INPUT` |
@@ -62,6 +68,10 @@ are needed; profile arrays use the final axis for TOA-to-BOA levels.
   is passed explicitly.
 - Solar and thermal source handling are mode-exclusive. A single `TwoStreamEss`
   call does not combine direct solar and Planck thermal sources.
+- `fisot` is a top diffuse-intensity boundary, not a direct beam. For the
+  two-stream solve, py2sess projects this isotropic radiance onto the active
+  stream so that the incident hemispheric flux is `pi * fisot`. Nonzero values
+  are currently supported for scalar NumPy solar runs.
 - `bvp_solver="auto"` uses the optimized batch dispatch for batched thermal
   runs and the banded scalar path for scalar thermal runs. Use explicit values
   only for debugging or parity checks.
@@ -82,3 +92,36 @@ are needed; profile arrays use the final axis for TOA-to-BOA levels.
 - Profile results are available as `result.radiance_profile_2s`,
   `result.radiance_profile_fo`, and `result.radiance_profile_total` when
   `output_levels=True`, for both scalar and batched calls.
+- Level flux results are available as `result.flux_up`, `result.flux_down`,
+  `result.flux_net`, and `result.flux_mean` when `output_fluxes=True`. The final
+  axis is ordered from top of atmosphere to bottom of atmosphere. `flux_down`
+  includes the direct solar beam when applicable. `flux_net` uses the py2sess
+  sign convention `flux_up - flux_down`. `flux_mean` is a mean-intensity or
+  actinic-style proxy; compare it to DISORT or KINETICS only after matching each
+  code's mean-intensity convention.
+- `result.as_disort_flux()` returns these same arrays in pydisort's default
+  level order, with canonical keys `flux_up`, `flux_down`, `flux_net`,
+  `flux_mean` and legacy short keys `up`, `down`, `net`, `mean`.
+- Batched `output_fluxes=True` is supported for NumPy, torch, and native
+  two-stream flux outputs. With `include_fo=True`, batched thermal fluxes are
+  supported and batched solar fluxes require `plane_parallel=True` with
+  Lambertian surface reflection. Nonzero `fisot` is currently limited to scalar
+  NumPy solar runs.
+- For scalar NumPy plane-parallel solar runs, `include_fo=True` with
+  `output_fluxes=True` keeps DISORT-style fluxes as moment-equation outputs by
+  default. Atmospheric FO radiance corrections are not integrated back into the
+  public flux fields. The default solar flux path only replaces validated
+  separable direct-source terms, currently Lambertian direct-beam surface
+  reflection, by their exact hemispheric flux counterparts.
+- Thermal `include_fo=True` flux output still uses the source-replacement form
+  for direct thermal atmospheric and surface source transmission.
+- FO flux polar quadrature uses Gauss-Legendre nodes on the positive
+  hemisphere. Starting from standard Legendre nodes `x_i` and weights `w_i` on
+  `[-1, 1]`, py2sess uses `mu_i = (x_i + 1) / 2` and `w_mu_i = w_i / 2` to
+  integrate over `0 <= mu <= 1`.
+- FO flux azimuth quadrature uses uniform midpoint nodes
+  `phi_j = 2*pi*(j + 1/2)/fo_flux_n_phi` with weight
+  `2*pi/fo_flux_n_phi` when a non-axisymmetric FO flux integral uses explicit
+  azimuth quadrature. Current public source replacements are either analytic in
+  azimuth or axisymmetric, so the default `fo_flux_n_phi=None` applies the
+  analytic `2*pi` azimuth factor and only integrates over `mu`.

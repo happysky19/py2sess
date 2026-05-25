@@ -233,6 +233,45 @@ void check_solar_fo_inputs(
   TORCH_CHECK(ntraversefine.device() == tau.device(), "solar_fo tensors must share device");
 }
 
+void check_solar_fo_pp_inputs(
+    const at::Tensor& tau,
+    const at::Tensor& omega,
+    const at::Tensor& scaling,
+    const at::Tensor& surface_reflectance,
+    const at::Tensor& flux_factor,
+    const at::Tensor& exact_scatter,
+    const char* label) {
+  TORCH_CHECK(tau.is_floating_point(), label, " expects floating tensors");
+  TORCH_CHECK(tau.dim() == 2, label, " tau must have shape (rows, nlay)");
+  check_same_shape(omega, tau, "solar_fo_plane_parallel omega must match tau shape");
+  check_same_shape(scaling, tau, "solar_fo_plane_parallel scaling must match tau shape");
+  check_same_shape(exact_scatter, tau, "solar_fo_plane_parallel exact_scatter must match tau shape");
+  check_vector_size(surface_reflectance, tau.size(0),
+                    "solar_fo_plane_parallel surface_reflectance must have shape (rows,)");
+  check_vector_size(flux_factor, tau.size(0),
+                    "solar_fo_plane_parallel flux_factor must have shape (rows,)");
+  check_all_same_dtype_device(
+      tau, label, omega, scaling, surface_reflectance, flux_factor, exact_scatter);
+}
+
+void check_solar_fo_flux_inputs(
+    const at::Tensor& tau,
+    const at::Tensor& omega,
+    const at::Tensor& scaling,
+    const at::Tensor& surface_reflectance,
+    const at::Tensor& flux_factor,
+    const char* label) {
+  TORCH_CHECK(tau.is_floating_point(), label, " expects floating tensors");
+  TORCH_CHECK(tau.dim() == 2, label, " tau must have shape (rows, nlay)");
+  check_same_shape(omega, tau, "solar_fo_flux_correction omega must match tau shape");
+  check_same_shape(scaling, tau, "solar_fo_flux_correction scaling must match tau shape");
+  check_vector_size(surface_reflectance, tau.size(0),
+                    "solar_fo_flux_correction surface_reflectance must have shape (rows,)");
+  check_vector_size(flux_factor, tau.size(0),
+                    "solar_fo_flux_correction flux_factor must have shape (rows,)");
+  check_all_same_dtype_device(tau, label, omega, scaling, surface_reflectance, flux_factor);
+}
+
 int64_t two_stream_output_cols(bool return_profile, bool return_fluxes, int64_t nlay) {
   const auto nlev = nlay + 1;
   const auto radiance_cols = return_profile ? nlev : int64_t{1};
@@ -381,6 +420,97 @@ at::Tensor run_thermal_2s_flux(
 
   PY2SESS_DISPATCH_KERNEL(output, thermal_2s_flux_cpu, thermal_2s_flux_cuda, iter, params);
   return output.view({rows, nlay + 1, 2});
+}
+
+at::Tensor run_thermal_fo_flux_correction(
+    const at::Tensor& tau,
+    const at::Tensor& omega,
+    const at::Tensor& scaling,
+    const at::Tensor& planck,
+    const at::Tensor& surfbb,
+    const at::Tensor& emissivity,
+    const ThermalFoFluxParams& params) {
+  const auto rows = tau.size(0);
+  const auto nlay = tau.size(1);
+  const auto nlev = nlay + 1;
+  auto output = at::empty({rows, 4 * nlev}, tau.options());
+
+  auto iter = at::TensorIteratorConfig()
+                  .resize_outputs(false)
+                  .check_all_same_dtype(true)
+                  .declare_static_shape(output.sizes(), /*squash_dims=*/{1})
+                  .add_output(output)
+                  .add_input(tau)
+                  .add_input(omega)
+                  .add_input(scaling)
+                  .add_input(planck)
+                  .add_owned_input(surfbb.view({rows, 1}))
+                  .add_owned_input(emissivity.view({rows, 1}))
+                  .build();
+
+  PY2SESS_DISPATCH_KERNEL(
+      output, thermal_fo_flux_correction_cpu, thermal_fo_flux_correction_cuda, iter, params);
+  return output.view({rows, 4, nlev});
+}
+
+at::Tensor run_solar_fo_plane_parallel(
+    const at::Tensor& tau,
+    const at::Tensor& omega,
+    const at::Tensor& scaling,
+    const at::Tensor& surface_reflectance,
+    const at::Tensor& flux_factor,
+    const at::Tensor& exact_scatter,
+    const SolarFoPpParams& params) {
+  const auto rows = tau.size(0);
+  const auto nlay = tau.size(1);
+  const auto output_cols = params.return_profile ? nlay + 1 : int64_t{1};
+  auto output = at::empty({rows, output_cols}, tau.options());
+
+  auto iter = at::TensorIteratorConfig()
+                  .resize_outputs(false)
+                  .check_all_same_dtype(true)
+                  .declare_static_shape(output.sizes(), /*squash_dims=*/{1})
+                  .add_output(output)
+                  .add_input(tau)
+                  .add_input(omega)
+                  .add_input(scaling)
+                  .add_owned_input(surface_reflectance.view({rows, 1}))
+                  .add_owned_input(flux_factor.view({rows, 1}))
+                  .add_input(exact_scatter)
+                  .build();
+
+  PY2SESS_DISPATCH_KERNEL(
+      output, solar_fo_plane_parallel_cpu, solar_fo_plane_parallel_cuda, iter, params);
+  return params.return_profile ? output : output.select(1, 0);
+}
+
+at::Tensor run_solar_fo_flux_correction(
+    const at::Tensor& tau,
+    const at::Tensor& omega,
+    const at::Tensor& scaling,
+    const at::Tensor& surface_reflectance,
+    const at::Tensor& flux_factor,
+    const SolarFoFluxParams& params) {
+  const auto rows = tau.size(0);
+  const auto nlay = tau.size(1);
+  const auto nlev = nlay + 1;
+  auto output = at::empty({rows, 4 * nlev}, tau.options());
+
+  auto iter = at::TensorIteratorConfig()
+                  .resize_outputs(false)
+                  .check_all_same_dtype(true)
+                  .declare_static_shape(output.sizes(), /*squash_dims=*/{1})
+                  .add_output(output)
+                  .add_input(tau)
+                  .add_input(omega)
+                  .add_input(scaling)
+                  .add_owned_input(surface_reflectance.view({rows, 1}))
+                  .add_owned_input(flux_factor.view({rows, 1}))
+                  .build();
+
+  PY2SESS_DISPATCH_KERNEL(
+      output, solar_fo_flux_correction_cpu, solar_fo_flux_correction_cuda, iter, params);
+  return output.view({rows, 4, nlev});
 }
 
 at::Tensor run_solar_2s_flux(
@@ -693,6 +823,47 @@ void thermal_fo_cpu(at::TensorIterator& iter, const ThermalFoParams& params) {
   });
 }
 
+void thermal_fo_flux_correction_cpu(
+    at::TensorIterator& iter,
+    const ThermalFoFluxParams& params) {
+  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_thermal_fo_flux_correction_cpu", [&] {
+    const int nlay = last_dim_size(iter.input(0));
+    const auto grain_size =
+        std::max<int64_t>(1, iter.numel() / std::max<int>(1, at::get_num_threads()));
+    const auto workspace_size = thermal_fo_flux_workspace_bytes<scalar_t>(nlay);
+    iter.for_each(
+        [&](char** data, const int64_t* strides, int64_t n) {
+          std::unique_ptr<char[]> work = std::make_unique<char[]>(workspace_size);
+          for (int64_t i = 0; i < n; ++i) {
+            auto* out = reinterpret_cast<scalar_t*>(data[0] + i * strides[0]);
+            auto* tau = reinterpret_cast<const scalar_t*>(data[1] + i * strides[1]);
+            auto* omega = reinterpret_cast<const scalar_t*>(data[2] + i * strides[2]);
+            auto* scaling = reinterpret_cast<const scalar_t*>(data[3] + i * strides[3]);
+            auto* planck = reinterpret_cast<const scalar_t*>(data[4] + i * strides[4]);
+            auto* surfbb = reinterpret_cast<const scalar_t*>(data[5] + i * strides[5]);
+            auto* emissivity = reinterpret_cast<const scalar_t*>(data[6] + i * strides[6]);
+            thermal_fo_flux_correction_row<scalar_t>(
+                nlay,
+                static_cast<scalar_t>(params.stream_value),
+                params.do_optical_deltam_scaling,
+                params.do_source_deltam_scaling,
+                params.n_mu,
+                static_cast<const scalar_t*>(params.mu_nodes),
+                static_cast<const scalar_t*>(params.mu_weights),
+                tau,
+                omega,
+                scaling,
+                planck,
+                surfbb,
+                emissivity,
+                out,
+                work.get());
+          }
+        },
+        grain_size);
+  });
+}
+
 void solar_fo_cpu(at::TensorIterator& iter, const SolarFoParams& params) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_solar_fo_cpu", [&] {
     const int nlay = last_dim_size(iter.input(0));
@@ -749,6 +920,75 @@ void solar_fo_cpu(at::TensorIterator& iter, const SolarFoParams& params) {
                 params.return_components,
                 params.return_profile,
                 work.get());
+          }
+        },
+        grain_size);
+  });
+}
+
+void solar_fo_plane_parallel_cpu(at::TensorIterator& iter, const SolarFoPpParams& params) {
+  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_solar_fo_plane_parallel_cpu", [&] {
+    const int nlay = last_dim_size(iter.input(0));
+    const auto grain_size =
+        std::max<int64_t>(1, iter.numel() / std::max<int>(1, at::get_num_threads()));
+    const auto workspace_size = solar_fo_pp_workspace_bytes<scalar_t>(nlay);
+    iter.for_each(
+        [&](char** data, const int64_t* strides, int64_t n) {
+          std::unique_ptr<char[]> work = std::make_unique<char[]>(workspace_size);
+          for (int64_t i = 0; i < n; ++i) {
+            auto* out = reinterpret_cast<scalar_t*>(data[0] + i * strides[0]);
+            auto* tau = reinterpret_cast<const scalar_t*>(data[1] + i * strides[1]);
+            auto* omega = reinterpret_cast<const scalar_t*>(data[2] + i * strides[2]);
+            auto* scaling = reinterpret_cast<const scalar_t*>(data[3] + i * strides[3]);
+            auto* surface_reflectance =
+                reinterpret_cast<const scalar_t*>(data[4] + i * strides[4]);
+            auto* flux_factor = reinterpret_cast<const scalar_t*>(data[5] + i * strides[5]);
+            auto* exact_scatter = reinterpret_cast<const scalar_t*>(data[6] + i * strides[6]);
+            solar_fo_pp_row<scalar_t>(
+                nlay,
+                static_cast<scalar_t>(params.mu0),
+                static_cast<scalar_t>(params.user_stream),
+                tau,
+                omega,
+                scaling,
+                surface_reflectance,
+                flux_factor,
+                exact_scatter,
+                out,
+                params.return_profile,
+                work.get());
+          }
+        },
+        grain_size);
+  });
+}
+
+void solar_fo_flux_correction_cpu(at::TensorIterator& iter, const SolarFoFluxParams& params) {
+  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_solar_fo_flux_correction_cpu", [&] {
+    const int nlay = last_dim_size(iter.input(0));
+    const auto grain_size =
+        std::max<int64_t>(1, iter.numel() / std::max<int>(1, at::get_num_threads()));
+    iter.for_each(
+        [&](char** data, const int64_t* strides, int64_t n) {
+          for (int64_t i = 0; i < n; ++i) {
+            auto* out = reinterpret_cast<scalar_t*>(data[0] + i * strides[0]);
+            auto* tau = reinterpret_cast<const scalar_t*>(data[1] + i * strides[1]);
+            auto* omega = reinterpret_cast<const scalar_t*>(data[2] + i * strides[2]);
+            auto* scaling = reinterpret_cast<const scalar_t*>(data[3] + i * strides[3]);
+            auto* surface_reflectance =
+                reinterpret_cast<const scalar_t*>(data[4] + i * strides[4]);
+            auto* flux_factor = reinterpret_cast<const scalar_t*>(data[5] + i * strides[5]);
+            solar_fo_flux_correction_row<scalar_t>(
+                nlay,
+                static_cast<scalar_t>(params.stream_value),
+                static_cast<scalar_t>(params.mu0),
+                params.do_optical_deltam_scaling,
+                tau,
+                omega,
+                scaling,
+                surface_reflectance,
+                flux_factor,
+                out);
           }
         },
         grain_size);
@@ -1225,6 +1465,68 @@ at::Tensor thermal_fo(
   return (return_components || return_profile) ? output : output.select(1, 0);
 }
 
+at::Tensor thermal_fo_flux_correction(
+    at::Tensor tau,
+    at::Tensor omega,
+    at::Tensor scaling,
+    at::Tensor planck,
+    at::Tensor surfbb,
+    at::Tensor emissivity,
+    at::Tensor mu_nodes,
+    at::Tensor mu_weights,
+    double stream_value,
+    bool do_optical_deltam_scaling,
+    bool do_source_deltam_scaling) {
+  TORCH_CHECK(tau.is_floating_point(), "thermal_fo_flux_correction expects floating tensors");
+  TORCH_CHECK(tau.dim() == 2, "thermal_fo_flux_correction tau must have shape (rows, nlay)");
+  check_same_shape(omega, tau, "thermal_fo_flux_correction omega must match tau shape");
+  check_same_shape(scaling, tau, "thermal_fo_flux_correction scaling must match tau shape");
+  check_matrix_min_cols(
+      planck,
+      tau.size(0),
+      tau.size(1) + 1,
+      "thermal_fo_flux_correction planck must have shape (rows, nlay + 1)");
+  check_vector_size(surfbb, tau.size(0), "thermal_fo_flux_correction surfbb must have shape (rows,)");
+  check_vector_size(
+      emissivity, tau.size(0), "thermal_fo_flux_correction emissivity must have shape (rows,)");
+  TORCH_CHECK(mu_nodes.dim() == 1, "thermal_fo_flux_correction mu_nodes must have shape (n_mu,)");
+  TORCH_CHECK(
+      mu_weights.dim() == 1, "thermal_fo_flux_correction mu_weights must have shape (n_mu,)");
+  TORCH_CHECK(
+      mu_nodes.size(0) > 0, "thermal_fo_flux_correction requires at least one mu node");
+  check_same_shape(
+      mu_weights, mu_nodes, "thermal_fo_flux_correction mu_weights must match mu_nodes shape");
+  check_all_same_dtype_device(
+      tau,
+      "thermal_fo_flux_correction",
+      omega,
+      scaling,
+      planck,
+      surfbb,
+      emissivity,
+      mu_nodes,
+      mu_weights);
+
+  auto tau_c = tau.contiguous();
+  auto omega_c = omega.contiguous();
+  auto scaling_c = scaling.contiguous();
+  auto planck_c = planck.contiguous();
+  auto surfbb_c = surfbb.contiguous();
+  auto emissivity_c = emissivity.contiguous();
+  auto mu_nodes_c = mu_nodes.contiguous();
+  auto mu_weights_c = mu_weights.contiguous();
+  ThermalFoFluxParams params{
+      stream_value,
+      do_optical_deltam_scaling,
+      do_source_deltam_scaling,
+      static_cast<int>(mu_nodes_c.size(0)),
+      mu_nodes_c.data_ptr(),
+      mu_weights_c.data_ptr(),
+  };
+  return run_thermal_fo_flux_correction(
+      tau_c, omega_c, scaling_c, planck_c, surfbb_c, emissivity_c, params);
+}
+
 at::Tensor solar_fo(
     at::Tensor tau,
     at::Tensor omega,
@@ -1324,6 +1626,75 @@ at::Tensor solar_fo(
   };
   PY2SESS_DISPATCH_KERNEL(output, solar_fo_cpu, solar_fo_cuda, iter, params);
   return (return_components || return_profile) ? output : output.select(1, 0);
+}
+
+at::Tensor solar_fo_plane_parallel(
+    at::Tensor tau,
+    at::Tensor omega,
+    at::Tensor scaling,
+    at::Tensor surface_reflectance,
+    at::Tensor flux_factor,
+    at::Tensor exact_scatter,
+    double mu0,
+    double user_stream,
+    bool return_profile) {
+  check_solar_fo_pp_inputs(
+      tau,
+      omega,
+      scaling,
+      surface_reflectance,
+      flux_factor,
+      exact_scatter,
+      "solar_fo_plane_parallel");
+  auto tau_c = tau.contiguous();
+  auto omega_c = omega.contiguous();
+  auto scaling_c = scaling.contiguous();
+  auto surface_reflectance_c = surface_reflectance.contiguous();
+  auto flux_factor_c = flux_factor.contiguous();
+  auto exact_scatter_c = exact_scatter.contiguous();
+  SolarFoPpParams params{
+      mu0,
+      user_stream,
+      return_profile,
+  };
+  return run_solar_fo_plane_parallel(
+      tau_c,
+      omega_c,
+      scaling_c,
+      surface_reflectance_c,
+      flux_factor_c,
+      exact_scatter_c,
+      params);
+}
+
+at::Tensor solar_fo_flux_correction(
+    at::Tensor tau,
+    at::Tensor omega,
+    at::Tensor scaling,
+    at::Tensor surface_reflectance,
+    at::Tensor flux_factor,
+    double stream_value,
+    double mu0,
+    bool do_optical_deltam_scaling) {
+  check_solar_fo_flux_inputs(
+      tau,
+      omega,
+      scaling,
+      surface_reflectance,
+      flux_factor,
+      "solar_fo_flux_correction");
+  auto tau_c = tau.contiguous();
+  auto omega_c = omega.contiguous();
+  auto scaling_c = scaling.contiguous();
+  auto surface_reflectance_c = surface_reflectance.contiguous();
+  auto flux_factor_c = flux_factor.contiguous();
+  SolarFoFluxParams params{
+      stream_value,
+      mu0,
+      do_optical_deltam_scaling,
+  };
+  return run_solar_fo_flux_correction(
+      tau_c, omega_c, scaling_c, surface_reflectance_c, flux_factor_c, params);
 }
 
 at::Tensor solar_2s_packed(

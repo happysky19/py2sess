@@ -14,6 +14,7 @@ from py2sess.rtsolver.backend import has_torch, to_numpy
 from py2sess.rtsolver.native_backend import (
     native_backend_supports_device,
     solve_solar_fo,
+    solve_solar_fo_plane_parallel,
     solve_thermal_fo,
 )
 
@@ -157,6 +158,129 @@ class NativeBackendTests(unittest.TestCase):
 
     @unittest.skipUnless(has_torch(), "torch is not installed")
     @unittest.skipUnless(native_extension_available(), "py2sess._native is not built")
+    def test_native_thermal_include_fo_fluxes_match_scalar_rows(self) -> None:
+        kwargs = dict(
+            tau=np.array([[1.0e-14, 1.0e-14, 1.0e-14], [0.15, 0.25, 0.35]]),
+            ssa=np.array([[0.45, 0.55, 0.6], [0.1, 0.1, 0.1]]),
+            g=np.full((2, 3), 0.2),
+            z=np.array([3.0, 2.0, 1.0, 0.0]),
+            angles=30.0,
+            stream=0.5,
+            planck=np.array([[0.09, 0.07, 0.06, 0.055], [0.8, 0.9, 1.0, 1.1]]),
+            surface_planck=np.array([1.4, 1.2]),
+            emissivity=np.array([0.9, 0.85]),
+            albedo=np.array([0.05, 0.08]),
+            delta_m_truncation_factor=np.zeros((2, 3)),
+        )
+        native = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="thermal",
+                backend="native",
+                torch_dtype="float64",
+                plane_parallel=True,
+                output_fluxes=True,
+                fo_flux_n_mu=4,
+                fo_flux_n_phi=6,
+            )
+        ).forward(**kwargs, include_fo=True)
+        for row in range(2):
+            scalar = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=3,
+                    mode="thermal",
+                    plane_parallel=True,
+                    output_fluxes=True,
+                    fo_flux_n_mu=4,
+                    fo_flux_n_phi=6,
+                )
+            ).forward(
+                tau=kwargs["tau"][row],
+                ssa=kwargs["ssa"][row],
+                g=kwargs["g"][row],
+                z=kwargs["z"],
+                angles=kwargs["angles"],
+                stream=kwargs["stream"],
+                planck=kwargs["planck"][row],
+                surface_planck=kwargs["surface_planck"][row],
+                emissivity=kwargs["emissivity"][row],
+                albedo=kwargs["albedo"][row],
+                delta_m_truncation_factor=kwargs["delta_m_truncation_factor"][row],
+                include_fo=True,
+            )
+            for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+                np.testing.assert_allclose(
+                    to_numpy(getattr(native, field))[row],
+                    getattr(scalar, field)[0],
+                    rtol=1.0e-11,
+                    atol=1.0e-11,
+                )
+        self.assertGreaterEqual(float(np.min(to_numpy(native.flux_down))), -1.0e-14)
+
+    @unittest.skipUnless(has_torch(), "torch is not installed")
+    @unittest.skipUnless(native_extension_available(), "py2sess._native is not built")
+    def test_native_solar_include_fo_fluxes_match_scalar_rows(self) -> None:
+        kwargs = dict(
+            tau=np.array([[0.02, 0.03, 0.04], [0.015, 0.025, 0.035]]),
+            ssa=np.array([[0.12, 0.10, 0.08], [0.08, 0.12, 0.10]]),
+            g=np.array([[0.1, 0.2, 0.15], [0.05, 0.1, 0.2]]),
+            z=np.array([3.0, 2.0, 1.0, 0.0]),
+            angles=[30.0, 20.0, 0.0],
+            stream=0.5,
+            albedo=np.array([0.15, 0.25]),
+            fbeam=np.array([1.0, 0.8]),
+            delta_m_truncation_factor=np.zeros((2, 3), dtype=float),
+        )
+        native = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="native",
+                torch_dtype="float64",
+                plane_parallel=True,
+                output_levels=True,
+                output_fluxes=True,
+            )
+        ).forward(**kwargs, include_fo=True, fo_n_moments=3)
+        for row in range(2):
+            scalar = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=3,
+                    mode="solar",
+                    plane_parallel=True,
+                    output_levels=True,
+                    output_fluxes=True,
+                )
+            ).forward(
+                tau=kwargs["tau"][row],
+                ssa=kwargs["ssa"][row],
+                g=kwargs["g"][row],
+                z=kwargs["z"],
+                angles=kwargs["angles"],
+                stream=kwargs["stream"],
+                albedo=kwargs["albedo"][row],
+                fbeam=kwargs["fbeam"][row],
+                delta_m_truncation_factor=kwargs["delta_m_truncation_factor"][row],
+                include_fo=True,
+                fo_n_moments=3,
+            )
+            for field in (
+                "radiance_profile_total",
+                "radiance_total",
+                "flux_up",
+                "flux_down",
+                "flux_net",
+                "flux_mean",
+            ):
+                np.testing.assert_allclose(
+                    to_numpy(getattr(native, field))[row],
+                    getattr(scalar, field)[0],
+                    rtol=1.0e-11,
+                    atol=1.0e-11,
+                )
+
+    @unittest.skipUnless(has_torch(), "torch is not installed")
+    @unittest.skipUnless(native_extension_available(), "py2sess._native is not built")
     def test_native_solar_fo_matches_torch_batch_kernel(self) -> None:
         import torch
 
@@ -225,6 +349,45 @@ class NativeBackendTests(unittest.TestCase):
         np.testing.assert_allclose(
             to_numpy(native_direct), to_numpy(torch_direct), rtol=1.0e-12, atol=1.0e-12
         )
+
+    @unittest.skipUnless(has_torch(), "torch is not installed")
+    @unittest.skipUnless(native_extension_available(), "py2sess._native is not built")
+    def test_native_solar_plane_parallel_fo_matches_scalar_kernel(self) -> None:
+        import torch
+
+        dtype = torch.float64
+        tau = torch.tensor([[0.01, 0.02, 0.03], [0.015, 0.025, 0.035]], dtype=dtype)
+        omega = torch.full((2, 3), 0.2, dtype=dtype)
+        scaling = torch.zeros_like(tau)
+        surface = torch.tensor([0.1, 0.2], dtype=dtype)
+        flux_factor = torch.tensor([1.0, 0.8], dtype=dtype)
+        exact_scatter = torch.tensor([[0.02, 0.03, 0.04], [0.025, 0.035, 0.045]], dtype=dtype)
+        native = solve_solar_fo_plane_parallel(
+            tau=tau,
+            omega=omega,
+            scaling=scaling,
+            surface_reflectance=surface,
+            flux_factor=flux_factor,
+            exact_scatter=exact_scatter,
+            mu0=float(np.cos(np.deg2rad(30.0))),
+            user_stream=float(np.cos(np.deg2rad(20.0))),
+            return_profile=True,
+        )
+        for row in range(2):
+            scalar = solve_solar_fo_plane_parallel(
+                tau=tau[row : row + 1],
+                omega=omega[row : row + 1],
+                scaling=scaling[row : row + 1],
+                surface_reflectance=surface[row : row + 1],
+                flux_factor=flux_factor[row : row + 1],
+                exact_scatter=exact_scatter[row : row + 1],
+                mu0=float(np.cos(np.deg2rad(30.0))),
+                user_stream=float(np.cos(np.deg2rad(20.0))),
+                return_profile=True,
+            )
+            np.testing.assert_allclose(
+                to_numpy(native[row]), to_numpy(scalar[0]), rtol=1.0e-12, atol=1.0e-12
+            )
 
     @unittest.skipUnless(has_torch(), "torch is not installed")
     @unittest.skipUnless(native_extension_available(), "py2sess._native is not built")
@@ -306,7 +469,7 @@ class NativeBackendTests(unittest.TestCase):
                 output_levels=True,
                 output_fluxes=True,
             )
-        ).forward(**kwargs, surface_leaving=surface_leaving, include_fo=True)
+        ).forward(**kwargs, surface_leaving=surface_leaving)
         for row in range(2):
             scalar = TwoStreamEss(
                 TwoStreamEssOptions(
@@ -328,7 +491,6 @@ class NativeBackendTests(unittest.TestCase):
                     "slterm_isotropic": surface_leaving["slterm_isotropic"][row],
                     "slterm_f_0": surface_leaving["slterm_f_0"][row],
                 },
-                include_fo=True,
             )
             for field in ("radiance_profile_2s", "radiance_profile_total", "radiance_total"):
                 np.testing.assert_allclose(

@@ -180,6 +180,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       pybind11::arg("return_components") = false,
       pybind11::arg("return_profile") = false);
   m.def(
+      "thermal_fo_flux_correction",
+      &py2sess_native::thermal_fo_flux_correction,
+      pybind11::arg("tau"),
+      pybind11::arg("omega"),
+      pybind11::arg("scaling"),
+      pybind11::arg("planck"),
+      pybind11::arg("surfbb"),
+      pybind11::arg("emissivity"),
+      pybind11::arg("mu_nodes"),
+      pybind11::arg("mu_weights"),
+      pybind11::arg("stream_value"),
+      pybind11::arg("do_optical_deltam_scaling") = true,
+      pybind11::arg("do_source_deltam_scaling") = false);
+  m.def(
       "solar_2s",
       &py2sess_native::solar_2s,
       pybind11::arg("tau"),
@@ -224,6 +238,29 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       pybind11::arg("do_nadir"),
       pybind11::arg("return_components") = false,
       pybind11::arg("return_profile") = false);
+  m.def(
+      "solar_fo_plane_parallel",
+      &py2sess_native::solar_fo_plane_parallel,
+      pybind11::arg("tau"),
+      pybind11::arg("omega"),
+      pybind11::arg("scaling"),
+      pybind11::arg("surface_reflectance"),
+      pybind11::arg("flux_factor"),
+      pybind11::arg("exact_scatter"),
+      pybind11::arg("mu0"),
+      pybind11::arg("user_stream"),
+      pybind11::arg("return_profile") = false);
+  m.def(
+      "solar_fo_flux_correction",
+      &py2sess_native::solar_fo_flux_correction,
+      pybind11::arg("tau"),
+      pybind11::arg("omega"),
+      pybind11::arg("scaling"),
+      pybind11::arg("surface_reflectance"),
+      pybind11::arg("flux_factor"),
+      pybind11::arg("stream_value"),
+      pybind11::arg("mu0"),
+      pybind11::arg("do_optical_deltam_scaling") = true);
   m.def(
       "solar_2s_packed",
       &py2sess_native::solar_2s_packed,

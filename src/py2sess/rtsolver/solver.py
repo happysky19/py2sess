@@ -816,13 +816,14 @@ def _solve_bvp(
     eigentrans: np.ndarray,
     stream_value: float,
     direct_beam: float,
+    top_boundary_down: float,
     wupper: np.ndarray,
     wlower: np.ndarray,
     bvp_solver: str = "scipy",
 ) -> tuple[np.ndarray, np.ndarray]:
     ntotal = 2 * nlay
     rhs = np.zeros(ntotal, dtype=float)
-    rhs[0] = -wupper[0, 0]
+    rhs[0] = top_boundary_down - wupper[0, 0]
     row = 1
     for n in range(1, nlay):
         rhs[row] = wupper[0, n] - wlower[0, n - 1]
@@ -1106,6 +1107,12 @@ def _solve_bvp_pentadiag(
     lcon = col[0::2].copy()
     mcon = col[1::2].copy()
     return lcon, mcon
+
+
+def _top_isotropic_twostream_boundary(prepared: PreparedInputs, fourier: int) -> float:
+    if fourier != 0 or prepared.fisot == 0.0:
+        return 0.0
+    return prepared.fisot / (2.0 * prepared.stream_value)
 
 
 def _direct_beam(
@@ -1695,6 +1702,7 @@ def _solve_optimized_thermal(prepared: PreparedInputs, options) -> dict[str, np.
         eigentrans=eigentrans,
         stream_value=prepared.stream_value,
         direct_beam=0.0,
+        top_boundary_down=0.0,
         wupper=t_wupper,
         wlower=t_wlower,
         bvp_solver=options.bvp_solver,
@@ -1982,6 +1990,7 @@ def solve_optimized_solar_obs(prepared: PreparedInputs, options) -> dict[str, np
                     eigentrans=eigentrans,
                     stream_value=prepared.stream_value,
                     direct_beam=direct_beam_terms[ib],
+                    top_boundary_down=_top_isotropic_twostream_boundary(prepared, fourier),
                     wupper=wupper,
                     wlower=wlower,
                     bvp_solver=options.bvp_solver,

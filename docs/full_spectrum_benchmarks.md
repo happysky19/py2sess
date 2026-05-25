@@ -86,13 +86,9 @@ the prepared inputs along the spectral dimension. CUDA timings through the
 public NumPy-input API include host-to-device tensor transfer; workflows that
 keep tensors on GPU may time differently.
 
-The reference Colab Tesla T4 result below was generated from
-[`docs/assets/cuda_colab_t4_scaling.csv`](assets/cuda_colab_t4_scaling.csv)
-with [`scripts/plot_cuda_colab_t4_scaling.py`](../scripts/plot_cuda_colab_t4_scaling.py).
-The plotting script requires matplotlib. It is a reproducibility reference for
-this environment, not a general performance guarantee.
-
-![py2sess CUDA scaling on Colab Tesla T4](assets/cuda_colab_t4_scaling.svg)
+CUDA speed depends on the device, dtype, transfer pattern, and chunking. Keep
+the raw benchmark CSV files with any reported timing table so results can be
+checked against the exact command and environment.
 
 ## Inputs
 

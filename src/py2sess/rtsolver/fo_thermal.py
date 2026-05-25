@@ -239,13 +239,38 @@ def _plane_parallel_up_sources(
     lostrans_up = np.zeros(nlayers, dtype=float)
     sources_up = np.zeros(nlayers, dtype=float)
     for n in range(nlayers):
-        lostau = float(deltaus[n]) / mu1v
-        lostrans = np.exp(-lostau) if lostau < cutoff else 0.0
-        t_mult_up1 = tcom[0, n] + tcom[1, n] * mu1v
-        t_mult_up0 = -t_mult_up1 - tcom[1, n] * float(deltaus[n])
+        lostrans, source_up, _ = _linear_layer_source_terms(
+            delta=float(deltaus[n]),
+            source0=float(tcom[0, n]),
+            source1=float(tcom[1, n]),
+            mu=mu1v,
+            cutoff=cutoff,
+        )
         lostrans_up[n] = lostrans
-        sources_up[n] = t_mult_up0 * lostrans + t_mult_up1
+        sources_up[n] = source_up
     return lostrans_up, sources_up
+
+
+def _linear_layer_source_terms(
+    *,
+    delta: float,
+    source0: float,
+    source1: float,
+    mu: float,
+    cutoff: float,
+) -> tuple[float, float, float]:
+    path = delta / mu
+    if path < cutoff:
+        trans = float(np.exp(-path))
+        one_minus_trans = float(-np.expm1(-path))
+    else:
+        trans = 0.0
+        one_minus_trans = 1.0
+    ratio = one_minus_trans / path if path != 0.0 else 1.0
+    source_delta = source1 * delta
+    source_up = source0 * one_minus_trans + source_delta * (ratio - trans)
+    source_down = source0 * one_minus_trans + source_delta * (1.0 - ratio)
+    return trans, source_up, source_down
 
 
 def _plane_parallel_down_sources(
@@ -260,11 +285,15 @@ def _plane_parallel_down_sources(
     lostrans_dn = np.zeros(nlayers, dtype=float)
     sources_dn = np.zeros(nlayers, dtype=float)
     for n in range(nlayers - 1, -1, -1):
-        lostau = float(deltaus[n]) / mu1v
-        lostrans = np.exp(-lostau) if lostau < cutoff else 0.0
-        t_mult_dn1 = tcom[0, n] - tcom[1, n] * mu1v
+        lostrans, _, source_down = _linear_layer_source_terms(
+            delta=float(deltaus[n]),
+            source0=float(tcom[0, n]),
+            source1=float(tcom[1, n]),
+            mu=mu1v,
+            cutoff=cutoff,
+        )
         lostrans_dn[n] = lostrans
-        sources_dn[n] = -t_mult_dn1 * lostrans + t_mult_dn1 + tcom[1, n] * float(deltaus[n])
+        sources_dn[n] = source_down
     return lostrans_dn, sources_dn
 
 

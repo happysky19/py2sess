@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+*.so
 .pytest_cache/
 .mypy_cache/
 .DS_Store
@@ -10,3 +11,13 @@ benchmark_bundles/
 outputs/
 .codex/
 idea.md
+docs/assets/
+docs/copernicus_template/
+docs/fo_flux_equations.md
+docs/level_flux_benchmarks.md
+docs/level_flux_formula_review.md
+docs/paper_rt_benchmarks.md
+docs/paper_rt_release_checklist.md
+docs/py2sess_rt_benchmark_paper.*
+docs/retrieval.md
+docs/reviewer_revision_checklist.md
