@@ -870,6 +870,38 @@ class ApiTests(unittest.TestCase):
                     atol=1.0e-12,
                 )
 
+    def test_batched_torch_transparent_flux_accepts_scalar_surface_terms(self) -> None:
+        if not has_torch():
+            self.skipTest("torch not installed")
+        import torch
+
+        from py2sess.rtsolver.thermal_batch_torch import _two_stream_thermal_toa_batch
+
+        result = _two_stream_thermal_toa_batch(
+            tau=torch.zeros((2, 3), dtype=torch.float64),
+            omega=torch.zeros((2, 3), dtype=torch.float64),
+            asymm=torch.zeros((2, 3), dtype=torch.float64),
+            scaling=torch.zeros((2, 3), dtype=torch.float64),
+            thermal_bb_input=torch.ones((2, 4), dtype=torch.float64),
+            surfbb=torch.tensor(1.4, dtype=torch.float64),
+            emissivity=torch.tensor(0.9, dtype=torch.float64),
+            albedo=torch.tensor(0.1, dtype=torch.float64),
+            stream_value=0.5,
+            user_stream=1.0,
+            pxsq=0.25,
+            thermal_tcutoff=1.0e-8,
+            return_fluxes=True,
+            do_upwelling=True,
+            do_dnwelling=True,
+        )
+
+        expected_up = 2.0 * np.pi * 0.5 * 1.4 * 0.9
+        expected_mean = 0.5 * 1.4 * 0.9
+        self.assertEqual(result["flux_up"].shape, (2, 4))
+        np.testing.assert_allclose(to_numpy(result["flux_up"]), expected_up)
+        np.testing.assert_allclose(to_numpy(result["flux_down"]), 0.0)
+        np.testing.assert_allclose(to_numpy(result["flux_mean"]), expected_mean)
+
     def test_batched_numpy_output_fluxes_match_scalar_numpy(self) -> None:
         solar_kwargs = dict(
             tau=np.array([[0.01, 0.02, 0.03], [0.015, 0.025, 0.035]], dtype=float),

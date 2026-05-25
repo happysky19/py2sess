@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import argparse
+import os
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -102,6 +104,30 @@ class FullSpectrumBenchmarkTests(unittest.TestCase):
 
         args.components = True
         self.assertEqual(bench._normalize_timing_kinds(args), ("level-fluxes", "components"))
+
+    def test_pydisort_flux_export_requires_portable_input_root(self) -> None:
+        exporter = load_script(
+            "export_pydisort_full_spectrum_flux_nc",
+            "scripts/export_pydisort_full_spectrum_flux_nc.py",
+        )
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "--input-root"):
+                exporter._case_specs(None)
+
+        with mock.patch.dict(os.environ, {"PY2SESS_EXTERNAL_ROOT": "/tmp/2s-ess"}):
+            specs = exporter._case_specs(None)
+        self.assertEqual(
+            specs["tir"].profile,
+            Path("/tmp/2s-ess/geocape_data/Profile_Data/Profiles_1_2006726_0000.dat"),
+        )
+        self.assertEqual(specs["tir"].scene, ROOT / "benchmark_bundles" / "tir_scene_python.yaml")
+
+        bundled = exporter._case_specs(Path("/tmp/input_bundle"))
+        self.assertEqual(
+            bundled["uv"].profile,
+            Path("/tmp/input_bundle/profiles/Profiles_1_2006726_1500.dat"),
+        )
 
 
 if __name__ == "__main__":

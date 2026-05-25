@@ -102,9 +102,11 @@ needed; flux arrays use that same final level axis with length `nlyr + 1`.
 - `result.as_disort_flux()` returns these same arrays in pydisort's default
   level order, with canonical keys `flux_up`, `flux_down`, `flux_net`,
   `flux_mean` and legacy short keys `up`, `down`, `net`, `mean`.
-- Batched `output_fluxes=True` is currently implemented for the native backend.
-  Batched torch calls raise an explicit error instead of silently returning
-  endpoint-only fluxes.
+- Batched `output_fluxes=True` is supported for NumPy, torch, and native
+  two-stream flux outputs. With `include_fo=True`, batched thermal fluxes are
+  supported and batched solar fluxes require `plane_parallel=True` with
+  Lambertian surface reflection. Nonzero `fisot` is currently limited to scalar
+  NumPy solar runs.
 - For scalar NumPy plane-parallel solar runs, `include_fo=True` with
   `output_fluxes=True` keeps DISORT-style fluxes as moment-equation outputs by
   default. Atmospheric FO radiance corrections are not integrated back into the

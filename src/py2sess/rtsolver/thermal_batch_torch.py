@@ -231,7 +231,15 @@ def _transparent_thermal_flux_batch(
     if not return_fluxes:
         return radiance
 
-    surface_source = surfbb * emissivity
+    surface_source = _as_tensor(surfbb, dtype=tau.dtype, device=tau.device) * _as_tensor(
+        emissivity,
+        dtype=tau.dtype,
+        device=tau.device,
+    )
+    if surface_source.ndim == 0:
+        surface_source = surface_source.expand(nrows)
+    else:
+        surface_source = torch.broadcast_to(surface_source.reshape(-1), (nrows,))
     flux_up = torch.zeros((nrows, nlev), dtype=tau.dtype, device=tau.device)
     flux_down = torch.zeros_like(flux_up)
     flux_mean = torch.zeros_like(flux_up)

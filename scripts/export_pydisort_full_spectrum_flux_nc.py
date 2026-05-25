@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ from py2sess.optical.delta_m import delta_m_scale_optical_properties
 from py2sess.scene import load_scene
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_EXTERNAL_ROOT = Path("/Users/thl/MyFolder/Research/2S-ESS")
+EXTERNAL_ROOT_ENV = "PY2SESS_EXTERNAL_ROOT"
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "pydisort_full_spectrum_flux"
 CHANNELS = PYDISORT_FLUX_CHANNELS
 
@@ -39,8 +40,13 @@ class CaseSpec:
 
 def _case_specs(input_root: Path | None) -> dict[str, CaseSpec]:
     if input_root is None:
+        env_root = os.environ.get(EXTERNAL_ROOT_ENV)
+        if not env_root:
+            raise ValueError(
+                f"full-spectrum pydisort export requires --input-root or {EXTERNAL_ROOT_ENV}"
+            )
         bundle_root = ROOT / "benchmark_bundles"
-        profile_root = DEFAULT_EXTERNAL_ROOT / "geocape_data" / "Profile_Data"
+        profile_root = Path(env_root).expanduser() / "geocape_data" / "Profile_Data"
     else:
         bundle_root = input_root / "benchmark_bundles"
         profile_root = input_root / "profiles"
@@ -503,7 +509,16 @@ def _run_case(case: CaseSpec, *, args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-root", type=Path, default=None)
+    parser.add_argument(
+        "--input-root",
+        type=Path,
+        default=None,
+        help=(
+            "Portable full-spectrum input bundle root. When omitted, profile files "
+            f"are read from ${EXTERNAL_ROOT_ENV}/geocape_data/Profile_Data and scenes "
+            "from the repo benchmark_bundles directory."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--cases", default="tir,uv")
     parser.add_argument("--limit", type=int, default=None)
