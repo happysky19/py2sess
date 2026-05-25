@@ -1,37 +1,87 @@
-name: CI
+name: Continuous Integration
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  BUILD_TYPE: Release
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  lint-and-test:
+  pre-commit:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version:
-          - "3.10"
-          - "3.11"
-
     steps:
-      - name: Check out repository
+      - name: Check out code
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install package and development tools
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e . pre-commit
+      - name: Cache pre-commit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: ${{ runner.os }}-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pre-commit-
+
+      - name: Install pre-commit
+        run: python -m pip install pre-commit
 
       - name: Run pre-commit
-        run: python -m pre_commit run --all-files
+        uses: pre-commit/action@v3.0.1
+
+  build-and-test:
+    needs: pre-commit
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build ninja scikit-build-core setuptools-scm wheel
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -e ".[torch,native,speed]"
+          else
+            python -m pip install -e ".[torch,native,speed]"
+          fi
+
+      - name: Configure CMake
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel 3
+
+      - name: Build package distributions
+        run: python -m build
+
+      - name: Import smoke test
+        run: python -c "import py2sess"
 
       - name: Run test suite
         env:
