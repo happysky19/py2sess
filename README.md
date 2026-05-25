@@ -7,11 +7,32 @@ optional torch backends. It does not call the original Fortran code.
 ## Install
 
 ```bash
-python3 -m pip install -e .
+python3 -m pip install .
 python3 -m pip install -e ".[torch,dev]"
 ```
 
 For source-tree runs without installation, set `PYTHONPATH=src`.
+
+## Build
+
+`py2sess` uses CMake through `scikit-build-core`. The current release is pure
+Python, so CMake prepares the build tree and leaves room for future native
+kernels without changing the package layout.
+
+```bash
+cmake -S . -B build
+cmake --build build
+python3 -m build
+```
+
+Releases are tagged from merged PRs by GitHub Actions. Add a `release:major`,
+`release:minor`, or `release:patch` label to the PR before merging; the default
+is `release:patch`.
+
+PyPI publication uses Trusted Publishing. Configure PyPI to trust
+`happysky19/py2sess`, workflow `.github/workflows/release.yml`, and the `pypi`
+GitHub environment, then run the `Publish to PyPI` GitHub Actions workflow for
+the tag.
 
 ## Quick Start
 

@@ -1,0 +1,188 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish, for example v0.4.0"
+        required: true
+      build_os:
+        description: "OS"
+        required: true
+        default: "Both"
+        type: choice
+        options:
+          - Both
+          - MacOS
+          - Ubuntu
+
+concurrency:
+  group: publish-pypi-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  BUILD_TYPE: Release
+  LINUX_ARCH: x86_64
+  MACOS_ARCH: arm64
+  HOST_PYTHON: "3.11"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-macos:
+    name: Build macOS Wheels
+    if: ${{ github.event.inputs.build_os == 'Both' || github.event.inputs.build_os == 'MacOS' }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Setup Host Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.HOST_PYTHON }}
+          cache: pip
+
+      - name: Configure macOS build env
+        run: |
+          PV=${{ matrix.python-version }}
+          PV=${PV//./}
+          echo "PY_VERSION=$PV" >> "$GITHUB_ENV"
+          echo "CIBW_BUILD=cp${PV}*" >> "$GITHUB_ENV"
+          echo "ARCHFLAGS=-arch ${{ env.MACOS_ARCH }}" >> "$GITHUB_ENV"
+
+      - name: Build macOS wheel
+        env:
+          CIBW_PLATFORM: macos
+          CIBW_ARCHS: ${{ env.MACOS_ARCH }}
+          CIBW_BEFORE_BUILD: |
+            pip install 'cmake<=3.30' ninja
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+                  -DCMAKE_OSX_ARCHITECTURES=${{ env.MACOS_ARCH }}
+            cmake --build build --config ${{ env.BUILD_TYPE }} --parallel 3
+          CIBW_TEST_COMMAND: python -c "import py2sess; from py2sess.reference_cases import load_tir_benchmark_case; load_tir_benchmark_case()"
+        run: |
+          pip install cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse
+
+      - name: Upload macOS wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.python-version }}-${{ env.MACOS_ARCH }}
+          path: wheelhouse/*.whl
+
+  build-linux:
+    name: Build Linux Wheels
+    if: ${{ github.event.inputs.build_os == 'Both' || github.event.inputs.build_os == 'Ubuntu' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Setup Host Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.HOST_PYTHON }}
+          cache: pip
+
+      - name: Configure Linux build env
+        run: |
+          PV=${{ matrix.python-version }}
+          PV=${PV//./}
+          echo "PY_VERSION=$PV" >> "$GITHUB_ENV"
+          echo "CIBW_BUILD=cp${PV}*" >> "$GITHUB_ENV"
+
+      - name: Build Linux wheel
+        env:
+          CIBW_PLATFORM: linux
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_ARCHS: ${{ env.LINUX_ARCH }}
+          CIBW_SKIP: "*musllinux*"
+          CIBW_BEFORE_BUILD: |
+            pip install 'cmake<=3.30' ninja
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+            cmake --build build --config ${{ env.BUILD_TYPE }} --parallel 3
+          CIBW_TEST_COMMAND: python -c "import py2sess; from py2sess.reference_cases import load_tir_benchmark_case; load_tir_benchmark_case()"
+        run: |
+          pip install cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse
+
+      - name: Upload Linux wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.python-version }}-${{ env.LINUX_ARCH }}
+          path: wheelhouse/*.whl
+
+  build-sdist:
+    name: Build Source Distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.HOST_PYTHON }}
+          cache: pip
+
+      - name: Build sdist
+        run: |
+          python -m pip install build
+          python -m build --sdist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build-macos, build-linux, build-sdist]
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Aggregate into dist
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec mv {} dist/ \;
+
+      - name: Check distributions
+        run: |
+          python -m pip install twine
+          python -m twine check dist/*
+
+      - name: Publish to PyPI
+        if: ${{ needs.build-sdist.result == 'success' && (needs.build-macos.result == 'success' || needs.build-linux.result == 'success') }}
+        uses: pypa/gh-action-pypi-publish@release/v1
