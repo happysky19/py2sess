@@ -67,7 +67,7 @@ wheel.packages = ["src/py2sess"]
 sdist.include = ["CMakeLists.txt", "native/**", "src/py2sess/data/benchmark/*.npz"]
 
 [tool.setuptools_scm]
-fallback_version = "0.4.0"
+fallback_version = "0.4.1"
 
 [tool.ruff]
 target-version = "py310"

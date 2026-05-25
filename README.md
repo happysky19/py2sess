@@ -11,18 +11,31 @@ python3 -m pip install .
 python3 -m pip install -e ".[torch,dev]"
 ```
 
+The optional native backend requires PyTorch:
+
+```bash
+python3 -m pip install "py2sess[native]"
+```
+
 For source-tree runs without installation, set `PYTHONPATH=src`.
 
 ## Build
 
-`py2sess` uses CMake through `scikit-build-core`. The current release is pure
-Python, so CMake prepares the build tree and leaves room for future native
-kernels without changing the package layout.
+`py2sess` uses CMake through `scikit-build-core`. By default, source builds
+prepare the Python package without compiling the optional native backend.
 
 ```bash
 cmake -S . -B build
 cmake --build build
 python3 -m build
+```
+
+To build a local wheel with the native backend, install PyTorch and build
+without PEP 517 isolation so CMake can find Torch:
+
+```bash
+python3 -m pip install build scikit-build-core setuptools-scm torch
+python3 -m build --wheel --no-isolation -Ccmake.define.PY2SESS_BUILD_NATIVE=ON
 ```
 
 Releases are tagged from merged PRs by GitHub Actions. Add a `release:major`,
@@ -32,7 +45,8 @@ is `release:patch`.
 PyPI publication uses Trusted Publishing. Configure PyPI to trust
 `happysky19/py2sess`, workflow `.github/workflows/release.yml`, and the `pypi`
 GitHub environment, then run the `Publish to PyPI` GitHub Actions workflow for
-the tag.
+the tag. The release workflow currently publishes macOS arm64 native wheels and
+the source distribution.
 
 ## Quick Start
 
