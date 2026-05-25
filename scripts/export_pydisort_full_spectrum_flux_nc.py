@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
 
 from py2sess.benchmarks.flux_references import (
     PYDISORT_FLUX_CHANNELS,
@@ -27,6 +26,11 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTERNAL_ROOT_ENV = "PY2SESS_EXTERNAL_ROOT"
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "pydisort_full_spectrum_flux"
 CHANNELS = PYDISORT_FLUX_CHANNELS
+
+try:
+    import torch
+except ImportError:  # pragma: no cover - exercised in minimal CI environments
+    torch = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,12 @@ def _require_pydisort():
     except ImportError as exc:  # pragma: no cover
         raise ImportError("pydisort is required: pip install pydisort") from exc
     return pydisort
+
+
+def _require_torch():
+    if torch is None:  # pragma: no cover
+        raise ImportError("torch is required: pip install torch") from None
+    return torch
 
 
 def _hg_moments(g: np.ndarray, nmom: int) -> np.ndarray:
@@ -543,7 +553,8 @@ def main() -> None:
         raise ValueError("--compression must be in [0, 9]")
     if args.overwrite and args.resume:
         raise ValueError("--overwrite and --resume are mutually exclusive")
-    torch.set_num_threads(args.torch_threads)
+    torch_module = _require_torch()
+    torch_module.set_num_threads(args.torch_threads)
 
     specs = _case_specs(args.input_root)
     summaries = [_run_case(specs[key], args=args) for key in _split_cases(args.cases)]
