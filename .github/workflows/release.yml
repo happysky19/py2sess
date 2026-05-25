@@ -49,6 +49,10 @@ env:
   BUILD_TYPE: Release
   MACOS_ARCH: arm64
   HOST_PYTHON: "3.11"
+  CUDA_TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu128"
+  CUDA_TORCH_VERSION: "2.10.0+cu128"
+  CPU_TORCH_INDEX_URL: "https://download.pytorch.org/whl/cpu"
+  CPU_TORCH_VERSION: "2.10.0+cpu"
 
 defaults:
   run:
@@ -144,29 +148,42 @@ jobs:
             echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PY2SESS=${{ github.event.inputs.version }}" >> "$GITHUB_ENV"
           fi
 
-      - name: Build Linux wheel
+      - name: Free Linux runner disk space
+        run: |
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          python -m pip cache purge || true
+          df -h
+
+      - name: Build Linux CUDA-capable wheel
         env:
           CIBW_PLATFORM: linux
           CIBW_ARCHS: x86_64
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.8
           CIBW_SKIP: "*musllinux*"
           CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
-          CIBW_CONFIG_SETTINGS: "cmake.define.PY2SESS_BUILD_NATIVE=ON"
+          CIBW_CONFIG_SETTINGS: "cmake.define.PY2SESS_BUILD_NATIVE=ON cmake.define.PY2SESS_NATIVE_CUDA=ON"
           CIBW_BEFORE_BUILD: |
             python -m pip install 'cmake<=3.30' ninja build scikit-build-core setuptools-scm
-            python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+            python -m pip install --index-url '${{ env.CUDA_TORCH_INDEX_URL }}' 'torch==${{ env.CUDA_TORCH_VERSION }}'
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: |
             export TORCH_LIB=$(python -c 'import torch; print(torch.__path__[0] + "/lib")')
             export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
             auditwheel repair \
               --exclude libtorch.so \
               --exclude libtorch_cpu.so \
+              --exclude libtorch_cuda.so \
               --exclude libtorch_python.so \
               --exclude libc10.so \
+              --exclude libc10_cuda.so \
+              --exclude libcudart.so.12 \
+              --exclude libnvrtc.so.12 \
               -w {dest_dir} {wheel}
           CIBW_BEFORE_TEST: |
-            python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
-          CIBW_TEST_COMMAND: python -c "import importlib, torch, py2sess; native = importlib.import_module('py2sess._native'); info = py2sess.native_backend_info(); print(info); assert info['available'], info; assert info['level_fluxes'], info; from py2sess.reference_cases import load_tir_benchmark_case, load_uv_benchmark_case; load_tir_benchmark_case(); load_uv_benchmark_case()"
+            python -m pip install --index-url '${{ env.CPU_TORCH_INDEX_URL }}' 'torch==${{ env.CPU_TORCH_VERSION }}'
+          CIBW_TEST_COMMAND: python -c "import importlib, importlib.util, torch, py2sess; native = importlib.import_module('py2sess._native'); assert importlib.util.find_spec('py2sess._native_cuda') is not None; info = py2sess.native_backend_info(); print(info); assert info['available'], info; assert not info['cuda'], info; assert info['level_fluxes'], info; from py2sess.reference_cases import load_tir_benchmark_case, load_uv_benchmark_case; load_tir_benchmark_case(); load_uv_benchmark_case()"
         run: |
           pip install cibuildwheel
           python -m cibuildwheel --output-dir wheelhouse
@@ -203,12 +220,13 @@ jobs:
           CIBW_PLATFORM: linux
           CIBW_ARCHS: x86_64
           CIBW_BUILD: cp311*
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.8
           CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
           CIBW_CONFIG_SETTINGS: "cmake.define.PY2SESS_BUILD_NATIVE=ON cmake.define.PY2SESS_NATIVE_CUDA=ON"
           CIBW_CONTAINER_ENGINE: "docker; create_args: --gpus all"
           CIBW_BEFORE_BUILD: |
-            python -m pip install 'cmake<=3.30' ninja build scikit-build-core setuptools-scm torch
+            python -m pip install 'cmake<=3.30' ninja build scikit-build-core setuptools-scm
+            python -m pip install --index-url '${{ env.CUDA_TORCH_INDEX_URL }}' 'torch==${{ env.CUDA_TORCH_VERSION }}'
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: |
             export TORCH_LIB=$(python -c 'import torch; print(torch.__path__[0] + "/lib")')
             export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
@@ -219,9 +237,12 @@ jobs:
               --exclude libtorch_python.so \
               --exclude libc10.so \
               --exclude libc10_cuda.so \
+              --exclude libcudart.so.12 \
+              --exclude libnvrtc.so.12 \
               -w {dest_dir} {wheel}
-          CIBW_TEST_REQUIRES: "torch"
-          CIBW_TEST_COMMAND: python -c "import importlib, torch, py2sess; assert torch.cuda.is_available(); native = importlib.import_module('py2sess._native'); info = py2sess.native_backend_info(); print(info); assert info['available'] and info['cuda'], info"
+          CIBW_BEFORE_TEST: |
+            python -m pip install --index-url '${{ env.CUDA_TORCH_INDEX_URL }}' 'torch==${{ env.CUDA_TORCH_VERSION }}'
+          CIBW_TEST_COMMAND: python -c "import importlib, torch, py2sess; assert torch.cuda.is_available(); native = importlib.import_module('py2sess._native'); cuda_native = importlib.import_module('py2sess._native_cuda'); info = py2sess.native_backend_info(); print(info); assert info['available'] and info['cuda'], info"
         run: |
           pip install cibuildwheel
           python -m cibuildwheel --output-dir wheelhouse

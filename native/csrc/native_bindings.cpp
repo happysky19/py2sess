@@ -1,15 +1,24 @@
 #include <torch/extension.h>
 
 #include "native_dispatch.hpp"
+
+#ifndef PY2SESS_BIND_NATIVE_MODULE_CLASS
+#define PY2SESS_BIND_NATIVE_MODULE_CLASS 1
+#endif
+
+#if PY2SESS_BIND_NATIVE_MODULE_CLASS
 #include "native_module.hpp"
 
 #include <map>
 #include <sstream>
+#endif
+
 #include <string>
 
 namespace py2sess_native {
 namespace {
 
+#if PY2SESS_BIND_NATIVE_MODULE_CLASS
 std::map<std::string, at::Tensor> tensor_kwargs(const pybind11::kwargs& kwargs) {
   std::map<std::string, at::Tensor> bc;
   for (auto item : kwargs) {
@@ -19,6 +28,7 @@ std::map<std::string, at::Tensor> tensor_kwargs(const pybind11::kwargs& kwargs) 
   }
   return bc;
 }
+#endif
 
 pybind11::dict backend_info() {
   pybind11::dict info;
@@ -45,6 +55,7 @@ pybind11::dict backend_info() {
 }  // namespace py2sess_native
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+#if PY2SESS_BIND_NATIVE_MODULE_CLASS
   pybind11::class_<py2sess_native::TwoStreamEssNativeOptions>(m, "TwoStreamEssNativeOptions")
       .def(pybind11::init<>())
       .def_readwrite("stream_value", &py2sess_native::TwoStreamEssNativeOptions::stream_value)
@@ -101,6 +112,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             return self.solar_2s_flux(std::move(prop), &bc);
           },
           pybind11::arg("prop"));
+#endif
 
   m.def("backend_info", &py2sess_native::backend_info);
   m.def(

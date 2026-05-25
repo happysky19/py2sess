@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -11,12 +12,35 @@ from py2sess import (
     native_extension_available,
 )
 from py2sess.rtsolver.backend import has_torch, to_numpy
+from py2sess.rtsolver import native_backend as native_backend_module
 from py2sess.rtsolver.native_backend import (
     native_backend_supports_device,
     solve_solar_fo,
     solve_solar_fo_plane_parallel,
     solve_thermal_fo,
 )
+
+
+class _FakeNativeExtension:
+    def __init__(self, *, cuda: bool) -> None:
+        self.cuda = cuda
+
+    def backend_info(self) -> dict[str, object]:
+        return {
+            "backend": "native-extension",
+            "cuda": self.cuda,
+            "level_fluxes": True,
+        }
+
+
+class _FakeDevice:
+    def __init__(self, device_type: str) -> None:
+        self.type = device_type
+
+
+class _FakeTensor:
+    def __init__(self, device_type: str) -> None:
+        self.device = _FakeDevice(device_type)
 
 
 class NativeBackendTests(unittest.TestCase):
@@ -30,6 +54,36 @@ class NativeBackendTests(unittest.TestCase):
         self.assertTrue(native_backend_supports_device("cpu"))
         self.assertEqual(native_backend_supports_device("cuda"), bool(info.get("cuda", False)))
         self.assertFalse(native_backend_supports_device("mps"))
+
+    def test_cuda_extension_is_reported_and_selected_separately(self) -> None:
+        cpu_extension = _FakeNativeExtension(cuda=False)
+        cuda_extension = _FakeNativeExtension(cuda=True)
+        with (
+            mock.patch.object(
+                native_backend_module,
+                "_load_native_extension",
+                return_value=cpu_extension,
+            ),
+            mock.patch.object(
+                native_backend_module,
+                "_load_native_cuda_extension",
+                return_value=cuda_extension,
+            ),
+        ):
+            info = native_backend_module.native_backend_info()
+            self.assertTrue(info["available"])
+            self.assertTrue(info["cuda"])
+            self.assertTrue(info["cuda_extension_available"])
+            self.assertTrue(native_backend_module.native_backend_supports_device("cpu"))
+            self.assertTrue(native_backend_module.native_backend_supports_device("cuda"))
+            self.assertIs(
+                native_backend_module._require_native_extension_for_tensor(_FakeTensor("cpu")),
+                cpu_extension,
+            )
+            self.assertIs(
+                native_backend_module._require_native_extension_for_tensor(_FakeTensor("cuda")),
+                cuda_extension,
+            )
 
     @unittest.skipUnless(has_torch(), "torch is not installed")
     @unittest.skipUnless(native_extension_available(), "py2sess._native is not built")

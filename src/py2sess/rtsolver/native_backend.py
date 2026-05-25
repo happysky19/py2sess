@@ -9,7 +9,7 @@ from typing import Any
 
 @lru_cache(maxsize=1)
 def _load_native_extension() -> Any | None:
-    """Imports the optional compiled native extension when it is available."""
+    """Imports the optional compiled CPU native extension when it is available."""
     try:
         from .backend import _load_torch
 
@@ -17,6 +17,20 @@ def _load_native_extension() -> Any | None:
             return None
         return import_module("py2sess._native")
     except ImportError:
+        return None
+
+
+@lru_cache(maxsize=1)
+def _load_native_cuda_extension() -> Any | None:
+    """Imports the optional CUDA native extension only when CUDA is usable."""
+    try:
+        from .backend import _load_torch
+
+        torch = _load_torch()
+        if torch is None or not torch.cuda.is_available():
+            return None
+        return import_module("py2sess._native_cuda")
+    except (ImportError, RuntimeError, OSError):
         return None
 
 
@@ -35,6 +49,11 @@ def native_backend_info() -> dict[str, Any]:
             "cuda": False,
         }
     info = dict(extension.backend_info())
+    cuda_extension = _load_native_cuda_extension()
+    info["cuda"] = cuda_extension is not None and bool(
+        dict(cuda_extension.backend_info()).get("cuda", False)
+    )
+    info["cuda_extension_available"] = cuda_extension is not None
     info["available"] = True
     return info
 
@@ -47,7 +66,7 @@ def native_backend_supports_device(device_type: str) -> bool:
     if device_type == "cpu":
         return True
     if device_type == "cuda":
-        return bool(dict(extension.backend_info()).get("cuda", False))
+        return _load_native_cuda_extension() is not None
     return False
 
 
@@ -55,6 +74,20 @@ def _require_native_extension() -> Any:
     extension = _load_native_extension()
     if extension is None:
         raise RuntimeError("py2sess._native is not built")
+    return extension
+
+
+def _device_type_of(value: Any) -> str | None:
+    device = getattr(value, "device", None)
+    return str(getattr(device, "type", device)) if device is not None else None
+
+
+def _require_native_extension_for_tensor(value: Any) -> Any:
+    if _device_type_of(value) != "cuda":
+        return _require_native_extension()
+    extension = _load_native_cuda_extension()
+    if extension is None:
+        raise RuntimeError("py2sess._native_cuda is not built or CUDA is not available")
     return extension
 
 
@@ -197,7 +230,7 @@ def solve_thermal_2s(
     RuntimeError
         If the optional native extension has not been built.
     """
-    extension = _require_native_extension()
+    extension = _require_native_extension_for_tensor(tau)
     if return_fluxes or use_brdf:
         if use_brdf:
             brdf_f = _zero_if_none(brdf_f, tau, (tau.shape[0],))
@@ -260,7 +293,7 @@ def solve_thermal_fo(
     return_profile: bool = False,
 ):
     """Runs the compiled thermal FO endpoint native kernel."""
-    extension = _require_native_extension()
+    extension = _require_native_extension_for_tensor(tau)
     do_nadir = bool(geometry["do_nadir"][0])
     xfine = _first_panel(geometry["xfine"], 3)
     wfine = _first_panel(geometry["wfine"], 3)
@@ -312,7 +345,7 @@ def solve_thermal_fo_flux_correction(
     n_mu: int = 8,
 ):
     """Runs native thermal FO flux source-replacement integration."""
-    extension = _require_native_extension()
+    extension = _require_native_extension_for_tensor(tau)
     mu_nodes, mu_weights = _mu_quadrature_like(n_mu, tau)
     packed = extension.thermal_fo_flux_correction(
         tau,
@@ -362,7 +395,7 @@ def solve_solar_2s(
     sl_isotropic: bool = True,
 ):
     """Runs the compiled solar-observation 2S native kernel."""
-    extension = _require_native_extension()
+    extension = _require_native_extension_for_tensor(tau)
     if return_fluxes or use_brdf or use_surface_leaving:
         row_pair = (tau.shape[0], 2)
         optional_pair = _optional_pair_like(albedo)
@@ -448,7 +481,7 @@ def solve_solar_fo(
     return_profile: bool = False,
 ):
     """Runs the compiled solar-observation FO endpoint native kernel."""
-    extension = _require_native_extension()
+    extension = _require_native_extension_for_tensor(tau)
     as_float_tensor, as_int_tensor, scalar_float = _torch_tensor_helpers(tau)
 
     xfine = _first_panel(as_float_tensor(precomputed.xfine), 3)
@@ -510,7 +543,7 @@ def solve_solar_fo_plane_parallel(
     return_profile: bool = False,
 ):
     """Runs the compiled plane-parallel solar FO native kernel."""
-    extension = _require_native_extension()
+    extension = _require_native_extension_for_tensor(tau)
     packed = extension.solar_fo_plane_parallel(
         tau,
         omega,
@@ -537,7 +570,7 @@ def solve_solar_fo_flux_correction(
     do_optical_deltam_scaling: bool = True,
 ):
     """Runs native direct-surface solar FO flux source replacement."""
-    extension = _require_native_extension()
+    extension = _require_native_extension_for_tensor(tau)
     packed = extension.solar_fo_flux_correction(
         tau,
         omega,
