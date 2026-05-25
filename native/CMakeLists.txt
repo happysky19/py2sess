@@ -1,5 +1,22 @@
 find_package(Torch REQUIRED)
 
+find_library(TORCH_PYTHON_LIBRARY
+  NAMES torch_python
+  PATHS "${TORCH_INSTALL_PREFIX}/lib"
+  NO_DEFAULT_PATH
+)
+if(NOT TORCH_PYTHON_LIBRARY)
+  message(FATAL_ERROR "Could not find libtorch_python in ${TORCH_INSTALL_PREFIX}/lib")
+endif()
+
+if(APPLE)
+  set(PY2SESS_NATIVE_INSTALL_RPATH "@loader_path")
+elseif(UNIX)
+  set(PY2SESS_NATIVE_INSTALL_RPATH "$ORIGIN;$ORIGIN/../torch/lib")
+else()
+  set(PY2SESS_NATIVE_INSTALL_RPATH "")
+endif()
+
 add_library(py2sess_native_core SHARED
   csrc/native_dispatch.cpp
   csrc/native_module.cpp
@@ -25,7 +42,7 @@ endif()
 set_target_properties(py2sess_native_core
   PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    INSTALL_RPATH "$ORIGIN;@loader_path"
+    INSTALL_RPATH "${PY2SESS_NATIVE_INSTALL_RPATH}"
 )
 
 if(PY2SESS_NATIVE_CUDA)
@@ -53,6 +70,7 @@ if(PY2SESS_NATIVE_CUDA)
       CUDA_STANDARD 17
       CUDA_SEPARABLE_COMPILATION ON
       POSITION_INDEPENDENT_CODE ON
+      INSTALL_RPATH "${PY2SESS_NATIVE_INSTALL_RPATH}"
   )
 endif()
 
@@ -74,6 +92,7 @@ target_link_libraries(py2sess_native_pybind
   PRIVATE
     py2sess_native_core
     Python3::Module
+    ${TORCH_PYTHON_LIBRARY}
     ${TORCH_LIBRARIES}
 )
 
@@ -93,7 +112,7 @@ set_target_properties(py2sess_native_pybind
     PREFIX ""
     OUTPUT_NAME "_native"
     POSITION_INDEPENDENT_CODE ON
-    INSTALL_RPATH "$ORIGIN;@loader_path"
+    INSTALL_RPATH "${PY2SESS_NATIVE_INSTALL_RPATH}"
 )
 
 install(TARGETS py2sess_native_core py2sess_native_pybind
@@ -101,3 +120,11 @@ install(TARGETS py2sess_native_core py2sess_native_pybind
   RUNTIME DESTINATION py2sess
   ARCHIVE DESTINATION py2sess
 )
+
+if(PY2SESS_NATIVE_CUDA)
+  install(TARGETS py2sess_native_cuda
+    LIBRARY DESTINATION py2sess
+    RUNTIME DESTINATION py2sess
+    ARCHIVE DESTINATION py2sess
+  )
+endif()

@@ -13,6 +13,28 @@ on:
       version:
         description: "Optional version override for dry-run builds, for example 0.4.2"
         required: false
+      build_os:
+        description: "Wheel OS target"
+        required: true
+        default: "Both"
+        type: choice
+        options:
+          - Both
+          - MacOS
+          - Ubuntu
+      python_versions:
+        description: "JSON list of Python versions to build, for example [\"3.11\"]"
+        required: true
+        default: '["3.10","3.11","3.12","3.13"]'
+      run_a100:
+        description: "Run optional native CUDA smoke test on a self-hosted A100 runner"
+        required: true
+        default: false
+        type: boolean
+      a100_runner_labels:
+        description: "JSON labels for the self-hosted A100 runner"
+        required: true
+        default: '["self-hosted","linux","x64","a100"]'
       publish:
         description: "Publish checked distributions to PyPI"
         required: true
@@ -35,11 +57,12 @@ defaults:
 jobs:
   build-macos:
     name: Build macOS Native Wheels
+    if: ${{ github.event.inputs.build_os == 'Both' || github.event.inputs.build_os == 'MacOS' }}
     runs-on: macos-latest
     strategy:
       fail-fast: true
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ${{ fromJSON(github.event.inputs.python_versions) }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "15.0"
     steps:
@@ -90,6 +113,125 @@ jobs:
           name: wheels-macos-${{ matrix.python-version }}-${{ env.MACOS_ARCH }}
           path: wheelhouse/*.whl
 
+  build-linux:
+    name: Build Linux Native Wheels
+    if: ${{ github.event.inputs.build_os == 'Both' || github.event.inputs.build_os == 'Ubuntu' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ${{ fromJSON(github.event.inputs.python_versions) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Setup Host Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.HOST_PYTHON }}
+          cache: pip
+
+      - name: Configure Linux build env
+        run: |
+          PV=${{ matrix.python-version }}
+          PV=${PV//./}
+          echo "PY_VERSION=$PV" >> "$GITHUB_ENV"
+          echo "CIBW_BUILD=cp${PV}*" >> "$GITHUB_ENV"
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PY2SESS=${{ github.event.inputs.version }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Linux wheel
+        env:
+          CIBW_PLATFORM: linux
+          CIBW_ARCHS: x86_64
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_SKIP: "*musllinux*"
+          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+          CIBW_CONFIG_SETTINGS: "cmake.define.PY2SESS_BUILD_NATIVE=ON"
+          CIBW_BEFORE_BUILD: |
+            python -m pip install 'cmake<=3.30' ninja build scikit-build-core setuptools-scm
+            python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: |
+            export TORCH_LIB=$(python -c 'import torch; print(torch.__path__[0] + "/lib")')
+            export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
+            auditwheel repair \
+              --exclude libtorch.so \
+              --exclude libtorch_cpu.so \
+              --exclude libtorch_python.so \
+              --exclude libc10.so \
+              -w {dest_dir} {wheel}
+          CIBW_BEFORE_TEST: |
+            python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          CIBW_TEST_COMMAND: python -c "import importlib, torch, py2sess; native = importlib.import_module('py2sess._native'); info = py2sess.native_backend_info(); print(info); assert info['available'], info; assert info['level_fluxes'], info; from py2sess.reference_cases import load_tir_benchmark_case, load_uv_benchmark_case; load_tir_benchmark_case(); load_uv_benchmark_case()"
+        run: |
+          pip install cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse
+
+      - name: Upload Linux wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.python-version }}-x86_64
+          path: wheelhouse/*.whl
+
+  test-a100-native:
+    name: Test Native CUDA on A100
+    if: ${{ github.event.inputs.run_a100 == 'true' }}
+    runs-on: ${{ fromJSON(github.event.inputs.a100_runner_labels) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Setup Host Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.HOST_PYTHON }}
+          cache: pip
+
+      - name: Configure version override
+        if: ${{ github.event.inputs.version != '' }}
+        run: echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PY2SESS=${{ github.event.inputs.version }}" >> "$GITHUB_ENV"
+
+      - name: Build and test CUDA native wheel
+        env:
+          CIBW_PLATFORM: linux
+          CIBW_ARCHS: x86_64
+          CIBW_BUILD: cp311*
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+          CIBW_CONFIG_SETTINGS: "cmake.define.PY2SESS_BUILD_NATIVE=ON cmake.define.PY2SESS_NATIVE_CUDA=ON"
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --gpus all"
+          CIBW_BEFORE_BUILD: |
+            python -m pip install 'cmake<=3.30' ninja build scikit-build-core setuptools-scm torch
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: |
+            export TORCH_LIB=$(python -c 'import torch; print(torch.__path__[0] + "/lib")')
+            export LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH"
+            auditwheel repair \
+              --exclude libtorch.so \
+              --exclude libtorch_cpu.so \
+              --exclude libtorch_cuda.so \
+              --exclude libtorch_python.so \
+              --exclude libc10.so \
+              --exclude libc10_cuda.so \
+              -w {dest_dir} {wheel}
+          CIBW_TEST_REQUIRES: "torch"
+          CIBW_TEST_COMMAND: python -c "import importlib, torch, py2sess; assert torch.cuda.is_available(); native = importlib.import_module('py2sess._native'); info = py2sess.native_backend_info(); print(info); assert info['available'] and info['cuda'], info"
+        run: |
+          pip install cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse
+
+      - name: Upload A100 CUDA smoke wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-a100-cuda-cp311-x86_64
+          path: wheelhouse/*.whl
+
   build-sdist:
     name: Build Source Distribution
     runs-on: ubuntu-latest
@@ -122,7 +264,7 @@ jobs:
 
   validate-distributions:
     name: Validate Distributions
-    needs: [build-macos, build-sdist]
+    needs: [build-macos, build-linux, build-sdist]
     runs-on: ubuntu-latest
     if: ${{ always() }}
     steps:
@@ -133,7 +275,12 @@ jobs:
 
       - name: Require successful builds
         run: |
-          test "${{ needs.build-macos.result }}" = "success"
+          if [[ "${{ github.event.inputs.build_os }}" != "Ubuntu" ]]; then
+            test "${{ needs.build-macos.result }}" = "success"
+          fi
+          if [[ "${{ github.event.inputs.build_os }}" != "MacOS" ]]; then
+            test "${{ needs.build-linux.result }}" = "success"
+          fi
           test "${{ needs.build-sdist.result }}" = "success"
 
       - name: Aggregate into dist
@@ -168,6 +315,8 @@ jobs:
         run: |
           test -n "${{ github.event.inputs.tag }}"
           test "${{ github.event.inputs.ref }}" = "${{ github.event.inputs.tag }}"
+          test "${{ github.event.inputs.build_os }}" = "Both"
+          test '${{ github.event.inputs.python_versions }}' = '["3.10","3.11","3.12","3.13"]'
 
       - name: Download checked distributions
         uses: actions/download-artifact@v4
