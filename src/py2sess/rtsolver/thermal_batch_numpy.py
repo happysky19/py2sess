@@ -17,6 +17,7 @@ from ..optical.delta_m import delta_m_scale_optical_properties
 from .taylor import vectorized_taylor_series_1
 
 _NUMBA_THERMAL_FO_MIN_BATCH = 8192
+_OPTICAL_THICKNESS_MIN = 1.0e-12
 _THERMAL_FO_KERNEL = None
 _THERMAL_FO_IMPORT_FAILED = False
 
@@ -96,7 +97,9 @@ def _thermal_coefficients(delta_tau: np.ndarray, thermal_bb_input: np.ndarray):
     """Builds linear thermal-source coefficients for a wavelength batch."""
     lower = thermal_bb_input[:, :-1]
     upper = thermal_bb_input[:, 1:]
-    return lower, (upper - lower) / delta_tau
+    slope = np.zeros_like(delta_tau)
+    np.divide(upper - lower, delta_tau, out=slope, where=delta_tau != 0.0)
+    return lower, slope
 
 
 def _thermal_green_function(
@@ -203,6 +206,92 @@ def _thermal_layer_sources_up(
     return tterm_save * (u_xpos * sd + u_xneg * su)
 
 
+def _transparent_thermal_flux_numpy(
+    *,
+    tau,
+    surfbb,
+    emissivity,
+    stream_value: float,
+    return_profile: bool,
+    return_fluxes: bool,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+):
+    nrows, nlay = tau.shape
+    nlev = nlay + 1
+    radiance = np.zeros((nrows, nlev) if return_profile else nrows, dtype=float)
+    if not return_fluxes:
+        return radiance
+
+    surface_source = surfbb * emissivity
+    flux_up = np.zeros((nrows, nlev), dtype=float)
+    flux_down = np.zeros_like(flux_up)
+    flux_mean = np.zeros_like(flux_up)
+    if do_upwelling:
+        flux_up += 2.0 * np.pi * stream_value * surface_source[:, None]
+        flux_mean += 0.5 * surface_source[:, None]
+    if do_dnwelling:
+        flux_down += 0.0
+    return {
+        "radiance": radiance,
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up - flux_down,
+        "flux_mean": flux_mean,
+    }
+
+
+def _flux_profile_thermal_batch_numpy(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    stream_value: float,
+    active_layers,
+    lcon,
+    mcon,
+    xpos1,
+    xpos2,
+    eigentrans,
+    wupper,
+    wlower,
+):
+    """Builds DISORT-style level fluxes from batched thermal 2S quadrature values."""
+    wupper0, wupper1 = wupper
+    wlower0, wlower1 = wlower
+    up_upper = wupper1 + lcon * xpos2 + mcon * xpos1 * eigentrans
+    down_upper = wupper0 + lcon * xpos1 + mcon * xpos2 * eigentrans
+    up_lower = (
+        wlower1[:, -1] + lcon[:, -1] * xpos2[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos1[:, -1]
+    )
+    down_lower = (
+        wlower0[:, -1] + lcon[:, -1] * xpos1[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos2[:, -1]
+    )
+    up_quad = np.concatenate((up_upper, up_lower[:, None]), axis=1)
+    down_quad = np.concatenate((down_upper, down_lower[:, None]), axis=1)
+
+    flux_up = np.zeros_like(up_quad)
+    flux_down = np.zeros_like(down_quad)
+    flux_mean = np.zeros_like(up_quad)
+    if do_upwelling:
+        flux_up = 2.0 * np.pi * stream_value * up_quad
+        flux_mean += 0.5 * up_quad
+    if do_dnwelling:
+        flux_down = 2.0 * np.pi * stream_value * down_quad
+        flux_mean += 0.5 * down_quad
+
+    inactive_layers = ~active_layers
+    if np.any(inactive_layers):
+        flux_up = flux_up.copy()
+        flux_down = flux_down.copy()
+        flux_mean = flux_mean.copy()
+        for level in range(inactive_layers.shape[1] - 1, -1, -1):
+            mask = inactive_layers[:, level]
+            flux_up[mask, level] = flux_up[mask, level + 1]
+            flux_down[mask, level] = flux_down[mask, level + 1]
+            flux_mean[mask, level] = flux_mean[mask, level + 1]
+    return flux_up, flux_down, flux_up - flux_down, flux_mean
+
+
 def _two_stream_thermal_toa(
     *,
     tau,
@@ -218,11 +307,63 @@ def _two_stream_thermal_toa(
     thermal_tcutoff,
     bvp_engine: str = "auto",
     return_profile: bool = False,
+    return_fluxes: bool = False,
+    do_upwelling: bool = True,
+    do_dnwelling: bool = False,
 ):
     """Computes batched 2S thermal upwelling TOA radiance."""
     delta_tau, omega_total, asymm_total = delta_m_scale_optical_properties(
         tau, omega, asymm, scaling
     )
+    transparent_rows = np.all(delta_tau == 0.0, axis=1)
+    if np.all(transparent_rows):
+        return _transparent_thermal_flux_numpy(
+            tau=tau,
+            surfbb=surfbb,
+            emissivity=emissivity,
+            stream_value=stream_value,
+            return_profile=return_profile,
+            return_fluxes=return_fluxes,
+            do_upwelling=do_upwelling,
+            do_dnwelling=do_dnwelling,
+        )
+    if np.any(transparent_rows):
+        active_rows = ~transparent_rows
+        subset = _two_stream_thermal_toa(
+            tau=tau[active_rows],
+            omega=omega[active_rows],
+            asymm=asymm[active_rows],
+            scaling=scaling[active_rows],
+            thermal_bb_input=thermal_bb_input[active_rows],
+            surfbb=surfbb[active_rows],
+            emissivity=emissivity[active_rows],
+            albedo=albedo[active_rows],
+            stream_value=stream_value,
+            user_stream=user_stream,
+            thermal_tcutoff=thermal_tcutoff,
+            bvp_engine=bvp_engine,
+            return_profile=return_profile,
+            return_fluxes=return_fluxes,
+            do_upwelling=do_upwelling,
+            do_dnwelling=do_dnwelling,
+        )
+        result = _transparent_thermal_flux_numpy(
+            tau=tau,
+            surfbb=surfbb,
+            emissivity=emissivity,
+            stream_value=stream_value,
+            return_profile=return_profile,
+            return_fluxes=return_fluxes,
+            do_upwelling=do_upwelling,
+            do_dnwelling=do_dnwelling,
+        )
+        if return_fluxes:
+            result["radiance"][active_rows] = subset["radiance"]
+            for key in ("flux_up", "flux_down", "flux_net", "flux_mean"):
+                result[key][active_rows] = subset[key]
+            return result
+        result[active_rows] = subset
+        return result
     therm0, therm1 = _thermal_coefficients(delta_tau, thermal_bb_input)
     eigenvalue, eigentrans, xpos1, xpos2, norm_saved = _hom_solution_thermal(
         stream_value=stream_value,
@@ -287,6 +428,24 @@ def _two_stream_thermal_toa(
         wlower=t_wlower,
         bvp_engine=bvp_engine,
     )
+    flux_up = None
+    flux_down = None
+    flux_net = None
+    flux_mean = None
+    if return_fluxes:
+        flux_up, flux_down, flux_net, flux_mean = _flux_profile_thermal_batch_numpy(
+            do_upwelling=do_upwelling,
+            do_dnwelling=do_dnwelling,
+            stream_value=stream_value,
+            active_layers=delta_tau > thermal_tcutoff,
+            lcon=lcon,
+            mcon=mcon,
+            xpos1=xpos1,
+            xpos2=xpos2,
+            eigentrans=eigentrans,
+            wupper=t_wupper,
+            wlower=t_wlower,
+        )
 
     wlower0, _wlower1 = t_wlower
     idownsurf = (
@@ -295,16 +454,26 @@ def _two_stream_thermal_toa(
     surface_source = surface_factor * albedo * idownsurf
     layer_source = lcon * u_xpos * hmult_2 + mcon * u_xneg * hmult_1 + layer_tsup_up
     if return_profile:
-        return accumulate_upwelling_profile_numpy(
+        radiance = accumulate_upwelling_profile_numpy(
             layer_source=layer_source,
             layer_trans=t_delt_userm,
             surface_source=surface_source,
         )
-    return accumulate_upwelling_sources_numpy(
-        layer_source=layer_source,
-        layer_trans=t_delt_userm,
-        surface_source=surface_source,
-    )
+    else:
+        radiance = accumulate_upwelling_sources_numpy(
+            layer_source=layer_source,
+            layer_trans=t_delt_userm,
+            surface_source=surface_source,
+        )
+    if return_fluxes:
+        return {
+            "radiance": radiance,
+            "flux_up": flux_up,
+            "flux_down": flux_down,
+            "flux_net": flux_net,
+            "flux_mean": flux_mean,
+        }
+    return radiance
 
 
 def precompute_fo_thermal_geometry_numpy(
@@ -523,6 +692,8 @@ def _fo_thermal_toa(
 ):
     """Computes batched FO thermal upwelling TOA radiance."""
     deltaus = tau * (1.0 - omega * scaling) if do_optical_deltam_scaling else tau
+    deltaus = np.array(deltaus, dtype=float, copy=True)
+    np.putmask(deltaus, deltaus <= 0.0, _OPTICAL_THICKNESS_MIN)
     lower_bb = thermal_bb_input[:, :-1]
     upper_bb = thermal_bb_input[:, 1:]
     single_scatter_scale = 1.0 - omega
@@ -596,6 +767,116 @@ def _fo_thermal_toa(
     if return_profile:
         return profile
     return cum_atmos + cum_surface
+
+
+def _mu_quadrature(n_mu: int) -> tuple[np.ndarray, np.ndarray]:
+    if int(n_mu) <= 0:
+        raise ValueError("n_mu must be a positive integer")
+    nodes, weights = _legendre_nodes_weights(int(n_mu))
+    return 0.5 * (nodes + 1.0), 0.5 * weights
+
+
+def _thermal_fo_profiles_for_mu_numpy(
+    *,
+    deltaus: np.ndarray,
+    therm0: np.ndarray,
+    therm1: np.ndarray,
+    mu: float,
+    surface_source: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    lostau = deltaus / mu
+    lostrans = np.where(lostau < 88.0, np.exp(-lostau), 0.0)
+    one_minus_trans = np.where(lostau < 88.0, -np.expm1(-lostau), 1.0)
+    ratio = one_minus_trans / lostau
+    source_delta = therm1 * deltaus
+    sources_up = therm0 * one_minus_trans + source_delta * (ratio - lostrans)
+    sources_down = therm0 * one_minus_trans + source_delta * (1.0 - ratio)
+
+    nrows, nlay = deltaus.shape
+    up = np.zeros((nrows, nlay + 1), dtype=float)
+    down = np.zeros_like(up)
+    cumulative = surface_source.copy()
+    up[:, nlay] = cumulative
+    for n in range(nlay - 1, -1, -1):
+        cumulative = lostrans[:, n] * cumulative + sources_up[:, n]
+        up[:, n] = cumulative
+
+    cumulative = np.zeros(nrows, dtype=float)
+    down[:, 0] = cumulative
+    for n in range(nlay):
+        cumulative = sources_down[:, n] + lostrans[:, n] * cumulative
+        down[:, n + 1] = cumulative
+    return up, down
+
+
+def thermal_fo_flux_correction_numpy(
+    *,
+    tau,
+    omega,
+    scaling,
+    thermal_bb_input,
+    surfbb,
+    emissivity,
+    stream_value: float,
+    do_optical_deltam_scaling: bool,
+    do_source_deltam_scaling: bool,
+    n_mu: int = 8,
+    n_phi: int | None = None,
+):
+    """Returns exact-minus-2S thermal FO level-flux correction for a batch."""
+    if n_phi is not None and int(n_phi) <= 0:
+        raise ValueError("n_phi must be a positive integer")
+    deltaus = tau * (1.0 - omega * scaling) if do_optical_deltam_scaling else tau
+    deltaus = np.array(deltaus, dtype=float, copy=True)
+    np.putmask(deltaus, deltaus <= 0.0, _OPTICAL_THICKNESS_MIN)
+
+    lower_bb = thermal_bb_input[:, :-1]
+    upper_bb = thermal_bb_input[:, 1:]
+    single_scatter_scale = 1.0 - omega
+    if do_source_deltam_scaling:
+        single_scatter_scale = single_scatter_scale / (1.0 - omega * scaling)
+    therm0 = lower_bb * single_scatter_scale
+    therm1 = ((upper_bb - lower_bb) / deltaus) * single_scatter_scale
+    surface_source = surfbb * emissivity
+
+    nrows, nlay = tau.shape
+    nlev = nlay + 1
+    exact_up = np.zeros((nrows, nlev), dtype=float)
+    exact_down = np.zeros_like(exact_up)
+    exact_mean = np.zeros_like(exact_up)
+    mu_nodes, mu_weights = _mu_quadrature(n_mu)
+    for mu, weight in zip(mu_nodes, mu_weights):
+        up, down = _thermal_fo_profiles_for_mu_numpy(
+            deltaus=deltaus,
+            therm0=therm0,
+            therm1=therm1,
+            mu=float(mu),
+            surface_source=surface_source,
+        )
+        exact_up += 2.0 * np.pi * float(weight) * float(mu) * up
+        exact_down += 2.0 * np.pi * float(weight) * float(mu) * down
+        exact_mean += 0.5 * float(weight) * (up + down)
+
+    up_2s, down_2s = _thermal_fo_profiles_for_mu_numpy(
+        deltaus=deltaus,
+        therm0=therm0,
+        therm1=therm1,
+        mu=float(stream_value),
+        surface_source=surface_source,
+    )
+    embedded_up = 2.0 * np.pi * stream_value * up_2s
+    embedded_down = 2.0 * np.pi * stream_value * down_2s
+    embedded_mean = 0.5 * (up_2s + down_2s)
+
+    flux_up = exact_up - embedded_up
+    flux_down = exact_down - embedded_down
+    flux_mean = exact_mean - embedded_mean
+    return {
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up - flux_down,
+        "flux_mean": flux_mean,
+    }
 
 
 def solve_thermal_batch_numpy(

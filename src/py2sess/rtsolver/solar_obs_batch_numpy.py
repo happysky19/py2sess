@@ -580,6 +580,54 @@ def _upuser_intensity_batch(
     )
 
 
+def _flux_profile_solar_batch_numpy(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    pi4: float,
+    stream_value: float,
+    flux_factor: np.ndarray,
+    x0: float,
+    initial_trans: np.ndarray,
+    trans_solar_beam: np.ndarray,
+    lcon: np.ndarray,
+    mcon: np.ndarray,
+    xpos1: np.ndarray,
+    xpos2: np.ndarray,
+    eigentrans: np.ndarray,
+    wupper,
+    wlower,
+):
+    """Builds DISORT-style level fluxes from batched solar 2S quadrature values."""
+    wupper0, wupper1 = wupper
+    wlower0, wlower1 = wlower
+    up_upper = wupper1 + lcon * xpos2 + mcon * xpos1 * eigentrans
+    down_upper = wupper0 + lcon * xpos1 + mcon * xpos2 * eigentrans
+    up_lower = (
+        wlower1[:, -1] + lcon[:, -1] * xpos2[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos1[:, -1]
+    )
+    down_lower = (
+        wlower0[:, -1] + lcon[:, -1] * xpos1[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos2[:, -1]
+    )
+    up_quad = np.concatenate((up_upper, up_lower[:, None]), axis=1)
+    down_quad = np.concatenate((down_upper, down_lower[:, None]), axis=1)
+
+    pi2 = 0.5 * pi4
+    flux_up = np.zeros_like(up_quad)
+    flux_down = np.zeros_like(down_quad)
+    flux_mean = np.zeros_like(up_quad)
+    if do_upwelling:
+        flux_up = pi2 * stream_value * up_quad
+        flux_mean += 0.5 * up_quad
+    if do_dnwelling:
+        flux_down = pi2 * stream_value * down_quad
+        flux_mean += 0.5 * down_quad
+        direct_trans = np.concatenate((initial_trans, trans_solar_beam[:, None]), axis=1)
+        flux_down += flux_factor[:, None] * direct_trans * x0
+        flux_mean += flux_factor[:, None] * direct_trans / pi4
+    return flux_up, flux_down, flux_up - flux_down, flux_mean
+
+
 def solve_solar_obs_batch_numpy(
     *,
     tau: np.ndarray,
@@ -603,6 +651,9 @@ def solve_solar_obs_batch_numpy(
     ulp: float,
     bvp_engine: str = "auto",
     return_profile: bool = False,
+    return_fluxes: bool = False,
+    do_upwelling: bool = True,
+    do_dnwelling: bool = False,
 ) -> np.ndarray:
     """Solves the solar-observation 2S problem for a spectral batch.
 
@@ -654,6 +705,10 @@ def solve_solar_obs_batch_numpy(
     total_profile = None
     if return_profile:
         total_profile = np.zeros((tau.shape[0], tau.shape[1] + 1), dtype=float)
+    flux_up = None
+    flux_down = None
+    flux_net = None
+    flux_mean = None
     zero_surface = np.zeros_like(albedo)
     do_brdf_surface = brdf_f_0 is not None or brdf_f is not None or ubrdf_f is not None
     if do_brdf_surface:
@@ -749,6 +804,24 @@ def solve_solar_obs_batch_numpy(
             wlower=wlower,
             bvp_engine=bvp_engine,
         )
+        if return_fluxes and fourier == 0:
+            flux_up, flux_down, flux_net, flux_mean = _flux_profile_solar_batch_numpy(
+                do_upwelling=do_upwelling,
+                do_dnwelling=do_dnwelling,
+                pi4=pi4,
+                stream_value=stream_value,
+                flux_factor=flux_factor,
+                x0=x0,
+                initial_trans=initial_trans,
+                trans_solar_beam=trans_solar_beam,
+                lcon=lcon,
+                mcon=mcon,
+                xpos1=xpos1,
+                xpos2=xpos2,
+                eigentrans=eigentrans,
+                wupper=wupper,
+                wlower=wlower,
+            )
         contribution = _upuser_intensity_batch(
             layer_pis_cutoff=layer_pis_cutoff,
             surface_factor=surface_factor,
@@ -785,4 +858,13 @@ def solve_solar_obs_batch_numpy(
             total = total_profile[:, 0]
         else:
             total = contribution if fourier == 0 else total + azmfac * contribution
-    return total_profile if return_profile else total
+    radiance = total_profile if return_profile else total
+    if return_fluxes:
+        return {
+            "radiance": radiance,
+            "flux_up": flux_up,
+            "flux_down": flux_down,
+            "flux_net": flux_net,
+            "flux_mean": flux_mean,
+        }
+    return radiance

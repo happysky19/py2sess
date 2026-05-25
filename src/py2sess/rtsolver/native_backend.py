@@ -101,6 +101,25 @@ def _scalar_float(value) -> float:
     return float(value[0] if hasattr(value, "__len__") else value)
 
 
+def _mu_quadrature_like(n_mu: int, like):
+    import numpy as np
+
+    from .backend import _load_torch
+
+    if int(n_mu) <= 0:
+        raise ValueError("n_mu must be a positive integer")
+    torch = _load_torch()
+    if torch is None:  # pragma: no cover
+        raise RuntimeError("backend='native' requires torch to be installed")
+    nodes, weights = np.polynomial.legendre.leggauss(int(n_mu))
+    mu_nodes = 0.5 * (nodes + 1.0)
+    mu_weights = 0.5 * weights
+    return (
+        torch.as_tensor(mu_nodes, dtype=like.dtype, device=like.device),
+        torch.as_tensor(mu_weights, dtype=like.dtype, device=like.device),
+    )
+
+
 def _split_packed_2s(packed, *, nlay: int, return_profile: bool) -> dict[str, Any]:
     """Splits a native packed radiance-plus-flux tensor into named views."""
     nlev = int(nlay) + 1
@@ -114,6 +133,15 @@ def _split_packed_2s(packed, *, nlay: int, return_profile: bool) -> dict[str, An
         "flux_down": packed[:, offset + nlev : offset + 2 * nlev],
         "flux_net": packed[:, offset + 2 * nlev : offset + 3 * nlev],
         "flux_mean": packed[:, offset + 3 * nlev : offset + 4 * nlev],
+    }
+
+
+def _split_flux_correction(packed) -> dict[str, Any]:
+    return {
+        "flux_up": packed[:, 0, :],
+        "flux_down": packed[:, 1, :],
+        "flux_net": packed[:, 2, :],
+        "flux_mean": packed[:, 3, :],
     }
 
 
@@ -268,6 +296,38 @@ def solve_thermal_fo(
         return_components=return_components,
         component_names=("atmosphere", "surface"),
     )
+
+
+def solve_thermal_fo_flux_correction(
+    *,
+    tau,
+    omega,
+    scaling,
+    planck,
+    surfbb,
+    emissivity,
+    stream_value: float,
+    do_optical_deltam_scaling: bool = True,
+    do_source_deltam_scaling: bool = False,
+    n_mu: int = 8,
+):
+    """Runs native thermal FO flux source-replacement integration."""
+    extension = _require_native_extension()
+    mu_nodes, mu_weights = _mu_quadrature_like(n_mu, tau)
+    packed = extension.thermal_fo_flux_correction(
+        tau,
+        omega,
+        scaling,
+        planck,
+        surfbb,
+        emissivity,
+        mu_nodes,
+        mu_weights,
+        float(stream_value),
+        bool(do_optical_deltam_scaling),
+        bool(do_source_deltam_scaling),
+    )
+    return _split_flux_correction(packed)
 
 
 def solve_solar_2s(
@@ -435,3 +495,57 @@ def solve_solar_fo(
         return_components=return_components,
         component_names=("single_scatter", "direct_beam"),
     )
+
+
+def solve_solar_fo_plane_parallel(
+    *,
+    tau,
+    omega,
+    scaling,
+    surface_reflectance,
+    flux_factor,
+    exact_scatter,
+    mu0: float,
+    user_stream: float,
+    return_profile: bool = False,
+):
+    """Runs the compiled plane-parallel solar FO native kernel."""
+    extension = _require_native_extension()
+    packed = extension.solar_fo_plane_parallel(
+        tau,
+        omega,
+        scaling,
+        surface_reflectance,
+        flux_factor,
+        exact_scatter,
+        float(mu0),
+        float(user_stream),
+        bool(return_profile),
+    )
+    return packed
+
+
+def solve_solar_fo_flux_correction(
+    *,
+    tau,
+    omega,
+    scaling,
+    surface_reflectance,
+    flux_factor,
+    stream_value: float,
+    mu0: float,
+    do_optical_deltam_scaling: bool = True,
+):
+    """Runs native direct-surface solar FO flux source replacement."""
+    extension = _require_native_extension()
+    packed = extension.solar_fo_flux_correction(
+        tau,
+        omega,
+        scaling,
+        surface_reflectance,
+        flux_factor,
+        float(stream_value),
+        float(mu0),
+        bool(do_optical_deltam_scaling),
+    )
+    return _split_flux_correction(packed)

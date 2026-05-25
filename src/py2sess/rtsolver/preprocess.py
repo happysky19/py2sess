@@ -51,6 +51,7 @@ class PreparedBrdf:
     brdf_f: np.ndarray
     ubrdf_f: np.ndarray
     direct_brf: np.ndarray | None = None
+    kernel_specs: tuple[dict[str, Any], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class PreparedInputs:
     user_obsgeoms: np.ndarray | None
     stream_value: float
     flux_factor: float
+    fisot: float
     albedo: float
     earth_radius: float
     geometry: PreparedGeometry
@@ -336,6 +338,7 @@ def _prepare_brdf(
             brdf_f=np.asarray(coeffs.brdf_f, dtype=float),
             ubrdf_f=np.asarray(coeffs.ubrdf_f, dtype=float),
             direct_brf=np.asarray(coeffs.direct_brf, dtype=float),
+            kernel_specs=tuple(dict(spec) for spec in brdf["kernel_specs"]),
         )
     brdf_f_0 = np.asarray(brdf.get("brdf_f_0"), dtype=float)
     brdf_f = np.asarray(brdf.get("brdf_f"), dtype=float)
@@ -392,6 +395,7 @@ def prepare_inputs(
     user_obsgeoms: Any,
     stream_value: float,
     flux_factor: float,
+    fisot: float,
     albedo: float,
     d2s_scaling: Any | None,
     brdf: Any | None,
@@ -416,8 +420,9 @@ def prepare_inputs(
         Level-height grid for solar and spherical FO paths.
     user_obsgeoms
         Observation-geometry array for solar observation mode.
-    stream_value, flux_factor, albedo
-        Two-stream quadrature cosine and surface/source scalar inputs.
+    stream_value, flux_factor, fisot, albedo
+        Two-stream quadrature cosine, direct beam, top isotropic boundary,
+        and surface scalar inputs.
     d2s_scaling
         Optional delta-M truncation factors; missing values default to the
         HG-like factor ``asymm_arr**2``.
@@ -503,6 +508,7 @@ def prepare_inputs(
             user_obsgeoms=None,
             stream_value=float(stream_value),
             flux_factor=float(flux_factor),
+            fisot=float(fisot),
             albedo=float(albedo),
             earth_radius=float(earth_radius),
             geometry=geometry,
@@ -592,6 +598,7 @@ def prepare_inputs(
             user_obsgeoms=obsgeoms,
             stream_value=float(stream_value),
             flux_factor=float(flux_factor),
+            fisot=float(fisot),
             albedo=float(albedo),
             earth_radius=normalized_earth_radius,
             geometry=geometry,
@@ -653,6 +660,7 @@ def prepare_inputs(
         user_obsgeoms=obsgeoms,
         stream_value=float(stream_value),
         flux_factor=float(flux_factor),
+        fisot=float(fisot),
         albedo=float(albedo),
         earth_radius=normalized_earth_radius,
         geometry=geometry,

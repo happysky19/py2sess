@@ -536,6 +536,45 @@ void thermal_fo_cuda(at::TensorIterator& iter, const ThermalFoParams& params) {
   });
 }
 
+void thermal_fo_flux_correction_cuda(
+    at::TensorIterator& iter,
+    const ThermalFoFluxParams& params) {
+  at::cuda::CUDAGuard device_guard(iter.device());
+  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_thermal_fo_flux_correction_cuda", [&] {
+    const int nlay = last_dim_size(iter.input(0));
+    const int workspace_size =
+        static_cast<int>(thermal_fo_flux_workspace_bytes<scalar_t>(nlay));
+    gpu_chunk_kernel<8, 7>(
+        iter,
+        workspace_size,
+        [=] __device__(char* const data[7], unsigned int offsets[7], char* work) {
+          auto* out = reinterpret_cast<scalar_t*>(data[0] + offsets[0]);
+          auto* tau = reinterpret_cast<const scalar_t*>(data[1] + offsets[1]);
+          auto* omega = reinterpret_cast<const scalar_t*>(data[2] + offsets[2]);
+          auto* scaling = reinterpret_cast<const scalar_t*>(data[3] + offsets[3]);
+          auto* planck = reinterpret_cast<const scalar_t*>(data[4] + offsets[4]);
+          auto* surfbb = reinterpret_cast<const scalar_t*>(data[5] + offsets[5]);
+          auto* emissivity = reinterpret_cast<const scalar_t*>(data[6] + offsets[6]);
+          thermal_fo_flux_correction_row<scalar_t>(
+              nlay,
+              static_cast<scalar_t>(params.stream_value),
+              params.do_optical_deltam_scaling,
+              params.do_source_deltam_scaling,
+              params.n_mu,
+              static_cast<const scalar_t*>(params.mu_nodes),
+              static_cast<const scalar_t*>(params.mu_weights),
+              tau,
+              omega,
+              scaling,
+              planck,
+              surfbb,
+              emissivity,
+              out,
+              work);
+        });
+  });
+}
+
 void solar_fo_cuda(at::TensorIterator& iter, const SolarFoParams& params) {
   at::cuda::CUDAGuard device_guard(iter.device());
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_solar_fo_cuda", [&] {
@@ -659,6 +698,67 @@ void solar_fo_cuda(at::TensorIterator& iter, const SolarFoParams& params) {
               params.return_components,
               params.return_profile,
               work);
+        });
+  });
+}
+
+void solar_fo_plane_parallel_cuda(at::TensorIterator& iter, const SolarFoPpParams& params) {
+  at::cuda::CUDAGuard device_guard(iter.device());
+  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_solar_fo_plane_parallel_cuda", [&] {
+    const int nlay = last_dim_size(iter.input(0));
+    const int workspace_size = static_cast<int>(solar_fo_pp_workspace_bytes<scalar_t>(nlay));
+    gpu_chunk_kernel<8, 7>(
+        iter,
+        workspace_size,
+        [=] __device__(char* const data[7], unsigned int offsets[7], char* work) {
+          auto* out = reinterpret_cast<scalar_t*>(data[0] + offsets[0]);
+          auto* tau = reinterpret_cast<const scalar_t*>(data[1] + offsets[1]);
+          auto* omega = reinterpret_cast<const scalar_t*>(data[2] + offsets[2]);
+          auto* scaling = reinterpret_cast<const scalar_t*>(data[3] + offsets[3]);
+          auto* surface_reflectance = reinterpret_cast<const scalar_t*>(data[4] + offsets[4]);
+          auto* flux_factor = reinterpret_cast<const scalar_t*>(data[5] + offsets[5]);
+          auto* exact_scatter = reinterpret_cast<const scalar_t*>(data[6] + offsets[6]);
+          solar_fo_pp_row<scalar_t>(
+              nlay,
+              static_cast<scalar_t>(params.mu0),
+              static_cast<scalar_t>(params.user_stream),
+              tau,
+              omega,
+              scaling,
+              surface_reflectance,
+              flux_factor,
+              exact_scatter,
+              out,
+              params.return_profile,
+              work);
+        });
+  });
+}
+
+void solar_fo_flux_correction_cuda(at::TensorIterator& iter, const SolarFoFluxParams& params) {
+  at::cuda::CUDAGuard device_guard(iter.device());
+  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_solar_fo_flux_correction_cuda", [&] {
+    const int nlay = last_dim_size(iter.input(0));
+    gpu_kernel<6>(
+        iter,
+        [=] __device__(char* const data[6], unsigned int offsets[6]) {
+          auto* out = reinterpret_cast<scalar_t*>(data[0] + offsets[0]);
+          auto* tau = reinterpret_cast<const scalar_t*>(data[1] + offsets[1]);
+          auto* omega = reinterpret_cast<const scalar_t*>(data[2] + offsets[2]);
+          auto* scaling = reinterpret_cast<const scalar_t*>(data[3] + offsets[3]);
+          auto* surface_reflectance = reinterpret_cast<const scalar_t*>(data[4] + offsets[4]);
+          auto* flux_factor = reinterpret_cast<const scalar_t*>(data[5] + offsets[5]);
+          solar_fo_flux_correction_row<scalar_t>(
+              nlay,
+              static_cast<scalar_t>(params.stream_value),
+              static_cast<scalar_t>(params.mu0),
+              params.do_optical_deltam_scaling,
+              tau,
+              omega,
+              scaling,
+              surface_reflectance,
+              flux_factor,
+              out);
         });
   });
 }

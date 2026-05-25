@@ -87,6 +87,15 @@ struct ThermalFoParams {
   const void* csqfine;
 };
 
+struct ThermalFoFluxParams {
+  double stream_value;
+  bool do_optical_deltam_scaling;
+  bool do_source_deltam_scaling;
+  int n_mu;
+  const void* mu_nodes;
+  const void* mu_weights;
+};
+
 struct SolarFoParams {
   int nfine;
   int ntrav_nl;
@@ -106,6 +115,18 @@ struct SolarFoParams {
   const void* sunpathsfine;
   const void* nfinedivs;
   const void* ntraversefine;
+};
+
+struct SolarFoPpParams {
+  double mu0;
+  double user_stream;
+  bool return_profile;
+};
+
+struct SolarFoFluxParams {
+  double stream_value;
+  double mu0;
+  bool do_optical_deltam_scaling;
 };
 
 at::Tensor thermal_2s_packed(
@@ -195,6 +216,19 @@ at::Tensor thermal_fo(
     bool do_source_deltam_scaling,
     bool return_components,
     bool return_profile);
+
+at::Tensor thermal_fo_flux_correction(
+    at::Tensor tau,
+    at::Tensor omega,
+    at::Tensor scaling,
+    at::Tensor planck,
+    at::Tensor surfbb,
+    at::Tensor emissivity,
+    at::Tensor mu_nodes,
+    at::Tensor mu_weights,
+    double stream_value,
+    bool do_optical_deltam_scaling,
+    bool do_source_deltam_scaling);
 
 at::Tensor solar_2s_packed(
     at::Tensor tau,
@@ -323,6 +357,27 @@ at::Tensor solar_fo(
     bool return_components,
     bool return_profile);
 
+at::Tensor solar_fo_plane_parallel(
+    at::Tensor tau,
+    at::Tensor omega,
+    at::Tensor scaling,
+    at::Tensor surface_reflectance,
+    at::Tensor flux_factor,
+    at::Tensor exact_scatter,
+    double mu0,
+    double user_stream,
+    bool return_profile);
+
+at::Tensor solar_fo_flux_correction(
+    at::Tensor tau,
+    at::Tensor omega,
+    at::Tensor scaling,
+    at::Tensor surface_reflectance,
+    at::Tensor flux_factor,
+    double stream_value,
+    double mu0,
+    bool do_optical_deltam_scaling);
+
 void thermal_2s_cpu(at::TensorIterator& iter, const Thermal2sParams& params);
 void solar_2s_cpu(at::TensorIterator& iter, const Solar2sParams& params);
 void thermal_2s_flux_cpu(at::TensorIterator& iter, const Thermal2sParams& params);
@@ -330,7 +385,12 @@ void solar_2s_flux_cpu(at::TensorIterator& iter, const Solar2sParams& params);
 void thermal_2s_prop_flux_cpu(at::TensorIterator& iter, const Thermal2sPropParams& params);
 void solar_2s_prop_flux_cpu(at::TensorIterator& iter, const Solar2sPropParams& params);
 void thermal_fo_cpu(at::TensorIterator& iter, const ThermalFoParams& params);
+void thermal_fo_flux_correction_cpu(
+    at::TensorIterator& iter,
+    const ThermalFoFluxParams& params);
 void solar_fo_cpu(at::TensorIterator& iter, const SolarFoParams& params);
+void solar_fo_plane_parallel_cpu(at::TensorIterator& iter, const SolarFoPpParams& params);
+void solar_fo_flux_correction_cpu(at::TensorIterator& iter, const SolarFoFluxParams& params);
 
 #ifdef PY2SESS_WITH_CUDA
 void thermal_2s_cuda(at::TensorIterator& iter, const Thermal2sParams& params);
@@ -340,7 +400,12 @@ void solar_2s_flux_cuda(at::TensorIterator& iter, const Solar2sParams& params);
 void thermal_2s_prop_flux_cuda(at::TensorIterator& iter, const Thermal2sPropParams& params);
 void solar_2s_prop_flux_cuda(at::TensorIterator& iter, const Solar2sPropParams& params);
 void thermal_fo_cuda(at::TensorIterator& iter, const ThermalFoParams& params);
+void thermal_fo_flux_correction_cuda(
+    at::TensorIterator& iter,
+    const ThermalFoFluxParams& params);
 void solar_fo_cuda(at::TensorIterator& iter, const SolarFoParams& params);
+void solar_fo_plane_parallel_cuda(at::TensorIterator& iter, const SolarFoPpParams& params);
+void solar_fo_flux_correction_cuda(at::TensorIterator& iter, const SolarFoFluxParams& params);
 #endif
 
 }  // namespace py2sess_native

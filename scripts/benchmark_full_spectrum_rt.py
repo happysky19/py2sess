@@ -484,7 +484,17 @@ def _run_scene_forward_once(
     torch_threads: int,
     torch_bvp_engine: str,
     numpy_bvp_engine: str,
+    output_levels: bool,
+    output_fluxes: bool,
+    fo_flux_n_mu: int,
 ) -> dict[str, Any]:
+    common_options = {
+        "output_levels": output_levels,
+        "output_fluxes": output_fluxes,
+        "fo_flux_n_mu": fo_flux_n_mu,
+    }
+    if output_fluxes:
+        common_options["plane_parallel"] = True
     if config.backend in {"torch", "native"}:
         torch = _torch_module()
         if torch is None:
@@ -500,11 +510,13 @@ def _run_scene_forward_once(
             "torch_dtype": config.dtype,
             "torch_enable_grad": False,
             "bvp_solver": "auto" if torch_bvp_engine == "auto" else torch_bvp_engine,
+            **common_options,
         }
     else:
         options = {
             "backend": "numpy",
             "bvp_solver": "auto" if numpy_bvp_engine == "auto" else numpy_bvp_engine,
+            **common_options,
         }
     _sync_if_cuda(config)
     start = time.perf_counter()
@@ -522,6 +534,17 @@ def _run_scene_forward_once(
         "max_rel_diff_pct": max_rel,
         "source": _cuda_peak(config),
     }
+
+
+def _normalize_timing_kinds(args: argparse.Namespace) -> tuple[str, ...]:
+    allowed = {"components", "scene-forward", "level-fluxes"}
+    if args.timing_kinds is None:
+        parsed = ("level-fluxes",) if args.output_levels or args.output_fluxes else ("components",)
+    else:
+        parsed = _split_csv(args.timing_kinds, allowed=allowed, label="--timing-kinds")
+    if args.components and "components" not in parsed:
+        parsed = (*parsed, "components")
+    return parsed
 
 
 def _recommended_chunk(inputs: Any, backend: str) -> int:
@@ -1453,11 +1476,16 @@ def main() -> None:
     parser.add_argument("--systems", default="python")
     parser.add_argument(
         "--timing-kinds",
-        default="components",
+        default=None,
         help=(
-            "Python full-spectrum benchmarks support components only. The option is kept "
-            "for explicit reproducibility and currently accepts only components."
+            "Comma-separated timing modes: components, scene-forward, or level-fluxes. "
+            "Defaults to components unless --output-levels or --output-fluxes is set."
         ),
+    )
+    parser.add_argument(
+        "--components",
+        action="store_true",
+        help="Also run component timing. Kept as a shorthand for --timing-kinds components.",
     )
     parser.add_argument(
         "--backend-set",
@@ -1488,17 +1516,16 @@ def main() -> None:
     )
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=0)
+    parser.add_argument("--output-levels", action="store_true")
+    parser.add_argument("--output-fluxes", action="store_true")
+    parser.add_argument("--fo-flux-n-mu", type=int, default=8)
     parser.add_argument("--fortran-root", type=Path, default=DEFAULT_EXTERNAL_ROOT)
     parser.add_argument("--fortran-bundle-dir", type=Path, default=None)
     args = parser.parse_args()
 
     cases = _split_csv(args.cases, allowed={"tir", "uv"}, label="--cases")
     systems = _split_csv(args.systems, allowed={"python", "fortran"}, label="--systems")
-    timing_kinds = _split_csv(
-        args.timing_kinds,
-        allowed={"components"},
-        label="--timing-kinds",
-    )
+    timing_kinds = _normalize_timing_kinds(args)
     torch_dtypes = _split_csv(
         args.torch_dtypes,
         allowed={"float64", "float32"},
@@ -1508,6 +1535,11 @@ def main() -> None:
         raise ValueError("--repeats must be positive")
     if args.warmups < 0:
         raise ValueError("--warmups must be non-negative")
+    if args.fo_flux_n_mu <= 0:
+        raise ValueError("--fo-flux-n-mu must be positive")
+    if "level-fluxes" in timing_kinds:
+        args.output_levels = True
+        args.output_fluxes = True
 
     created_utc = datetime.now(timezone.utc).isoformat()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1517,6 +1549,10 @@ def main() -> None:
         _manifest_row(created_utc, "repo", "root", str(ROOT)),
         _manifest_row(created_utc, "metadata", "torch_compile", str(args.torch_compile)),
         _manifest_row(created_utc, "metadata", "torch_compile_mode", args.torch_compile_mode),
+        _manifest_row(created_utc, "metadata", "timing_kinds", ",".join(timing_kinds)),
+        _manifest_row(created_utc, "metadata", "output_levels", str(args.output_levels)),
+        _manifest_row(created_utc, "metadata", "output_fluxes", str(args.output_fluxes)),
+        _manifest_row(created_utc, "metadata", "fo_flux_n_mu", str(args.fo_flux_n_mu)),
     ]
     raw_rows: list[dict[str, Any]] = []
 
@@ -1575,6 +1611,44 @@ def main() -> None:
                                 config,
                                 torch_bvp_engine=args.torch_bvp_engine,
                             )
+
+                    raw_rows.extend(
+                        _run_repeats(
+                            created_utc=created_utc,
+                            spec=spec,
+                            run_once=run_once,
+                            repeats=args.repeats,
+                            warmups=args.warmups,
+                            base_row=base,
+                            config=config,
+                        )
+                    )
+                if "scene-forward" in timing_kinds or "level-fluxes" in timing_kinds:
+                    timing_kind = (
+                        "level_fluxes" if "level-fluxes" in timing_kinds else "scene_forward"
+                    )
+                    base = {
+                        "system": "py2sess",
+                        "case": spec.case,
+                        "mode": spec.mode,
+                        "backend": config.label,
+                        "device": config.device,
+                        "dtype": config.dtype,
+                        "timing_kind": timing_kind,
+                    }
+
+                    def run_once(scene=scene, inputs=inputs, config=config):
+                        return _run_scene_forward_once(
+                            scene,
+                            inputs,
+                            config,
+                            torch_threads=args.torch_threads,
+                            torch_bvp_engine=args.torch_bvp_engine,
+                            numpy_bvp_engine=args.numpy_bvp_engine,
+                            output_levels=args.output_levels,
+                            output_fluxes=args.output_fluxes,
+                            fo_flux_n_mu=args.fo_flux_n_mu,
+                        )
 
                     raw_rows.extend(
                         _run_repeats(

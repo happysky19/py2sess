@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
 import sys
 import unittest
 from pathlib import Path
@@ -85,6 +86,22 @@ class FullSpectrumBenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(summary[0]["total_mean_s"], 2.5)
         self.assertAlmostEqual(summary[0]["fo_mean_s"], 0.6)
         self.assertAlmostEqual(summary[0]["two_stream_mean_s"], 1.9)
+
+    def test_level_flux_timing_flags_select_scene_forward_fluxes(self) -> None:
+        bench = load_script(
+            "benchmark_full_spectrum_rt_flags", "scripts/benchmark_full_spectrum_rt.py"
+        )
+
+        args = argparse.Namespace(
+            timing_kinds=None,
+            components=False,
+            output_levels=True,
+            output_fluxes=True,
+        )
+        self.assertEqual(bench._normalize_timing_kinds(args), ("level-fluxes",))
+
+        args.components = True
+        self.assertEqual(bench._normalize_timing_kinds(args), ("level-fluxes", "components"))
 
 
 if __name__ == "__main__":

@@ -478,6 +478,54 @@ def _upuser_intensity_batch_torch(
     return fluxmult * cumsource
 
 
+def _flux_profile_solar_batch_torch(
+    *,
+    do_upwelling: bool,
+    do_dnwelling: bool,
+    pi4: float,
+    stream_value: float,
+    flux_factor,
+    x0: float,
+    initial_trans,
+    trans_solar_beam,
+    lcon,
+    mcon,
+    xpos1,
+    xpos2,
+    eigentrans,
+    wupper,
+    wlower,
+):
+    """Builds DISORT-style level fluxes from batched solar 2S quadrature values."""
+    wupper0, wupper1 = wupper
+    wlower0, wlower1 = wlower
+    up_upper = wupper1 + lcon * xpos2 + mcon * xpos1 * eigentrans
+    down_upper = wupper0 + lcon * xpos1 + mcon * xpos2 * eigentrans
+    up_lower = (
+        wlower1[:, -1] + lcon[:, -1] * xpos2[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos1[:, -1]
+    )
+    down_lower = (
+        wlower0[:, -1] + lcon[:, -1] * xpos1[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos2[:, -1]
+    )
+    up_quad = torch.cat((up_upper, up_lower[:, None]), dim=1)
+    down_quad = torch.cat((down_upper, down_lower[:, None]), dim=1)
+
+    pi2 = 0.5 * pi4
+    flux_up = torch.zeros_like(up_quad)
+    flux_down = torch.zeros_like(down_quad)
+    flux_mean = torch.zeros_like(up_quad)
+    if do_upwelling:
+        flux_up = pi2 * stream_value * up_quad
+        flux_mean = flux_mean + 0.5 * up_quad
+    if do_dnwelling:
+        flux_down = pi2 * stream_value * down_quad
+        flux_mean = flux_mean + 0.5 * down_quad
+        direct_trans = torch.cat((initial_trans, trans_solar_beam[:, None]), dim=1)
+        flux_down = flux_down + flux_factor[:, None] * direct_trans * x0
+        flux_mean = flux_mean + flux_factor[:, None] * direct_trans / pi4
+    return flux_up, flux_down, flux_up - flux_down, flux_mean
+
+
 def solve_solar_obs_batch_torch(
     *,
     tau,
@@ -502,6 +550,9 @@ def solve_solar_obs_batch_torch(
     bvp_dtype=None,
     bvp_engine: str = "auto",
     return_profile: bool = False,
+    return_fluxes: bool = False,
+    do_upwelling: bool = True,
+    do_dnwelling: bool = False,
 ):
     """Solves batched solar-observation 2S radiance with torch tensors.
 
@@ -580,6 +631,10 @@ def solve_solar_obs_batch_torch(
         total_profile = torch.zeros(
             (tau_t.shape[0], tau_t.shape[1] + 1), dtype=dtype, device=device
         )
+    flux_up = None
+    flux_down = None
+    flux_net = None
+    flux_mean = None
 
     for fourier in (0, 1):
         surface_factor = 2.0 if fourier == 0 else 1.0
@@ -682,6 +737,24 @@ def solve_solar_obs_batch_torch(
                 solve_device=bvp_device,
                 solve_dtype=bvp_dtype,
             )
+        if return_fluxes and fourier == 0:
+            flux_up, flux_down, flux_net, flux_mean = _flux_profile_solar_batch_torch(
+                do_upwelling=do_upwelling,
+                do_dnwelling=do_dnwelling,
+                pi4=pi4,
+                stream_value=stream_value,
+                flux_factor=flux_t,
+                x0=x0,
+                initial_trans=misc["initial_trans"],
+                trans_solar_beam=misc["trans_solar_beam"],
+                lcon=lcon,
+                mcon=mcon,
+                xpos1=xpos1,
+                xpos2=xpos2,
+                eigentrans=eigentrans,
+                wupper=wupper,
+                wlower=wlower,
+            )
         contribution = _upuser_intensity_batch_torch(
             layer_pis_cutoff=misc["layer_pis_cutoff"],
             surface_factor=surface_factor,
@@ -717,4 +790,13 @@ def solve_solar_obs_batch_torch(
             total = total_profile[:, 0]
         else:
             total = contribution if fourier == 0 else total + azmfac * contribution
-    return total_profile if return_profile else total
+    radiance = total_profile if return_profile else total
+    if return_fluxes:
+        return {
+            "radiance": radiance,
+            "flux_up": flux_up,
+            "flux_down": flux_down,
+            "flux_net": flux_net,
+            "flux_mean": flux_mean,
+        }
+    return radiance

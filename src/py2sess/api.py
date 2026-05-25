@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import numbers
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import Any
@@ -22,9 +23,16 @@ from .rtsolver.fo_solar_obs import (
     solve_fo_solar_obs,
 )
 from .rtsolver.fo_thermal import FoThermalResult, solve_fo_thermal
+from .rtsolver.fo_flux import (
+    solar_direct_surface_flux_plane_parallel,
+    solar_twostream_direct_surface_flux_plane_parallel,
+    thermal_fo_flux_plane_parallel,
+    thermal_twostream_source_flux_plane_parallel,
+)
 from .rtsolver.lattice_result import add_lattice_axes, lattice_shape, reshape_lattice_array
 from .optical.delta_m import (
     default_delta_m_truncation_factor,
+    delta_m_scale_optical_properties,
     validate_delta_m_truncation_factor,
 )
 from .optical.brdf_solar_obs import solar_obs_brdf_from_kernels
@@ -47,13 +55,23 @@ _GEOMETRY_TO_FO_MODE = {
 }
 
 
-def _reverse_level_axis(values: Any) -> Any:
-    """Returns ``values`` with the final level axis reversed."""
-    if values is None:
-        return None
-    if type(values).__module__.startswith("torch") and hasattr(values, "flip"):
-        return values.flip(dims=(-1,))
-    return values[..., ::-1]
+def _validate_positive_integer(name: str, value: Any) -> None:
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral) or int(value) <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+
+
+def _as_flux_mapping(flux_up: Any, flux_down: Any, flux_net: Any, flux_mean: Any) -> dict[str, Any]:
+    """Returns canonical level-flux fields plus the legacy short keys."""
+    return {
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_net,
+        "flux_mean": flux_mean,
+        "up": flux_up,
+        "down": flux_down,
+        "net": flux_net,
+        "mean": flux_mean,
+    }
 
 
 @dataclass(frozen=True)
@@ -102,9 +120,11 @@ class TwoStreamEssOptions:
     output_levels
         Whether full level profiles should be returned.
     output_fluxes
-        Whether DISORT-style level-shaped flux outputs should be returned.
-        Level axes follow the py2sess TOA-to-BOA convention; use
-        ``as_disort_flux()`` to reverse them for DISORT-style comparison.
+        Whether DISORT-style level-shaped flux outputs should be returned. The
+        final level axis is ordered from TOA to BOA and has length
+        ``nlyr + 1``. ``flux_down`` includes the direct solar beam when
+        applicable, and ``flux_net`` uses the py2sess convention
+        ``flux_up - flux_down``.
     mvout_only, additional_mvout
         Flags controlling which flux outputs are produced.
     surface_leaving, sl_isotropic
@@ -135,6 +155,13 @@ class TwoStreamEssOptions:
         Optional override for the thermal FO source-side delta-M multiplier
         used by the raw Fortran FO thermal core. ``None`` disables source-side
         scaling, matching the current validated FO thermal path.
+    fo_flux_n_mu
+        Positive-hemisphere polar quadrature nodes used by FO flux
+        source-replacement integrals.
+    fo_flux_n_phi
+        Optional azimuth quadrature nodes for future non-axisymmetric FO flux
+        integrals. ``None`` uses the current azimuth-symmetric path, which
+        applies the analytic ``2*pi`` azimuth factor.
     """
 
     nlyr: int
@@ -158,10 +185,15 @@ class TwoStreamEssOptions:
     torch_enable_grad: bool = True
     fo_optical_delta_m_scaling: bool | None = None
     fo_thermal_source_delta_m_scaling: bool | None = None
+    fo_flux_n_mu: int = 8
+    fo_flux_n_phi: int | None = None
 
     def __post_init__(self) -> None:
         if self.nlyr <= 0:
             raise ValueError("nlyr must be positive")
+        _validate_positive_integer("fo_flux_n_mu", self.fo_flux_n_mu)
+        if self.fo_flux_n_phi is not None:
+            _validate_positive_integer("fo_flux_n_phi", self.fo_flux_n_phi)
         if self.backend not in {"numpy", "torch", "native"}:
             raise ValueError("backend must be 'numpy', 'torch', or 'native'")
         if self.mode not in _MODE_TO_SOURCE_MODE:
@@ -197,7 +229,8 @@ class TwoStreamEssBatchResult:
 
     By default batched calls expose the fast wavelength/column endpoint path.
     When ``output_levels=True`` the result also includes upwelling radiance
-    profiles ordered from TOA to BOA along the final level axis.
+    profiles ordered from TOA to BOA along the final level axis. When
+    ``output_fluxes=True``, the ``flux_*`` arrays use that same level axis.
     """
 
     radiance_2s: Any
@@ -224,17 +257,12 @@ class TwoStreamEssBatchResult:
         return self.radiance_profile_total
 
     def as_disort_flux(self) -> dict[str, Any]:
-        """Returns flux arrays with the level axis reversed to BOA-to-TOA order."""
+        """Returns level flux arrays in pydisort's default TOA-to-BOA order."""
         if any(
             field is None for field in (self.flux_up, self.flux_down, self.flux_net, self.flux_mean)
         ):
             raise ValueError("flux outputs were not requested for this result")
-        return {
-            "up": _reverse_level_axis(self.flux_up),
-            "down": _reverse_level_axis(self.flux_down),
-            "net": _reverse_level_axis(self.flux_net),
-            "mean": _reverse_level_axis(self.flux_mean),
-        }
+        return _as_flux_mapping(self.flux_up, self.flux_down, self.flux_net, self.flux_mean)
 
 
 @dataclass(frozen=True)
@@ -247,6 +275,11 @@ class TwoStreamEssResult:
         Main 2S radiance outputs at the top and bottom of atmosphere.
     fluxes_toa, fluxes_boa
         Regular and actinic flux outputs.
+    flux_up, flux_down, flux_net, flux_mean
+        Optional level flux outputs when ``output_fluxes=True``. The final
+        level axis is TOA-to-BOA with length ``nlyr + 1``; ``flux_down``
+        includes the direct solar beam when present; ``flux_net`` is
+        ``flux_up - flux_down``.
     radlevel_up, radlevel_dn
         Optional level-by-level upwelling and downwelling radiance profiles.
     combined_intensity_toa, combined_intensity_boa
@@ -356,17 +389,12 @@ class TwoStreamEssResult:
         return self.radiance_profile_total
 
     def as_disort_flux(self) -> dict[str, Any]:
-        """Returns flux arrays with the level axis reversed to BOA-to-TOA order."""
+        """Returns level flux arrays in pydisort's default TOA-to-BOA order."""
         if any(
             field is None for field in (self.flux_up, self.flux_down, self.flux_net, self.flux_mean)
         ):
             raise ValueError("flux outputs were not requested for this result")
-        return {
-            "up": _reverse_level_axis(self.flux_up),
-            "down": _reverse_level_axis(self.flux_down),
-            "net": _reverse_level_axis(self.flux_net),
-            "mean": _reverse_level_axis(self.flux_mean),
-        }
+        return _as_flux_mapping(self.flux_up, self.flux_down, self.flux_net, self.flux_mean)
 
     def _lattice_shape(self) -> tuple[int, int, int]:
         """Returns the expected lattice shape for reshape helpers."""
@@ -616,6 +644,7 @@ class TwoStreamEss:
         angles: Any | None,
         stream: float | None,
         fbeam: Any,
+        fisot: Any,
         delta_m_truncation_factor: Any | None,
         view_angles: Any | None,
         beam_szas: Any | None,
@@ -669,6 +698,7 @@ class TwoStreamEss:
             "user_relazms": user_relazms,
             "stream_value": stream_value,
             "flux_factor": fbeam,
+            "fisot": fisot,
             "d2s_scaling": delta_m_truncation_factor,
             "thermal_bb_input": planck,
             "surfbb": surface_planck,
@@ -1299,6 +1329,7 @@ class TwoStreamEss:
             user_obsgeoms=mapped["user_obsgeoms"],
             stream_value=mapped["stream_value"],
             flux_factor=1.0,
+            fisot=0.0,
             albedo=0.0,
             d2s_scaling=np.zeros(n_layers, dtype=float),
             brdf=(
@@ -1530,6 +1561,7 @@ class TwoStreamEss:
             user_obsgeoms=mapped["user_obsgeoms"],
             stream_value=mapped["stream_value"],
             flux_factor=1.0,
+            fisot=0.0,
             albedo=0.0,
             d2s_scaling=np.zeros(n_layers, dtype=float),
             brdf=(
@@ -2218,11 +2250,6 @@ class TwoStreamEss:
         fo_scatter_term: Any | None,
     ) -> TwoStreamEssBatchResult:
         """Runs the public batch path, keeping fast endpoint kernels as default."""
-        if self.options.output_fluxes:
-            if self.options.backend != "native":
-                raise NotImplementedError(
-                    "batched output_fluxes=True currently requires backend='native'"
-                )
         if (
             not self.options.upwelling
             or self.options.downwelling
@@ -2326,11 +2353,26 @@ class TwoStreamEss:
         """Runs the solar observation-geometry public batch path."""
         from .rtsolver.fo_solar_obs_batch_numpy import (
             fo_solar_obs_batch_precompute,
+            solar_fo_flux_correction_numpy,
             solve_fo_solar_obs_eps_batch_numpy,
+            solve_fo_solar_obs_plane_parallel_batch_numpy,
         )
         from .rtsolver.solar_obs_batch_numpy import solve_solar_obs_batch_numpy
 
-        if include_fo and (self.options.plane_parallel or mapped["fo_geometry_mode"] != "eps"):
+        want_profiles = self.options.output_levels
+        want_fluxes = self.options.output_fluxes
+        if include_fo and want_fluxes:
+            if not self.options.plane_parallel:
+                raise NotImplementedError(
+                    "batched solar include_fo=True with output_fluxes=True currently "
+                    "requires plane_parallel=True"
+                )
+            if self.options.brdf_surface or self.options.surface_leaving:
+                raise NotImplementedError(
+                    "batched solar include_fo=True with output_fluxes=True currently "
+                    "supports Lambertian surface reflection only"
+                )
+        if include_fo and not self.options.plane_parallel and mapped["fo_geometry_mode"] != "eps":
             raise ValueError(
                 "batched solar include_fo=True currently supports pseudo_spherical geometry only"
             )
@@ -2369,6 +2411,7 @@ class TwoStreamEss:
             user_obsgeoms=mapped["user_obsgeoms"],
             stream_value=mapped["stream_value"],
             flux_factor=1.0,
+            fisot=0.0,
             albedo=0.0,
             d2s_scaling=np.zeros(n_layers, dtype=float),
             brdf=(
@@ -2398,7 +2441,6 @@ class TwoStreamEss:
             )
             if include_fo and brdf_rows["direct_brf"] is None:
                 raise ValueError("BRDF include_fo requires brdf['direct_brf']")
-        want_profiles = self.options.output_levels
         scatter_input = fo_scatter_term
         if include_fo and scatter_input is None:
             scatter_input = fo_scatter_term_henyey_greenstein(
@@ -2412,6 +2454,10 @@ class TwoStreamEss:
         fo_by_geometry: list[np.ndarray] = []
         two_stream_profile_by_geometry: list[np.ndarray] = []
         fo_profile_by_geometry: list[np.ndarray] = []
+        flux_up_by_geometry: list[np.ndarray] = []
+        flux_down_by_geometry: list[np.ndarray] = []
+        flux_net_by_geometry: list[np.ndarray] = []
+        flux_mean_by_geometry: list[np.ndarray] = []
         for geom_index, user_obsgeom in enumerate(prepared.user_obsgeoms):
             if self.options.plane_parallel:
                 secant = float(geometry.average_secant_pp[geom_index])
@@ -2430,6 +2476,10 @@ class TwoStreamEss:
                 if include_fo and want_profiles
                 else None
             )
+            flux_up_rows = np.empty((n_rows, n_layers + 1), dtype=float) if want_fluxes else None
+            flux_down_rows = np.empty((n_rows, n_layers + 1), dtype=float) if want_fluxes else None
+            flux_net_rows = np.empty((n_rows, n_layers + 1), dtype=float) if want_fluxes else None
+            flux_mean_rows = np.empty((n_rows, n_layers + 1), dtype=float) if want_fluxes else None
             scatter = None
             precomputed = None
             if include_fo:
@@ -2439,12 +2489,13 @@ class TwoStreamEss:
                     geom_index=geom_index,
                     n_geometries=prepared.user_obsgeoms.shape[0],
                 )
-                precomputed = fo_solar_obs_batch_precompute(
-                    user_obsgeom=user_obsgeom,
-                    heights=height_grid,
-                    earth_radius=earth_radius,
-                    nfine=fo_nfine,
-                )
+                if not self.options.plane_parallel:
+                    precomputed = fo_solar_obs_batch_precompute(
+                        user_obsgeom=user_obsgeom,
+                        heights=height_grid,
+                        earth_radius=earth_radius,
+                        nfine=fo_nfine,
+                    )
             for start in range(0, n_rows, chunk_size):
                 stop = min(start + chunk_size, n_rows)
                 row_slice = slice(start, stop)
@@ -2478,28 +2529,74 @@ class TwoStreamEss:
                     ulp=float(geometry.ulp[geom_index]),
                     bvp_engine=self._batch_bvp_engine(),
                     return_profile=want_profiles,
+                    return_fluxes=want_fluxes,
+                    do_upwelling=self.options.upwelling or want_fluxes,
+                    do_dnwelling=self.options.downwelling or want_fluxes,
                 )
+                if want_fluxes:
+                    flux_up_rows[row_slice] = two_stream_chunk["flux_up"]
+                    flux_down_rows[row_slice] = two_stream_chunk["flux_down"]
+                    flux_net_rows[row_slice] = two_stream_chunk["flux_net"]
+                    flux_mean_rows[row_slice] = two_stream_chunk["flux_mean"]
+                    two_stream_chunk = two_stream_chunk["radiance"]
                 if want_profiles:
                     two_stream_profile_rows[row_slice] = two_stream_chunk
                     two_stream_rows[row_slice] = two_stream_chunk[:, 0]
                 else:
                     two_stream_rows[row_slice] = two_stream_chunk
                 if include_fo:
-                    fo_chunk = solve_fo_solar_obs_eps_batch_numpy(
-                        tau=tau[row_slice],
-                        omega=omega[row_slice],
-                        scaling=scaling[row_slice],
-                        albedo=albedo_rows[row_slice],
-                        flux_factor=fbeam_rows[row_slice],
-                        exact_scatter=scatter[row_slice],
-                        precomputed=precomputed,
-                        direct_surface_reflectance=(
-                            None
+                    if self.options.plane_parallel:
+                        surface_reflectance = (
+                            albedo_rows[row_slice]
                             if brdf_rows is None
                             else brdf_rows["direct_brf"][row_slice, geom_index]
-                        ),
-                        return_profile=want_profiles,
-                    )
+                        )
+                        fo_chunk = solve_fo_solar_obs_plane_parallel_batch_numpy(
+                            tau=tau[row_slice],
+                            omega=omega[row_slice],
+                            scaling=scaling[row_slice],
+                            surface_reflectance=surface_reflectance,
+                            flux_factor=fbeam_rows[row_slice],
+                            exact_scatter=scatter[row_slice],
+                            mu0=float(geometry.x0[geom_index]),
+                            user_stream=float(geometry.user_streams[geom_index]),
+                            return_profile=want_profiles,
+                        )
+                    else:
+                        fo_chunk = solve_fo_solar_obs_eps_batch_numpy(
+                            tau=tau[row_slice],
+                            omega=omega[row_slice],
+                            scaling=scaling[row_slice],
+                            albedo=albedo_rows[row_slice],
+                            flux_factor=fbeam_rows[row_slice],
+                            exact_scatter=scatter[row_slice],
+                            precomputed=precomputed,
+                            direct_surface_reflectance=(
+                                None
+                                if brdf_rows is None
+                                else brdf_rows["direct_brf"][row_slice, geom_index]
+                            ),
+                            return_profile=want_profiles,
+                        )
+                    if want_fluxes:
+                        correction = solar_fo_flux_correction_numpy(
+                            tau=tau[row_slice],
+                            omega=omega[row_slice],
+                            scaling=scaling[row_slice],
+                            surface_reflectance=albedo_rows[row_slice],
+                            flux_factor=fbeam_rows[row_slice],
+                            stream_value=prepared.stream_value,
+                            mu0=float(geometry.x0[geom_index]),
+                            do_optical_deltam_scaling=(
+                                self.options.effective_fo_optical_deltam_scaling
+                            ),
+                        )
+                        flux_up_rows[row_slice] += correction["flux_up"]
+                        flux_down_rows[row_slice] += correction["flux_down"]
+                        flux_mean_rows[row_slice] += correction["flux_mean"]
+                        flux_net_rows[row_slice] = (
+                            flux_up_rows[row_slice] - flux_down_rows[row_slice]
+                        )
                     if want_profiles:
                         fo_profile_rows[row_slice] = fo_chunk
                         fo_rows[row_slice] = fo_chunk[:, 0]
@@ -2508,6 +2605,11 @@ class TwoStreamEss:
             two_stream_by_geometry.append(two_stream_rows)
             if want_profiles:
                 two_stream_profile_by_geometry.append(two_stream_profile_rows)
+            if want_fluxes:
+                flux_up_by_geometry.append(flux_up_rows)
+                flux_down_by_geometry.append(flux_down_rows)
+                flux_net_by_geometry.append(flux_net_rows)
+                flux_mean_by_geometry.append(flux_mean_rows)
             if include_fo:
                 fo_by_geometry.append(fo_rows)
                 if want_profiles:
@@ -2540,6 +2642,28 @@ class TwoStreamEss:
             radiance_profile_2s = None
             radiance_profile_fo = None
             radiance_profile_total = None
+        if want_fluxes:
+            flux_up, _ = self._reshape_profile(
+                flux_up_by_geometry,
+                batch_shape=batch_shape,
+            )
+            flux_down, _ = self._reshape_profile(
+                flux_down_by_geometry,
+                batch_shape=batch_shape,
+            )
+            flux_net, _ = self._reshape_profile(
+                flux_net_by_geometry,
+                batch_shape=batch_shape,
+            )
+            flux_mean, _ = self._reshape_profile(
+                flux_mean_by_geometry,
+                batch_shape=batch_shape,
+            )
+        else:
+            flux_up = None
+            flux_down = None
+            flux_net = None
+            flux_mean = None
         return TwoStreamEssBatchResult(
             radiance_2s=radiance_2s,
             radiance_fo=radiance_fo,
@@ -2547,6 +2671,10 @@ class TwoStreamEss:
             radiance_profile_2s=radiance_profile_2s,
             radiance_profile_fo=radiance_profile_fo,
             radiance_profile_total=radiance_profile_total,
+            flux_up=flux_up,
+            flux_down=flux_down,
+            flux_net=flux_net,
+            flux_mean=flux_mean,
             batch_shape=batch_shape,
             geometry_shape=geometry_shape,
         )
@@ -2567,19 +2695,38 @@ class TwoStreamEss:
         """Runs the solar observation-geometry public batch path on torch tensors."""
         from .rtsolver.backend import _load_torch
         from .rtsolver.fo_solar_obs_batch_numpy import fo_solar_obs_batch_precompute
-        from .rtsolver.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
+        from .rtsolver.fo_solar_obs_batch_torch import (
+            solar_fo_flux_correction_torch,
+            solve_fo_solar_obs_eps_batch_torch,
+            solve_fo_solar_obs_plane_parallel_batch_torch,
+        )
         from .rtsolver.fo_solar_obs_torch import fo_scatter_term_henyey_greenstein_torch
         from .rtsolver.native_backend import (
             native_backend_supports_device,
             solve_solar_2s,
             solve_solar_fo,
+            solve_solar_fo_flux_correction,
+            solve_solar_fo_plane_parallel,
         )
         from .rtsolver.solar_obs_batch_torch import solve_solar_obs_batch_torch
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
             raise RuntimeError("backend='torch' requires torch to be installed")
-        if include_fo and (self.options.plane_parallel or mapped["fo_geometry_mode"] != "eps"):
+        want_profiles = self.options.output_levels
+        want_fluxes = self.options.output_fluxes
+        if include_fo and want_fluxes:
+            if not self.options.plane_parallel:
+                raise NotImplementedError(
+                    "batched solar include_fo=True with output_fluxes=True currently "
+                    "requires plane_parallel=True"
+                )
+            if self.options.brdf_surface or self.options.surface_leaving:
+                raise NotImplementedError(
+                    "batched solar include_fo=True with output_fluxes=True currently "
+                    "supports Lambertian surface reflection only"
+                )
+        if include_fo and not self.options.plane_parallel and mapped["fo_geometry_mode"] != "eps":
             raise ValueError(
                 "batched solar include_fo=True currently supports pseudo_spherical geometry only"
             )
@@ -2640,6 +2787,7 @@ class TwoStreamEss:
             user_obsgeoms=mapped["user_obsgeoms"],
             stream_value=mapped["stream_value"],
             flux_factor=1.0,
+            fisot=0.0,
             albedo=0.0,
             d2s_scaling=np.zeros(n_layers, dtype=float),
             brdf=(
@@ -2676,8 +2824,6 @@ class TwoStreamEss:
                 batch_shape=batch_shape,
                 n_geoms=prepared.user_obsgeoms.shape[0],
             )
-        want_profiles = self.options.output_levels
-        want_fluxes = self.options.output_fluxes
         two_stream_by_geometry = []
         fo_by_geometry = []
         two_stream_profile_by_geometry = []
@@ -2690,10 +2836,6 @@ class TwoStreamEss:
         use_native_2s = self.options.backend == "native" and native_backend_supports_device(
             native_device_type
         )
-        if want_fluxes and not use_native_2s:
-            raise RuntimeError(
-                "batched output_fluxes=True requires a built native extension for this device"
-            )
         if brdf_rows is not None and not use_native_2s:
             raise RuntimeError(
                 "batched BRDF backend='native' requires a built native extension for this device"
@@ -2702,6 +2844,15 @@ class TwoStreamEss:
             raise RuntimeError(
                 "batched surface_leaving backend='native' requires a built native extension "
                 "for this device"
+            )
+        if (
+            include_fo
+            and want_fluxes
+            and (brdf_rows is not None or surface_leaving_rows is not None)
+        ):
+            raise NotImplementedError(
+                "batched solar include_fo=True with output_fluxes=True currently "
+                "supports Lambertian surface reflection only"
             )
         with self._torch_grad_context():
             scatter_input = fo_scatter_term
@@ -2748,12 +2899,13 @@ class TwoStreamEss:
                         geom_index=geom_index,
                         n_geometries=prepared.user_obsgeoms.shape[0],
                     )
-                    precomputed = fo_solar_obs_batch_precompute(
-                        user_obsgeom=user_obsgeom,
-                        heights=height_grid,
-                        earth_radius=earth_radius,
-                        nfine=fo_nfine,
-                    )
+                    if not self.options.plane_parallel:
+                        precomputed = fo_solar_obs_batch_precompute(
+                            user_obsgeom=user_obsgeom,
+                            heights=height_grid,
+                            earth_radius=earth_radius,
+                            nfine=fo_nfine,
+                        )
                 for start in range(0, n_rows, chunk_size):
                     stop = min(start + chunk_size, n_rows)
                     row_slice = slice(start, stop)
@@ -2848,14 +3000,57 @@ class TwoStreamEss:
                             device=context.device,
                             bvp_engine=self._torch_batch_bvp_engine(),
                             return_profile=want_profiles,
+                            return_fluxes=want_fluxes,
+                            do_upwelling=self.options.upwelling or want_fluxes,
+                            do_dnwelling=self.options.downwelling or want_fluxes,
                         )
+                        if want_fluxes:
+                            flux_up_chunks.append(two_chunk["flux_up"])
+                            flux_down_chunks.append(two_chunk["flux_down"])
+                            flux_net_chunks.append(two_chunk["flux_net"])
+                            flux_mean_chunks.append(two_chunk["flux_mean"])
+                            two_chunk = two_chunk["radiance"]
                     if want_profiles:
                         two_profile_chunks.append(two_chunk)
                         two_chunks.append(two_chunk[:, 0])
                     else:
                         two_chunks.append(two_chunk)
                     if include_fo:
-                        if use_native_2s:
+                        if self.options.plane_parallel:
+                            if use_native_2s:
+                                direct_surface_reflectance = (
+                                    albedo_rows[row_slice]
+                                    if brdf_rows is None
+                                    else value_to_torch(
+                                        brdf_rows["direct_brf"][row_slice, geom_index], context
+                                    )
+                                )
+                                fo_chunk = solve_solar_fo_plane_parallel(
+                                    tau=tau[row_slice],
+                                    omega=omega[row_slice],
+                                    scaling=scaling[row_slice],
+                                    surface_reflectance=direct_surface_reflectance,
+                                    flux_factor=fbeam_rows[row_slice],
+                                    exact_scatter=scatter[row_slice],
+                                    mu0=float(geometry.x0[geom_index]),
+                                    user_stream=float(geometry.user_streams[geom_index]),
+                                    return_profile=want_profiles,
+                                )
+                            else:
+                                fo_chunk = solve_fo_solar_obs_plane_parallel_batch_torch(
+                                    tau=tau[row_slice],
+                                    omega=omega[row_slice],
+                                    scaling=scaling[row_slice],
+                                    surface_reflectance=albedo_rows[row_slice],
+                                    flux_factor=fbeam_rows[row_slice],
+                                    exact_scatter=scatter[row_slice],
+                                    mu0=float(geometry.x0[geom_index]),
+                                    user_stream=float(geometry.user_streams[geom_index]),
+                                    dtype=context.dtype,
+                                    device=context.device,
+                                    return_profile=want_profiles,
+                                )
+                        elif use_native_2s:
                             fo_chunk = solve_solar_fo(
                                 tau=tau[row_slice],
                                 omega=omega[row_slice],
@@ -2886,6 +3081,39 @@ class TwoStreamEss:
                                 device=context.device,
                                 return_profile=want_profiles,
                             )
+                        if want_fluxes:
+                            if use_native_2s:
+                                correction = solve_solar_fo_flux_correction(
+                                    tau=tau[row_slice],
+                                    omega=omega[row_slice],
+                                    scaling=scaling[row_slice],
+                                    surface_reflectance=albedo_rows[row_slice],
+                                    flux_factor=fbeam_rows[row_slice],
+                                    stream_value=prepared.stream_value,
+                                    mu0=float(geometry.x0[geom_index]),
+                                    do_optical_deltam_scaling=(
+                                        self.options.effective_fo_optical_deltam_scaling
+                                    ),
+                                )
+                            else:
+                                correction = solar_fo_flux_correction_torch(
+                                    tau=tau[row_slice],
+                                    omega=omega[row_slice],
+                                    scaling=scaling[row_slice],
+                                    surface_reflectance=albedo_rows[row_slice],
+                                    flux_factor=fbeam_rows[row_slice],
+                                    stream_value=prepared.stream_value,
+                                    mu0=float(geometry.x0[geom_index]),
+                                    dtype=context.dtype,
+                                    device=context.device,
+                                    do_optical_deltam_scaling=(
+                                        self.options.effective_fo_optical_deltam_scaling
+                                    ),
+                                )
+                            flux_up_chunks[-1] = flux_up_chunks[-1] + correction["flux_up"]
+                            flux_down_chunks[-1] = flux_down_chunks[-1] + correction["flux_down"]
+                            flux_mean_chunks[-1] = flux_mean_chunks[-1] + correction["flux_mean"]
+                            flux_net_chunks[-1] = flux_up_chunks[-1] - flux_down_chunks[-1]
                         if want_profiles:
                             fo_profile_chunks.append(fo_chunk)
                             fo_chunks.append(fo_chunk[:, 0])
@@ -2989,6 +3217,7 @@ class TwoStreamEss:
             _fo_thermal_toa,
             _two_stream_thermal_toa,
             precompute_fo_thermal_geometry_numpy,
+            thermal_fo_flux_correction_numpy,
         )
 
         n_layers = self.options.nlyr
@@ -3026,10 +3255,20 @@ class TwoStreamEss:
         self._require_finite("tau", tau)
         angles = self._thermal_angles(mapped["user_angles"])
         want_profiles = self.options.output_levels
+        want_fluxes = self.options.output_fluxes
+        if include_fo and want_fluxes and not self.options.plane_parallel:
+            raise NotImplementedError(
+                "batched thermal include_fo=True with output_fluxes=True currently "
+                "requires plane_parallel=True"
+            )
         two_stream_by_geometry: list[np.ndarray] = []
         fo_by_geometry: list[np.ndarray] = []
         two_stream_profile_by_geometry: list[np.ndarray] = []
         fo_profile_by_geometry: list[np.ndarray] = []
+        flux_up_by_geometry: list[np.ndarray] = []
+        flux_down_by_geometry: list[np.ndarray] = []
+        flux_net_by_geometry: list[np.ndarray] = []
+        flux_mean_by_geometry: list[np.ndarray] = []
         n_rows = tau.shape[0]
         chunk_size = self._thermal_batch_chunk_size(n_rows, n_layers, backend="numpy")
         height_grid = None
@@ -3049,6 +3288,10 @@ class TwoStreamEss:
                 if include_fo and want_profiles
                 else None
             )
+            flux_up_rows = np.empty((n_rows, n_layers + 1), dtype=float) if want_fluxes else None
+            flux_down_rows = np.empty((n_rows, n_layers + 1), dtype=float) if want_fluxes else None
+            flux_net_rows = np.empty((n_rows, n_layers + 1), dtype=float) if want_fluxes else None
+            flux_mean_rows = np.empty((n_rows, n_layers + 1), dtype=float) if want_fluxes else None
             fo_geometry = None
             if include_fo:
                 fo_geometry = precompute_fo_thermal_geometry_numpy(
@@ -3074,7 +3317,16 @@ class TwoStreamEss:
                     thermal_tcutoff=self.options.thermal_tcutoff,
                     bvp_engine=self._batch_bvp_engine(),
                     return_profile=want_profiles,
+                    return_fluxes=want_fluxes,
+                    do_upwelling=self.options.upwelling or want_fluxes,
+                    do_dnwelling=self.options.downwelling or want_fluxes,
                 )
+                if want_fluxes:
+                    flux_up_rows[row_slice] = two_stream["flux_up"]
+                    flux_down_rows[row_slice] = two_stream["flux_down"]
+                    flux_net_rows[row_slice] = two_stream["flux_net"]
+                    flux_mean_rows[row_slice] = two_stream["flux_mean"]
+                    two_stream = two_stream["radiance"]
                 if want_profiles:
                     two_stream_profile_rows[row_slice] = two_stream
                     two_stream_rows[row_slice] = two_stream[:, 0]
@@ -3101,6 +3353,30 @@ class TwoStreamEss:
                             self.options.effective_fo_thermal_source_deltam_scaling
                         ),
                     )
+                    if want_fluxes:
+                        correction = thermal_fo_flux_correction_numpy(
+                            tau=tau[row_slice],
+                            omega=omega[row_slice],
+                            scaling=scaling[row_slice],
+                            thermal_bb_input=planck[row_slice],
+                            surfbb=surfbb[row_slice],
+                            emissivity=emissivity_rows[row_slice],
+                            stream_value=mapped["stream_value"],
+                            do_optical_deltam_scaling=(
+                                self.options.effective_fo_optical_deltam_scaling
+                            ),
+                            do_source_deltam_scaling=(
+                                self.options.effective_fo_thermal_source_deltam_scaling
+                            ),
+                            n_mu=self.options.fo_flux_n_mu,
+                            n_phi=self.options.fo_flux_n_phi,
+                        )
+                        flux_up_rows[row_slice] += correction["flux_up"]
+                        flux_down_rows[row_slice] += correction["flux_down"]
+                        flux_mean_rows[row_slice] += correction["flux_mean"]
+                        flux_net_rows[row_slice] = (
+                            flux_up_rows[row_slice] - flux_down_rows[row_slice]
+                        )
                     if want_profiles:
                         fo_profile_rows[row_slice] = fo
                         fo_rows[row_slice] = fo[:, 0]
@@ -3109,6 +3385,11 @@ class TwoStreamEss:
             two_stream_by_geometry.append(two_stream_rows)
             if want_profiles:
                 two_stream_profile_by_geometry.append(two_stream_profile_rows)
+            if want_fluxes:
+                flux_up_by_geometry.append(flux_up_rows)
+                flux_down_by_geometry.append(flux_down_rows)
+                flux_net_by_geometry.append(flux_net_rows)
+                flux_mean_by_geometry.append(flux_mean_rows)
             if include_fo:
                 fo_by_geometry.append(fo_rows)
                 if want_profiles:
@@ -3141,6 +3422,28 @@ class TwoStreamEss:
             radiance_profile_2s = None
             radiance_profile_fo = None
             radiance_profile_total = None
+        if want_fluxes:
+            flux_up, _ = self._reshape_profile(
+                flux_up_by_geometry,
+                batch_shape=batch_shape,
+            )
+            flux_down, _ = self._reshape_profile(
+                flux_down_by_geometry,
+                batch_shape=batch_shape,
+            )
+            flux_net, _ = self._reshape_profile(
+                flux_net_by_geometry,
+                batch_shape=batch_shape,
+            )
+            flux_mean, _ = self._reshape_profile(
+                flux_mean_by_geometry,
+                batch_shape=batch_shape,
+            )
+        else:
+            flux_up = None
+            flux_down = None
+            flux_net = None
+            flux_mean = None
         return TwoStreamEssBatchResult(
             radiance_2s=radiance_2s,
             radiance_fo=radiance_fo,
@@ -3148,6 +3451,10 @@ class TwoStreamEss:
             radiance_profile_2s=radiance_profile_2s,
             radiance_profile_fo=radiance_profile_fo,
             radiance_profile_total=radiance_profile_total,
+            flux_up=flux_up,
+            flux_down=flux_down,
+            flux_net=flux_net,
+            flux_mean=flux_mean,
             batch_shape=batch_shape,
             geometry_shape=geometry_shape,
         )
@@ -3169,12 +3476,14 @@ class TwoStreamEss:
             native_backend_supports_device,
             solve_thermal_2s,
             solve_thermal_fo,
+            solve_thermal_fo_flux_correction,
         )
         from .rtsolver.thermal_batch_numpy import precompute_fo_thermal_geometry_numpy
         from .rtsolver.thermal_batch_torch import (
             _fo_thermal_toa_batch,
             _two_stream_thermal_toa_batch,
             fo_thermal_geometry_to_torch,
+            thermal_fo_flux_correction_torch,
         )
 
         torch = _load_torch()
@@ -3291,15 +3600,17 @@ class TwoStreamEss:
             if use_native_2s and native_device_type == "cpu"
             else self._thermal_batch_chunk_size(n_rows, n_layers, backend="torch")
         )
-        if want_fluxes and not use_native_2s:
-            raise RuntimeError(
-                "batched output_fluxes=True requires a built native extension for this device"
-            )
         if thermal_brdf_rows is not None and not use_native_2s:
             raise RuntimeError(
                 "batched thermal BRDF backend='native' requires a built native extension "
                 "for this device"
             )
+        if include_fo and want_fluxes:
+            if not self.options.plane_parallel:
+                raise NotImplementedError(
+                    "batched thermal include_fo=True with output_fluxes=True currently "
+                    "requires plane_parallel=True"
+                )
         with self._torch_grad_context():
             for angle_index, angle in enumerate(angles):
                 user_stream = float(np.cos(np.deg2rad(float(angle))))
@@ -3410,7 +3721,16 @@ class TwoStreamEss:
                             thermal_tcutoff=self.options.thermal_tcutoff,
                             bvp_engine=self._torch_batch_bvp_engine(),
                             return_profile=want_profiles,
+                            return_fluxes=want_fluxes,
+                            do_upwelling=self.options.upwelling or want_fluxes,
+                            do_dnwelling=self.options.downwelling or want_fluxes,
                         )
+                        if want_fluxes:
+                            flux_up_chunks.append(two_stream["flux_up"])
+                            flux_down_chunks.append(two_stream["flux_down"])
+                            flux_net_chunks.append(two_stream["flux_net"])
+                            flux_mean_chunks.append(two_stream["flux_mean"])
+                            two_stream = two_stream["radiance"]
                     if want_profiles:
                         if keep_graph:
                             two_stream_profile_chunks.append(two_stream)
@@ -3463,6 +3783,46 @@ class TwoStreamEss:
                                     self.options.effective_fo_thermal_source_deltam_scaling
                                 ),
                             )
+                        if want_fluxes:
+                            if use_native_2s:
+                                correction = solve_thermal_fo_flux_correction(
+                                    tau=tau[row_slice],
+                                    omega=omega[row_slice],
+                                    scaling=scaling[row_slice],
+                                    planck=planck[row_slice],
+                                    surfbb=surfbb[row_slice],
+                                    emissivity=emissivity_rows[row_slice],
+                                    stream_value=mapped["stream_value"],
+                                    do_optical_deltam_scaling=(
+                                        self.options.effective_fo_optical_deltam_scaling
+                                    ),
+                                    do_source_deltam_scaling=(
+                                        self.options.effective_fo_thermal_source_deltam_scaling
+                                    ),
+                                    n_mu=self.options.fo_flux_n_mu,
+                                )
+                            else:
+                                correction = thermal_fo_flux_correction_torch(
+                                    tau=tau[row_slice],
+                                    omega=omega[row_slice],
+                                    scaling=scaling[row_slice],
+                                    thermal_bb_input=planck[row_slice],
+                                    surfbb=surfbb[row_slice],
+                                    emissivity=emissivity_rows[row_slice],
+                                    stream_value=mapped["stream_value"],
+                                    do_optical_deltam_scaling=(
+                                        self.options.effective_fo_optical_deltam_scaling
+                                    ),
+                                    do_source_deltam_scaling=(
+                                        self.options.effective_fo_thermal_source_deltam_scaling
+                                    ),
+                                    n_mu=self.options.fo_flux_n_mu,
+                                    n_phi=self.options.fo_flux_n_phi,
+                                )
+                            flux_up_chunks[-1] = flux_up_chunks[-1] + correction["flux_up"]
+                            flux_down_chunks[-1] = flux_down_chunks[-1] + correction["flux_down"]
+                            flux_mean_chunks[-1] = flux_mean_chunks[-1] + correction["flux_mean"]
+                            flux_net_chunks[-1] = flux_up_chunks[-1] - flux_down_chunks[-1]
                         if want_profiles:
                             if keep_graph:
                                 fo_profile_chunks.append(fo)
@@ -3759,6 +4119,7 @@ class TwoStreamEss:
         user_obsgeoms: Any | None,
         stream_value: float,
         flux_factor: float,
+        fisot: float,
         albedo: float,
         d2s_scaling: Any | None = None,
         brdf: Any | None = None,
@@ -3788,6 +4149,7 @@ class TwoStreamEss:
             user_angles,
             thermal_bb_input,
             flux_factor,
+            fisot,
             albedo,
             surfbb,
             emissivity,
@@ -3801,6 +4163,7 @@ class TwoStreamEss:
             user_obsgeoms=to_numpy(user_obsgeoms),
             stream_value=stream_value,
             flux_factor=flux_factor,
+            fisot=fisot,
             albedo=albedo,
             d2s_scaling=to_numpy(d2s_scaling),
             brdf=brdf,
@@ -3824,6 +4187,7 @@ class TwoStreamEss:
         user_obsgeoms: Any | None,
         stream_value: float,
         flux_factor: float,
+        fisot: float,
         albedo: float,
         d2s_scaling: Any | None = None,
         brdf: Any | None = None,
@@ -3845,6 +4209,7 @@ class TwoStreamEss:
             user_obsgeoms=user_obsgeoms,
             stream_value=stream_value,
             flux_factor=flux_factor,
+            fisot=fisot,
             albedo=albedo,
             d2s_scaling=d2s_scaling,
             brdf=brdf,
@@ -4055,7 +4420,93 @@ class TwoStreamEss:
             "include_fo is implemented for mode='solar', 'solar_lattice', and 'thermal' only"
         )
 
-    def _endpoint_flux_profiles(self, solved) -> dict[str, Any]:
+    def _solver_delta_tau(self, prepared: PreparedInputs) -> np.ndarray:
+        if not self.options.delta_scaling:
+            return prepared.tau_arr
+        delta_tau, _, _ = delta_m_scale_optical_properties(
+            prepared.tau_arr,
+            prepared.omega_arr,
+            prepared.asymm_arr,
+            prepared.d2s_scaling,
+        )
+        return delta_tau
+
+    def _solar_twostream_direct_surface_flux_profiles(
+        self,
+        prepared: PreparedInputs,
+        *,
+        finalize_lattice: bool = True,
+    ) -> dict[str, np.ndarray]:
+        direct_prepared = replace(prepared, tau_arr=self._solver_delta_tau(prepared))
+        flux = solar_twostream_direct_surface_flux_plane_parallel(direct_prepared)
+        if (
+            finalize_lattice
+            and direct_prepared.source_mode == "solar_lat"
+            and direct_prepared.lattice_counts is not None
+        ):
+            nbeams, nusers, nazms = direct_prepared.lattice_counts
+            indices = np.arange(nbeams, dtype=int) * (nusers * nazms)
+            flux = {key: value[indices, :] for key, value in flux.items()}
+        return flux
+
+    def _fo_flux_profiles(
+        self,
+        *,
+        prepared: PreparedInputs,
+        fo_result,
+    ) -> dict[str, Any] | None:
+        """Computes supported source-replacement level-flux corrections."""
+        if fo_result is None or not self.options.output_fluxes:
+            return None
+        if self._uses_torch_runtime:
+            raise NotImplementedError(
+                "include_fo=True with output_fluxes=True is currently implemented "
+                "for scalar NumPy plane-parallel runs only"
+            )
+        if not self.options.plane_parallel:
+            raise NotImplementedError(
+                "include_fo=True with output_fluxes=True currently requires plane_parallel=True"
+            )
+        if isinstance(fo_result, FoSolarObsResult):
+            fo_prepared = prepared
+            if self.options.effective_fo_optical_deltam_scaling:
+                fo_prepared = replace(
+                    prepared,
+                    tau_arr=prepared.tau_arr * (1.0 - prepared.omega_arr * prepared.d2s_scaling),
+                )
+            flux = solar_direct_surface_flux_plane_parallel(fo_prepared)
+            embedded_surface = self._solar_twostream_direct_surface_flux_profiles(
+                prepared,
+                finalize_lattice=False,
+            )
+            for key in ("flux_up", "flux_down", "flux_mean"):
+                flux[key] = flux[key] - embedded_surface[key]
+            flux["flux_net"] = flux["flux_up"] - flux["flux_down"]
+            if fo_prepared.source_mode == "solar_lat" and fo_prepared.lattice_counts is not None:
+                nbeams, nusers, nazms = fo_prepared.lattice_counts
+                indices = np.arange(nbeams, dtype=int) * (nusers * nazms)
+                flux = {key: value[indices, :] for key, value in flux.items()}
+            return flux
+        if isinstance(fo_result, FoThermalResult):
+            flux = thermal_fo_flux_plane_parallel(
+                prepared,
+                do_optical_deltam_scaling=self.options.effective_fo_optical_deltam_scaling,
+                do_source_deltam_scaling=self.options.effective_fo_thermal_source_deltam_scaling,
+                n_mu=self.options.fo_flux_n_mu,
+                n_phi=self.options.fo_flux_n_phi,
+            )
+            embedded = thermal_twostream_source_flux_plane_parallel(
+                prepared,
+                do_optical_deltam_scaling=self.options.effective_fo_optical_deltam_scaling,
+                do_source_deltam_scaling=self.options.effective_fo_thermal_source_deltam_scaling,
+            )
+            for key in ("flux_up", "flux_down", "flux_mean"):
+                flux[key] = flux[key] - embedded[key]
+            flux["flux_net"] = flux["flux_up"] - flux["flux_down"]
+            return flux
+        return None
+
+    def _endpoint_flux_profiles(self, solved, *, fo_flux=None) -> dict[str, Any]:
         """Builds or forwards level-shaped flux arrays."""
         if not self.options.output_fluxes:
             return {
@@ -4065,12 +4516,18 @@ class TwoStreamEss:
                 "flux_mean": None,
             }
         if all(key in solved for key in ("flux_up", "flux_down", "flux_net", "flux_mean")):
-            return {
+            fluxes = {
                 "flux_up": solved["flux_up"],
                 "flux_down": solved["flux_down"],
                 "flux_net": solved["flux_net"],
                 "flux_mean": solved["flux_mean"],
             }
+            if fo_flux is not None:
+                fluxes["flux_up"] = fluxes["flux_up"] + fo_flux["flux_up"]
+                fluxes["flux_down"] = fluxes["flux_down"] + fo_flux["flux_down"]
+                fluxes["flux_mean"] = fluxes["flux_mean"] + fo_flux["flux_mean"]
+                fluxes["flux_net"] = fluxes["flux_up"] - fluxes["flux_down"]
+            return fluxes
 
         fluxes_toa = solved["fluxes_toa"]
         fluxes_boa = solved["fluxes_boa"]
@@ -4102,15 +4559,25 @@ class TwoStreamEss:
         flux_mean[..., -1] = fluxes_boa[0]
         flux_net[..., 0] = flux_up[..., 0]
         flux_net[..., -1] = -flux_down[..., -1]
-        return {
+        fluxes = {
             "flux_up": flux_up,
             "flux_down": flux_down,
             "flux_net": flux_net,
             "flux_mean": flux_mean,
         }
+        if fo_flux is not None:
+            fluxes["flux_up"] = fluxes["flux_up"] + fo_flux["flux_up"]
+            fluxes["flux_down"] = fluxes["flux_down"] + fo_flux["flux_down"]
+            fluxes["flux_mean"] = fluxes["flux_mean"] + fo_flux["flux_mean"]
+            fluxes["flux_net"] = fluxes["flux_up"] - fluxes["flux_down"]
+        return fluxes
 
     def _build_forward_result(
-        self, *, solved, fo_result, prepared: PreparedInputs
+        self,
+        *,
+        solved,
+        fo_result,
+        prepared: PreparedInputs,
     ) -> TwoStreamEssResult:
         """Builds the public result object from solver outputs.
 
@@ -4123,7 +4590,11 @@ class TwoStreamEss:
         combined_intensity_boa = None
         if isinstance(fo_result, FoSolarObsResult):
             combined_intensity_toa = solved["intensity_toa"] + fo_result.intensity_total
-        flux_kwargs = self._endpoint_flux_profiles(solved)
+        fo_flux = self._fo_flux_profiles(
+            prepared=prepared,
+            fo_result=fo_result,
+        )
+        flux_kwargs = self._endpoint_flux_profiles(solved, fo_flux=fo_flux)
         return TwoStreamEssResult(
             intensity_toa=solved["intensity_toa"],
             intensity_boa=solved["intensity_boa"],
@@ -4150,6 +4621,7 @@ class TwoStreamEss:
         angles: Any | None = None,
         stream: float | None = None,
         fbeam: Any = 1.0,
+        fisot: Any = 0.0,
         albedo: Any = 0.0,
         delta_m_truncation_factor: Any | None = None,
         brdf: Any | None = None,
@@ -4184,6 +4656,9 @@ class TwoStreamEss:
             Optional two-stream quadrature cosine. Defaults to ``1/sqrt(3)``.
         fbeam
             Direct solar beam/source normalization.
+        fisot
+            Isotropic downward intensity at the top boundary. Nonzero values
+            are currently supported for scalar NumPy solar runs.
         albedo
             Lambertian surface albedo.
         delta_m_truncation_factor
@@ -4230,6 +4705,7 @@ class TwoStreamEss:
             angles=angles,
             stream=stream,
             fbeam=fbeam,
+            fisot=fisot,
             delta_m_truncation_factor=delta_m_truncation_factor,
             view_angles=view_angles,
             beam_szas=beam_szas,
@@ -4247,10 +4723,40 @@ class TwoStreamEss:
         user_relazms = mapped["user_relazms"]
         stream_value = mapped["stream_value"]
         flux_factor = mapped["flux_factor"]
+        fisot_value = mapped["fisot"]
         d2s_scaling = mapped["d2s_scaling"]
         thermal_bb_input = mapped["thermal_bb_input"]
         surfbb = mapped["surfbb"]
         fo_geometry_mode = mapped["fo_geometry_mode"]
+        has_fisot = bool(np.any(np.asarray(to_numpy(fisot_value), dtype=float) != 0.0))
+        if has_fisot and self._source_mode != "solar_obs":
+            raise NotImplementedError("fisot is currently supported only for mode='solar'")
+        if has_fisot and (self._uses_torch_runtime or self._public_forward_is_batched(tau_arr)):
+            raise NotImplementedError(
+                "nonzero fisot is currently supported only for scalar NumPy runs"
+            )
+        if include_fo and self.options.output_fluxes:
+            batched = self._public_forward_is_batched(tau_arr)
+            batched_solar_flux = batched and self._source_mode in {"solar_obs", "solar_lat"}
+            batched_solar_plane_parallel_flux = batched_solar_flux and self.options.plane_parallel
+            batched_thermal_flux = batched and self._source_mode == "thermal"
+            if batched_solar_flux and not batched_solar_plane_parallel_flux:
+                raise NotImplementedError(
+                    "batched solar include_fo=True with output_fluxes=True currently "
+                    "requires plane_parallel=True"
+                )
+            if self._uses_torch_runtime and not (
+                batched_thermal_flux or batched_solar_plane_parallel_flux
+            ):
+                raise NotImplementedError(
+                    "include_fo=True with output_fluxes=True is currently implemented "
+                    "for scalar NumPy plane-parallel runs, batched thermal runs, and "
+                    "batched solar plane-parallel runs only"
+                )
+            if not self.options.plane_parallel:
+                raise NotImplementedError(
+                    "include_fo=True with output_fluxes=True currently requires plane_parallel=True"
+                )
         if self._public_forward_is_batched(tau_arr):
             return self._forward_batched(
                 mapped=mapped,
@@ -4272,6 +4778,7 @@ class TwoStreamEss:
             user_obsgeoms=user_obsgeoms,
             stream_value=stream_value,
             flux_factor=flux_factor,
+            fisot=fisot_value,
             albedo=albedo,
             d2s_scaling=d2s_scaling,
             brdf=brdf,
@@ -4439,6 +4946,7 @@ class TwoStreamEss:
             angles=angles,
             stream=stream,
             fbeam=fbeam,
+            fisot=0.0,
             delta_m_truncation_factor=delta_m_truncation_factor,
             view_angles=view_angles,
             beam_szas=beam_szas,
@@ -4522,6 +5030,7 @@ class TwoStreamEss:
                 user_obsgeoms=None,
                 stream_value=stream_value,
                 flux_factor=flux_factor,
+                fisot=0.0,
                 albedo=albedo,
                 d2s_scaling=d2s_scaling,
                 brdf=brdf,
@@ -4746,6 +5255,7 @@ class TwoStreamEss:
             user_obsgeoms=user_obsgeoms,
             stream_value=stream_value,
             flux_factor=flux_factor,
+            fisot=0.0,
             albedo=albedo,
             d2s_scaling=d2s_scaling,
             brdf=brdf,

@@ -14,6 +14,7 @@ ROSSTHIN_IDX = 2
 ROSSTHICK_IDX = 3
 RPV_IDX = 4
 COXMUNK_IDX = 5
+DISORT_HAPKE_IDX = 6
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,28 @@ def _coxmunk_kernel(
         return 0.5 * (s1 * math.exp(-((cot * inv_sigma) ** 2)) / cot - math.erfc(cot * inv_sigma))
 
     return kernel / (1.0 + shadow_term(mu_i) + shadow_term(mu_r))
+
+
+def _disort_hapke_kernel(*, mu_i: float, mu_r: float, cphi: float) -> float:
+    if mu_i <= 0.0 or mu_r <= 0.0:
+        return 0.0
+    sin_i = math.sqrt(max(0.0, 1.0 - mu_i * mu_i))
+    sin_r = math.sqrt(max(0.0, 1.0 - mu_r * mu_r))
+    ctheta = max(-1.0, min(1.0, mu_r * mu_i + sin_r * sin_i * cphi))
+    theta = math.acos(ctheta)
+    phase = 1.0 + 0.5 * ctheta
+    hotspot_width = 0.06
+    opposition = hotspot_width / (hotspot_width + math.tan(0.5 * theta))
+    single_scatter_albedo = 0.6
+    gamma = math.sqrt(1.0 - single_scatter_albedo)
+    h_i = (1.0 + 2.0 * mu_i) / (1.0 + 2.0 * gamma * mu_i)
+    h_r = (1.0 + 2.0 * mu_r) / (1.0 + 2.0 * gamma * mu_r)
+    return (
+        0.25
+        * single_scatter_albedo
+        * ((1.0 + opposition) * phase + h_i * h_r - 1.0)
+        / (mu_r + mu_i)
+    )
 
 
 def coxmunk_giss_stokes_direct_kernel(
@@ -297,15 +320,50 @@ def solar_obs_brdf_from_kernels(
             ubrdf_f[:, 0] += factor
             direct_brf += factor
             continue
-        if which_brdf not in {ROSSTHIN_IDX, ROSSTHICK_IDX, RPV_IDX, COXMUNK_IDX}:
+        if which_brdf not in {
+            ROSSTHIN_IDX,
+            ROSSTHICK_IDX,
+            RPV_IDX,
+            COXMUNK_IDX,
+            DISORT_HAPKE_IDX,
+        }:
             raise NotImplementedError(
                 "solar observational BRDF kernel generation currently supports "
-                "Lambertian, RossThin, RossThick, RPV, and Cox-Munk only"
+                "Lambertian, RossThin, RossThick, RPV, Cox-Munk, and DISORT-Hapke only"
             )
         brdfunc = np.zeros(nstreams_brdf, dtype=float)
         brdfunc_0 = np.zeros((nstreams_brdf, n_geoms), dtype=float)
         user_brdfunc = np.zeros((nstreams_brdf, n_geoms), dtype=float)
-        if which_brdf == RPV_IDX:
+        if which_brdf == DISORT_HAPKE_IDX:
+            for k in range(nstreams_brdf):
+                brdfunc[k] = _disort_hapke_kernel(
+                    mu_i=stream_value,
+                    mu_r=stream_value,
+                    cphi=float(cphi[k]),
+                )
+                for ig in range(n_geoms):
+                    brdfunc_0[k, ig] = _disort_hapke_kernel(
+                        mu_i=float(sza_cos[ig]),
+                        mu_r=stream_value,
+                        cphi=float(cphi[k]),
+                    )
+                    user_brdfunc[k, ig] = _disort_hapke_kernel(
+                        mu_i=stream_value,
+                        mu_r=float(user_streams[ig]),
+                        cphi=float(cphi[k]),
+                    )
+            direct_brf += factor * np.array(
+                [
+                    _disort_hapke_kernel(
+                        mu_i=float(sza_cos[ig]),
+                        mu_r=float(user_streams[ig]),
+                        cphi=math.cos(math.radians(float(user_obsgeoms[ig, 2]))),
+                    )
+                    for ig in range(n_geoms)
+                ],
+                dtype=float,
+            )
+        elif which_brdf == RPV_IDX:
             hotspot = float(spec["hotspot"])
             asymmetry = float(spec["asymmetry"])
             anisotropy = float(spec["anisotropy"])
