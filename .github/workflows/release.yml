@@ -3,12 +3,24 @@ name: Publish to PyPI
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Tag to publish, for example v0.4.1"
+      ref:
+        description: "Git ref to build, for example main, a release branch, or v0.4.2"
         required: true
+        default: "main"
+      tag:
+        description: "Tag to publish, for example v0.4.2"
+        required: false
+      version:
+        description: "Optional version override for dry-run builds, for example 0.4.2"
+        required: false
+      publish:
+        description: "Publish checked distributions to PyPI"
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
-  group: publish-pypi-${{ github.event.inputs.tag }}
+  group: publish-pypi-${{ github.event.inputs.ref }}-${{ github.event.inputs.publish }}
   cancel-in-progress: false
 
 env:
@@ -35,7 +47,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.ref }}
 
       - name: Setup Host Python
         uses: actions/setup-python@v5
@@ -50,6 +62,9 @@ jobs:
           echo "PY_VERSION=$PV" >> "$GITHUB_ENV"
           echo "CIBW_BUILD=cp${PV}*" >> "$GITHUB_ENV"
           echo "ARCHFLAGS=-arch ${{ env.MACOS_ARCH }}" >> "$GITHUB_ENV"
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PY2SESS=${{ github.event.inputs.version }}" >> "$GITHUB_ENV"
+          fi
 
       - name: Build macOS wheel
         env:
@@ -59,6 +74,10 @@ jobs:
           CIBW_CONFIG_SETTINGS: "cmake.define.PY2SESS_BUILD_NATIVE=ON"
           CIBW_BEFORE_BUILD: |
             python -m pip install 'cmake<=3.30' ninja build scikit-build-core setuptools-scm torch
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: |
+            export TORCH_LIB=$(python -c 'import torch; print(torch.__path__[0] + "/lib")')
+            export DYLD_FALLBACK_LIBRARY_PATH="$TORCH_LIB:$DYLD_FALLBACK_LIBRARY_PATH"
+            delocate-wheel -e torch -e libc10 -e libtorch -w {dest_dir} {wheel}
           CIBW_TEST_REQUIRES: "torch"
           CIBW_TEST_COMMAND: python -c "import py2sess; assert py2sess.native_extension_available(), py2sess.native_backend_info(); from py2sess.reference_cases import load_tir_benchmark_case; load_tir_benchmark_case()"
         run: |
@@ -79,7 +98,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.ref }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -89,6 +108,9 @@ jobs:
 
       - name: Build sdist
         run: |
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PY2SESS="${{ github.event.inputs.version }}"
+          fi
           python -m pip install build
           python -m build --sdist
 
@@ -98,20 +120,21 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
-  publish-pypi:
-    name: Publish to PyPI
+  validate-distributions:
+    name: Validate Distributions
     needs: [build-macos, build-sdist]
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    environment: pypi
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - name: Download distributions
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Require successful builds
+        run: |
+          test "${{ needs.build-macos.result }}" = "success"
+          test "${{ needs.build-sdist.result }}" = "success"
 
       - name: Aggregate into dist
         run: |
@@ -120,9 +143,37 @@ jobs:
 
       - name: Check distributions
         run: |
-          python -m pip install --upgrade pip twine pkginfo
+          python -m venv .twine-check
+          . .twine-check/bin/activate
+          python -m pip install --upgrade pip twine pkginfo packaging
           python -m twine check dist/*
 
+      - name: Upload checked distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: checked-distributions
+          path: dist/*
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [validate-distributions]
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.publish == 'true' && needs.validate-distributions.result == 'success' }}
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate publish inputs
+        run: |
+          test -n "${{ github.event.inputs.tag }}"
+          test "${{ github.event.inputs.ref }}" = "${{ github.event.inputs.tag }}"
+
+      - name: Download checked distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: checked-distributions
+          path: dist
+
       - name: Publish to PyPI
-        if: ${{ needs.build-sdist.result == 'success' && needs.build-macos.result == 'success' }}
         uses: pypa/gh-action-pypi-publish@release/v1
