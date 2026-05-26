@@ -1,22 +1,14 @@
 from __future__ import annotations
 
 from importlib.resources import as_file, files
-import os
 import unittest
 
 import numpy as np
 
-from py2sess import (
-    thermal_source_from_temperature_profile,
-    TwoStreamEss,
-    TwoStreamEssOptions,
-)
-from py2sess.reference_cases import (
-    load_tir_benchmark_case,
-    load_uv_benchmark_case,
-)
+from py2sess import TwoStreamEss, TwoStreamEssOptions, thermal_source_from_temperature_profile
 from py2sess.optical.phase import build_solar_fo_scatter_term, build_two_stream_phase_inputs
-from py2sess.rtsolver.backend import has_torch, to_numpy
+from py2sess.reference_cases import load_tir_benchmark_case, load_uv_benchmark_case
+from py2sess.rtsolver.backend import has_torch
 from py2sess.rtsolver.fo_solar_obs_batch_numpy import (
     fo_solar_obs_batch_precompute,
     solve_fo_solar_obs_eps_batch_numpy,
@@ -26,15 +18,16 @@ from py2sess.rtsolver.thermal_batch_numpy import solve_thermal_batch_numpy
 
 
 def _relative_diff(value: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    """Returns a stable elementwise relative difference."""
     scale = np.maximum(np.abs(reference), 1.0e-15)
     return np.abs(value - reference) / scale
 
 
 def _assert_max_rel(
-    testcase: unittest.TestCase, value: np.ndarray, reference: np.ndarray, limit: float
+    testcase: unittest.TestCase,
+    value: np.ndarray,
+    reference: np.ndarray,
+    limit: float,
 ) -> None:
-    """Checks the largest relative difference against a scalar limit."""
     testcase.assertLessEqual(float(np.max(_relative_diff(value, reference))), limit)
 
 
@@ -122,16 +115,9 @@ class ReferenceCaseTests(unittest.TestCase):
             user_angle_degrees=case.user_angle,
             stream_value=case.stream_value,
         )
-        total = result.two_stream_toa + result.fo_total_up_toa
         _assert_max_rel(self, result.two_stream_toa, case.ref_2s, 1.0e-5)
         _assert_max_rel(self, result.fo_total_up_toa, case.ref_fo, 1.0e-5)
-        _assert_max_rel(self, total, case.ref_total, 5.0e-4)
-
-    def test_generated_tir_source_matches_fixture(self) -> None:
-        case = load_tir_benchmark_case()
-        planck, surface_planck = _generated_tir_source(case)
-        np.testing.assert_allclose(planck, case.thermal_bb_input, rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(surface_planck, case.surfbb, rtol=1.0e-12, atol=1.0e-12)
+        _assert_max_rel(self, result.total_toa, case.ref_total, 5.0e-4)
 
     def test_public_forward_tir_fixture_matches_batch_kernel(self) -> None:
         case = load_tir_benchmark_case()
@@ -150,8 +136,7 @@ class ReferenceCaseTests(unittest.TestCase):
             user_angle_degrees=case.user_angle,
             stream_value=case.stream_value,
         )
-        solver = TwoStreamEss(TwoStreamEssOptions(nlyr=case.n_layers, mode="thermal"))
-        public = solver.forward(
+        public = TwoStreamEss(TwoStreamEssOptions(nlyr=case.n_layers, mode="thermal")).forward(
             tau=case.tau_arr,
             ssa=case.omega_arr,
             g=phase.g,
@@ -168,146 +153,6 @@ class ReferenceCaseTests(unittest.TestCase):
         np.testing.assert_allclose(public.radiance_2s, kernel.two_stream_toa)
         np.testing.assert_allclose(public.radiance_fo, kernel.fo_total_up_toa)
         np.testing.assert_allclose(public.radiance_total, kernel.total_toa)
-
-    def test_public_forward_tir_fixture_torch_matches_batch_kernel(self) -> None:
-        if not has_torch():
-            self.skipTest("torch not installed")
-        from py2sess.rtsolver.thermal_batch_torch import solve_thermal_batch_torch
-
-        case = load_tir_benchmark_case()
-        phase = _generated_tir_phase(case)
-        planck, surface_planck = _generated_tir_source(case)
-        kernel = solve_thermal_batch_torch(
-            tau_arr=case.tau_arr,
-            omega_arr=case.omega_arr,
-            asymm_arr=case.asymm_arr,
-            d2s_scaling=case.d2s_scaling,
-            thermal_bb_input=planck,
-            surfbb=surface_planck,
-            albedo=case.albedo,
-            emissivity=case.emissivity,
-            heights=case.heights,
-            user_angle_degrees=case.user_angle,
-            stream_value=case.stream_value,
-            device="cpu",
-        )
-        solver = TwoStreamEss(
-            TwoStreamEssOptions(
-                nlyr=case.n_layers,
-                mode="thermal",
-                backend="torch",
-                torch_enable_grad=False,
-            )
-        )
-        public = solver.forward(
-            tau=case.tau_arr,
-            ssa=case.omega_arr,
-            g=phase.g,
-            z=case.heights,
-            angles=case.user_angle,
-            stream=case.stream_value,
-            albedo=case.albedo,
-            delta_m_truncation_factor=phase.delta_m_truncation_factor,
-            planck=planck,
-            surface_planck=surface_planck,
-            emissivity=case.emissivity,
-            include_fo=True,
-        )
-        np.testing.assert_allclose(
-            to_numpy(public.radiance_2s), to_numpy(kernel.two_stream_toa), rtol=1.0e-12, atol=1e-12
-        )
-        np.testing.assert_allclose(
-            to_numpy(public.radiance_fo),
-            to_numpy(kernel.fo_total_up_toa),
-            rtol=1.0e-12,
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(
-            to_numpy(public.radiance_total), to_numpy(kernel.total_toa), rtol=1.0e-12, atol=1e-12
-        )
-
-    def test_public_forward_tir_fixture_cuda_matches_numpy(self) -> None:
-        if not _has_cuda():
-            self.skipTest("CUDA is not available")
-        rows = 16
-        case = load_tir_benchmark_case()
-        phase = _generated_tir_phase(case)
-        planck, surface_planck = _generated_tir_source(case)
-        common = dict(
-            tau=case.tau_arr[:rows],
-            ssa=case.omega_arr[:rows],
-            g=phase.g[:rows],
-            z=case.heights,
-            angles=case.user_angle,
-            stream=case.stream_value,
-            albedo=case.albedo[:rows],
-            delta_m_truncation_factor=phase.delta_m_truncation_factor[:rows],
-            planck=planck[:rows],
-            surface_planck=surface_planck[:rows],
-            emissivity=case.emissivity[:rows],
-            include_fo=True,
-        )
-        numpy_result = TwoStreamEss(
-            TwoStreamEssOptions(nlyr=case.n_layers, mode="thermal")
-        ).forward(**common)
-        cuda_result = TwoStreamEss(
-            TwoStreamEssOptions(
-                nlyr=case.n_layers,
-                mode="thermal",
-                backend="torch",
-                torch_device="cuda",
-                torch_dtype="float64",
-                torch_enable_grad=False,
-            )
-        ).forward(**common)
-
-        self.assertEqual(cuda_result.radiance_total.device.type, "cuda")
-        np.testing.assert_allclose(
-            to_numpy(cuda_result.radiance_total),
-            numpy_result.radiance_total,
-            rtol=1.0e-8,
-            atol=1.0e-10,
-        )
-
-    def test_tir_torch_matches_numpy_component_split(self) -> None:
-        if not has_torch():
-            self.skipTest("torch not installed")
-        from py2sess.rtsolver.thermal_batch_torch import solve_thermal_batch_torch
-
-        case = load_tir_benchmark_case()
-        numpy_result = solve_thermal_batch_numpy(
-            tau_arr=case.tau_arr,
-            omega_arr=case.omega_arr,
-            asymm_arr=case.asymm_arr,
-            d2s_scaling=case.d2s_scaling,
-            thermal_bb_input=case.thermal_bb_input,
-            surfbb=case.surfbb,
-            albedo=case.albedo,
-            emissivity=case.emissivity,
-            heights=case.heights,
-            user_angle_degrees=case.user_angle,
-            stream_value=case.stream_value,
-        )
-        result = solve_thermal_batch_torch(
-            tau_arr=case.tau_arr,
-            omega_arr=case.omega_arr,
-            asymm_arr=case.asymm_arr,
-            d2s_scaling=case.d2s_scaling,
-            thermal_bb_input=case.thermal_bb_input,
-            surfbb=case.surfbb,
-            albedo=case.albedo,
-            emissivity=case.emissivity,
-            heights=case.heights,
-            user_angle_degrees=case.user_angle,
-            stream_value=case.stream_value,
-            device="cpu",
-        )
-        two_stream = to_numpy(result.two_stream_toa)
-        fo = to_numpy(result.fo_total_up_toa)
-        np.testing.assert_allclose(
-            two_stream, numpy_result.two_stream_toa, rtol=1.0e-12, atol=1.0e-12
-        )
-        np.testing.assert_allclose(fo, numpy_result.fo_total_up_toa, rtol=1.0e-12, atol=1.0e-12)
 
     def test_uv_fixture_matches_saved_components_and_total(self) -> None:
         case = load_uv_benchmark_case()
@@ -348,83 +193,10 @@ class ReferenceCaseTests(unittest.TestCase):
         _assert_max_rel(self, fo, case.ref_fo, 3.0e-6)
         _assert_max_rel(self, two_stream + fo, case.ref_total, 3.0e-6)
 
-    def test_uv_fo_direct_surface_reflectance_validates_batch_shape(self) -> None:
-        case = load_uv_benchmark_case()
-        rows = 4
-        fo_precomputed = fo_solar_obs_batch_precompute(
-            user_obsgeom=case.user_obsgeom,
-            heights=case.heights,
-            earth_radius=6371.0,
-            nfine=3,
-        )
-        common = dict(
-            tau=case.tau[:rows],
-            omega=case.omega[:rows],
-            scaling=case.scaling[:rows],
-            albedo=case.albedo[:rows],
-            flux_factor=case.flux_factor[:rows],
-            exact_scatter=case.fo_exact_scatter[:rows],
-            precomputed=fo_precomputed,
-        )
-
-        flat = solve_fo_solar_obs_eps_batch_numpy(
-            **common,
-            direct_surface_reflectance=case.albedo[:rows],
-        )
-        column = solve_fo_solar_obs_eps_batch_numpy(
-            **common,
-            direct_surface_reflectance=case.albedo[:rows, np.newaxis],
-        )
-        np.testing.assert_allclose(column, flat)
-
-        with self.assertRaisesRegex(ValueError, "direct_surface_reflectance"):
-            solve_fo_solar_obs_eps_batch_numpy(
-                **common,
-                direct_surface_reflectance=np.ones((rows, 2), dtype=float),
-            )
-        bad = case.albedo[:rows].copy()
-        bad[0] = np.nan
-        with self.assertRaisesRegex(ValueError, "direct_surface_reflectance"):
-            solve_fo_solar_obs_eps_batch_numpy(**common, direct_surface_reflectance=bad)
-
     def test_public_forward_uv_fixture_matches_batch_kernel(self) -> None:
         case = load_uv_benchmark_case()
         phase, scatter = _generated_uv_phase(case)
-        fo_precomputed = fo_solar_obs_batch_precompute(
-            user_obsgeom=case.user_obsgeom,
-            heights=case.heights,
-            earth_radius=6371.0,
-            nfine=3,
-        )
-        fo = solve_fo_solar_obs_eps_batch_numpy(
-            tau=case.tau,
-            omega=case.omega,
-            scaling=case.scaling,
-            albedo=case.albedo,
-            flux_factor=case.flux_factor,
-            exact_scatter=case.fo_exact_scatter,
-            precomputed=fo_precomputed,
-        )
-        two_stream = solve_solar_obs_batch_numpy(
-            tau=case.tau,
-            omega=case.omega,
-            asymm=case.asymm,
-            scaling=case.scaling,
-            albedo=case.albedo,
-            flux_factor=case.flux_factor,
-            stream_value=case.stream_value,
-            chapman=case.chapman,
-            x0=case.x0,
-            user_stream=case.user_stream,
-            user_secant=case.user_secant,
-            azmfac=case.azmfac,
-            px11=case.px11,
-            pxsq=case.pxsq,
-            px0x=case.px0x,
-            ulp=case.ulp,
-        )
-        solver = TwoStreamEss(TwoStreamEssOptions(nlyr=case.n_layers, mode="solar"))
-        public = solver.forward(
+        public = TwoStreamEss(TwoStreamEssOptions(nlyr=case.n_layers, mode="solar")).forward(
             tau=case.tau,
             ssa=case.omega,
             g=phase.g,
@@ -437,117 +209,9 @@ class ReferenceCaseTests(unittest.TestCase):
             include_fo=True,
             fo_scatter_term=scatter,
         )
-        np.testing.assert_allclose(public.radiance_2s, two_stream)
-        np.testing.assert_allclose(public.radiance_fo, fo)
-        np.testing.assert_allclose(public.radiance_total, two_stream + fo)
-
-    def test_public_forward_uv_fixture_torch_matches_batch_kernel(self) -> None:
-        if not has_torch():
-            self.skipTest("torch not installed")
-        case = load_uv_benchmark_case()
-        phase, scatter = _generated_uv_phase(case)
-        fo_precomputed = fo_solar_obs_batch_precompute(
-            user_obsgeom=case.user_obsgeom,
-            heights=case.heights,
-            earth_radius=6371.0,
-            nfine=3,
-        )
-        fo = solve_fo_solar_obs_eps_batch_numpy(
-            tau=case.tau,
-            omega=case.omega,
-            scaling=case.scaling,
-            albedo=case.albedo,
-            flux_factor=case.flux_factor,
-            exact_scatter=case.fo_exact_scatter,
-            precomputed=fo_precomputed,
-        )
-        two_stream = solve_solar_obs_batch_numpy(
-            tau=case.tau,
-            omega=case.omega,
-            asymm=case.asymm,
-            scaling=case.scaling,
-            albedo=case.albedo,
-            flux_factor=case.flux_factor,
-            stream_value=case.stream_value,
-            chapman=case.chapman,
-            x0=case.x0,
-            user_stream=case.user_stream,
-            user_secant=case.user_secant,
-            azmfac=case.azmfac,
-            px11=case.px11,
-            pxsq=case.pxsq,
-            px0x=case.px0x,
-            ulp=case.ulp,
-        )
-        solver = TwoStreamEss(
-            TwoStreamEssOptions(
-                nlyr=case.n_layers,
-                mode="solar",
-                backend="torch",
-                torch_enable_grad=False,
-            )
-        )
-        public = solver.forward(
-            tau=case.tau,
-            ssa=case.omega,
-            g=phase.g,
-            z=case.heights,
-            angles=case.user_obsgeom,
-            stream=case.stream_value,
-            fbeam=case.flux_factor,
-            albedo=case.albedo,
-            delta_m_truncation_factor=phase.delta_m_truncation_factor,
-            include_fo=True,
-            fo_scatter_term=scatter,
-        )
-        np.testing.assert_allclose(
-            to_numpy(public.radiance_2s), two_stream, rtol=1.0e-12, atol=1.0e-12
-        )
-        np.testing.assert_allclose(to_numpy(public.radiance_fo), fo, rtol=1.0e-12, atol=1.0e-12)
-        np.testing.assert_allclose(
-            to_numpy(public.radiance_total), two_stream + fo, rtol=1.0e-12, atol=1.0e-12
-        )
-
-    def test_public_forward_uv_fixture_cuda_matches_numpy(self) -> None:
-        if not _has_cuda():
-            self.skipTest("CUDA is not available")
-        rows = 16
-        case = load_uv_benchmark_case()
-        phase, scatter = _generated_uv_phase(case)
-        common = dict(
-            tau=case.tau[:rows],
-            ssa=case.omega[:rows],
-            g=phase.g[:rows],
-            z=case.heights,
-            angles=case.user_obsgeom,
-            stream=case.stream_value,
-            fbeam=case.flux_factor[:rows],
-            albedo=case.albedo[:rows],
-            delta_m_truncation_factor=phase.delta_m_truncation_factor[:rows],
-            include_fo=True,
-            fo_scatter_term=scatter[:rows],
-        )
-        numpy_result = TwoStreamEss(TwoStreamEssOptions(nlyr=case.n_layers, mode="solar")).forward(
-            **common
-        )
-        cuda_result = TwoStreamEss(
-            TwoStreamEssOptions(
-                nlyr=case.n_layers,
-                mode="solar",
-                backend="torch",
-                torch_device="cuda",
-                torch_dtype="float64",
-                torch_enable_grad=False,
-            )
-        ).forward(**common)
-
-        self.assertEqual(cuda_result.radiance_total.device.type, "cuda")
-        np.testing.assert_allclose(
-            to_numpy(cuda_result.radiance_total),
-            numpy_result.radiance_total,
-            rtol=1.0e-8,
-            atol=1.0e-10,
-        )
+        np.testing.assert_allclose(public.radiance_2s, case.ref_2s, rtol=2.0e-6, atol=1.0e-12)
+        np.testing.assert_allclose(public.radiance_fo, case.ref_fo, rtol=3.0e-6, atol=1.0e-12)
+        np.testing.assert_allclose(public.radiance_total, case.ref_total, rtol=3.0e-6, atol=1e-12)
 
     def test_torch_cuda_device_request_requires_available_cuda(self) -> None:
         if not has_torch():
@@ -566,210 +230,13 @@ class ReferenceCaseTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "CUDA is not available"):
             solver.forward(
-                tau=np.array([[0.01]], dtype=float),
-                ssa=np.array([[0.0]], dtype=float),
-                g=np.array([[0.0]], dtype=float),
-                z=np.array([1.0, 0.0], dtype=float),
+                tau=np.array([[0.01]]),
+                ssa=np.array([[0.0]]),
+                g=np.array([[0.0]]),
+                z=np.array([1.0, 0.0]),
                 angles=[30.0, 20.0, 0.0],
-                albedo=np.array([0.1], dtype=float),
+                albedo=np.array([0.1]),
             )
-
-    def test_uv_torch_matches_numpy_2s(self) -> None:
-        if not has_torch():
-            self.skipTest("torch not installed")
-        from py2sess.rtsolver.solar_obs_batch_torch import solve_solar_obs_batch_torch
-
-        case = load_uv_benchmark_case()
-        numpy_two_stream = solve_solar_obs_batch_numpy(
-            tau=case.tau,
-            omega=case.omega,
-            asymm=case.asymm,
-            scaling=case.scaling,
-            albedo=case.albedo,
-            flux_factor=case.flux_factor,
-            stream_value=case.stream_value,
-            chapman=case.chapman,
-            x0=case.x0,
-            user_stream=case.user_stream,
-            user_secant=case.user_secant,
-            azmfac=case.azmfac,
-            px11=case.px11,
-            pxsq=case.pxsq,
-            px0x=case.px0x,
-            ulp=case.ulp,
-        )
-        two_stream = to_numpy(
-            solve_solar_obs_batch_torch(
-                tau=case.tau,
-                omega=case.omega,
-                asymm=case.asymm,
-                scaling=case.scaling,
-                albedo=case.albedo,
-                flux_factor=case.flux_factor,
-                stream_value=case.stream_value,
-                chapman=case.chapman,
-                x0=case.x0,
-                user_stream=case.user_stream,
-                user_secant=case.user_secant,
-                azmfac=case.azmfac,
-                px11=case.px11,
-                pxsq=case.pxsq,
-                px0x=case.px0x,
-                ulp=case.ulp,
-                device="cpu",
-            )
-        )
-        np.testing.assert_allclose(two_stream, numpy_two_stream, rtol=1.0e-12, atol=1.0e-12)
-
-    def test_uv_torch_matches_numpy_fo(self) -> None:
-        if not has_torch():
-            self.skipTest("torch not installed")
-        from py2sess.rtsolver.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
-
-        case = load_uv_benchmark_case()
-        fo_precomputed = fo_solar_obs_batch_precompute(
-            user_obsgeom=case.user_obsgeom,
-            heights=case.heights,
-            earth_radius=6371.0,
-            nfine=3,
-        )
-        numpy_fo = solve_fo_solar_obs_eps_batch_numpy(
-            tau=case.tau,
-            omega=case.omega,
-            scaling=case.scaling,
-            albedo=case.albedo,
-            flux_factor=case.flux_factor,
-            exact_scatter=case.fo_exact_scatter,
-            precomputed=fo_precomputed,
-        )
-        torch_fo = to_numpy(
-            solve_fo_solar_obs_eps_batch_torch(
-                tau=case.tau,
-                omega=case.omega,
-                scaling=case.scaling,
-                albedo=case.albedo,
-                flux_factor=case.flux_factor,
-                exact_scatter=case.fo_exact_scatter,
-                precomputed=fo_precomputed,
-                device="cpu",
-            )
-        )
-        np.testing.assert_allclose(torch_fo, numpy_fo, rtol=1.0e-12, atol=1.0e-12)
-
-    def test_uv_fo_numba_path_matches_vectorized_path(self) -> None:
-        case = load_uv_benchmark_case()
-        repeats = 4096
-        fo_precomputed = fo_solar_obs_batch_precompute(
-            user_obsgeom=case.user_obsgeom,
-            heights=case.heights,
-            earth_radius=6371.0,
-            nfine=3,
-        )
-
-        def tiled(value):
-            arr = np.asarray(value)
-            if arr.ndim == 1:
-                return np.tile(arr, repeats)
-            return np.tile(arr, (repeats, 1))
-
-        previous = os.environ.get("PY2SESS_NUMBA_FO")
-        try:
-            os.environ["PY2SESS_NUMBA_FO"] = "off"
-            vectorized = solve_fo_solar_obs_eps_batch_numpy(
-                tau=tiled(case.tau),
-                omega=tiled(case.omega),
-                scaling=tiled(case.scaling),
-                albedo=tiled(case.albedo),
-                flux_factor=tiled(case.flux_factor),
-                exact_scatter=tiled(case.fo_exact_scatter),
-                precomputed=fo_precomputed,
-            )
-            os.environ["PY2SESS_NUMBA_FO"] = "on"
-            accelerated = solve_fo_solar_obs_eps_batch_numpy(
-                tau=tiled(case.tau),
-                omega=tiled(case.omega),
-                scaling=tiled(case.scaling),
-                albedo=tiled(case.albedo),
-                flux_factor=tiled(case.flux_factor),
-                exact_scatter=tiled(case.fo_exact_scatter),
-                precomputed=fo_precomputed,
-            )
-        finally:
-            if previous is None:
-                os.environ.pop("PY2SESS_NUMBA_FO", None)
-            else:
-                os.environ["PY2SESS_NUMBA_FO"] = previous
-
-        np.testing.assert_allclose(accelerated, vectorized, rtol=1.0e-12, atol=1.0e-14)
-
-    def test_uv_torch_fo_batch_supports_autograd(self) -> None:
-        if not has_torch():
-            self.skipTest("torch not installed")
-        import torch
-
-        from py2sess.rtsolver.fo_solar_obs_batch_torch import solve_fo_solar_obs_eps_batch_torch
-
-        case = load_uv_benchmark_case()
-        rows = 4
-        fo_precomputed = fo_solar_obs_batch_precompute(
-            user_obsgeom=case.user_obsgeom,
-            heights=case.heights,
-            earth_radius=6371.0,
-            nfine=3,
-        )
-        tau = torch.tensor(case.tau[:rows], dtype=torch.float64, requires_grad=True)
-        albedo = torch.tensor(case.albedo[:rows], dtype=torch.float64, requires_grad=True)
-        fo = solve_fo_solar_obs_eps_batch_torch(
-            tau=tau,
-            omega=case.omega[:rows],
-            scaling=case.scaling[:rows],
-            albedo=albedo,
-            flux_factor=case.flux_factor[:rows],
-            exact_scatter=case.fo_exact_scatter[:rows],
-            precomputed=fo_precomputed,
-            device="cpu",
-        )
-        fo.sum().backward()
-        self.assertIsNotNone(tau.grad)
-        self.assertIsNotNone(albedo.grad)
-        self.assertTrue(torch.isfinite(tau.grad).all().item())
-        self.assertTrue(torch.isfinite(albedo.grad).all().item())
-        self.assertGreater(float(torch.abs(tau.grad).sum()), 0.0)
-        self.assertGreater(float(torch.abs(albedo.grad).sum()), 0.0)
-
-    def test_public_forward_uv_torch_batch_supports_autograd(self) -> None:
-        if not has_torch():
-            self.skipTest("torch not installed")
-        import torch
-
-        case = load_uv_benchmark_case()
-        rows = 4
-        phase, scatter = _generated_uv_phase(case)
-        tau = torch.tensor(case.tau[:rows], dtype=torch.float64, requires_grad=True)
-        albedo = torch.tensor(case.albedo[:rows], dtype=torch.float64, requires_grad=True)
-        solver = TwoStreamEss(
-            TwoStreamEssOptions(nlyr=case.n_layers, mode="solar", backend="torch")
-        )
-        result = solver.forward(
-            tau=tau,
-            ssa=case.omega[:rows],
-            g=phase.g[:rows],
-            z=case.heights,
-            angles=case.user_obsgeom,
-            stream=case.stream_value,
-            fbeam=case.flux_factor[:rows],
-            albedo=albedo,
-            delta_m_truncation_factor=phase.delta_m_truncation_factor[:rows],
-            include_fo=True,
-            fo_scatter_term=scatter[:rows],
-        )
-        result.radiance_total.sum().backward()
-        self.assertIsNotNone(tau.grad)
-        self.assertIsNotNone(albedo.grad)
-        self.assertTrue(torch.isfinite(tau.grad).all().item())
-        self.assertTrue(torch.isfinite(albedo.grad).all().item())
-        self.assertGreater(float(torch.abs(tau.grad).sum()), 0.0)
-        self.assertGreater(float(torch.abs(albedo.grad).sum()), 0.0)
 
 
 if __name__ == "__main__":

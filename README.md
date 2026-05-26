@@ -7,17 +7,18 @@ optional torch backends. It does not call the original Fortran code.
 ## Install
 
 ```bash
-python3 -m pip install .
+python3 -m pip install py2sess
+```
+
+For local development:
+
+```bash
 python3 -m pip install -e ".[torch,dev]"
 ```
 
-The optional native backend requires PyTorch:
-
-```bash
-python3 -m pip install "py2sess[native]"
-```
-
-For source-tree runs without installation, set `PYTHONPATH=src`.
+The optional native backend uses the installed PyTorch shared libraries. Install
+PyTorch first when building native wheels from source or when using a backend
+that needs torch tensors.
 
 ## Build
 
@@ -40,16 +41,6 @@ python3 -m build --wheel --no-isolation -Ccmake.define.PY2SESS_BUILD_NATIVE=ON
 
 Native wheels link against the PyTorch shared libraries supplied by the
 installed `torch` package.
-
-Releases are tagged from merged PRs by GitHub Actions. Add a `release:major`,
-`release:minor`, or `release:patch` label to the PR before merging; the default
-is `release:patch`.
-
-PyPI publication uses Trusted Publishing. Configure PyPI to trust
-`happysky19/py2sess`, workflow `.github/workflows/release.yml`, and the `pypi`
-GitHub environment, then run the `Publish to PyPI` GitHub Actions workflow for
-the tag. The release workflow currently publishes macOS arm64 native wheels and
-the source distribution.
 
 ## Quick Start
 
