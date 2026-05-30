@@ -103,6 +103,44 @@ class SceneRun:
             )
         return TwoStreamEss(options).forward(**inputs.kwargs, include_fo=include_fo)
 
+    def forward_flux(
+        self,
+        *,
+        backend: str | None = None,
+        include_fo: bool = True,
+        return_net: bool = False,
+        options: TwoStreamEssOptions | None = None,
+        **option_overrides: Any,
+    ):
+        """Run the scene through ``TwoStreamEss.forward_flux``."""
+        if options is not None:
+            if options.mode != self.mode:
+                raise ValueError(
+                    f"scene mode {self.mode!r} does not match options mode {options.mode!r}"
+                )
+            if backend is not None and backend != options.backend:
+                raise ValueError("backend override does not match options.backend")
+            if option_overrides:
+                raise ValueError("pass either options or option overrides, not both")
+        inputs = self.to_forward_inputs()
+        nlyr = int(np.asarray(inputs.kwargs["tau"]).shape[-1])
+        if options is None:
+            options = TwoStreamEssOptions(
+                nlyr=nlyr,
+                mode=self.mode,
+                backend="native" if backend is None else backend,
+                output_levels=False,
+                output_fluxes=False,
+                **option_overrides,
+            )
+        elif options.output_levels:
+            raise ValueError("scene.forward_flux requires options.output_levels=False")
+        return TwoStreamEss(options).forward_flux(
+            **inputs.kwargs,
+            include_fo=include_fo,
+            return_net=return_net,
+        )
+
     def _bundle_from_objects(self) -> dict[str, Any]:
         profile = _profile_from_object(self.profile)
         spectral = dict(self.spectral or {})

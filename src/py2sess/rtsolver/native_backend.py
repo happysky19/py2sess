@@ -283,6 +283,61 @@ def solve_thermal_2s(
     )
 
 
+def solve_thermal_2s_flux_pair(
+    *,
+    tau,
+    omega,
+    asymm,
+    scaling,
+    planck,
+    surfbb,
+    emissivity,
+    albedo,
+    brdf_f=None,
+    ubrdf_f=None,
+    stream_value: float,
+    user_stream: float,
+    thermal_tcutoff: float,
+    do_upwelling: bool = True,
+    do_dnwelling: bool = True,
+    use_brdf: bool = False,
+    return_net: bool = False,
+):
+    """Runs the compiled thermal 2S native level-flux pair kernel."""
+    extension = _require_native_extension_for_tensor(tau)
+    if use_brdf:
+        brdf_f = _zero_if_none(brdf_f, tau, (tau.shape[0],))
+        ubrdf_f = _zero_if_none(ubrdf_f, tau, (tau.shape[0],))
+    else:
+        brdf_f = albedo
+        ubrdf_f = albedo
+    pair = extension.thermal_2s_flux(
+        tau,
+        omega,
+        asymm,
+        scaling,
+        planck,
+        surfbb,
+        emissivity,
+        albedo,
+        brdf_f,
+        ubrdf_f,
+        float(stream_value),
+        float(user_stream),
+        float(thermal_tcutoff),
+        bool(do_upwelling),
+        bool(do_dnwelling),
+        bool(use_brdf),
+    )
+    flux_up = pair[..., 0]
+    flux_down = pair[..., 1]
+    return {
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up - flux_down if return_net else None,
+    }
+
+
 def solve_thermal_fo(
     *,
     tau,

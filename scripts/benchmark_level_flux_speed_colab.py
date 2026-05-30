@@ -90,8 +90,8 @@ def _checksum(result: Any) -> float:
 
 
 def _run_level_flux_solver(solver: TwoStreamEss, run_inputs: dict[str, Any], *, include_fo: bool):
-    if solver.options.backend == "native" and solver.options.mode == "solar" and not include_fo:
-        return solver.forward_flux(**run_inputs)
+    if solver.options.backend == "native":
+        return solver.forward_flux(**run_inputs, include_fo=include_fo, return_net=True)
     return solver.forward(**run_inputs, include_fo=include_fo, fo_n_moments=3)
 
 
@@ -171,8 +171,8 @@ def _time_backend(
         torch_device=device if backend in {"torch", "native"} else None,
         torch_dtype=dtype,
         plane_parallel=True,
-        output_levels=not (backend == "native" and mode == "solar" and not include_fo),
-        output_fluxes=True,
+        output_levels=backend != "native",
+        output_fluxes=backend != "native",
         fo_flux_n_mu=fo_flux_n_mu,
     )
     solver = TwoStreamEss(options)
@@ -239,8 +239,8 @@ def _run_backend_once(
         torch_device=device if backend in {"torch", "native"} else None,
         torch_dtype=dtype,
         plane_parallel=True,
-        output_levels=not (backend == "native" and mode == "solar" and not include_fo),
-        output_fluxes=True,
+        output_levels=backend != "native",
+        output_fluxes=backend != "native",
         fo_flux_n_mu=fo_flux_n_mu,
     )
     solver = TwoStreamEss(options)

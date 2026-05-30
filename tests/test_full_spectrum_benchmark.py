@@ -8,6 +8,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+import numpy as np
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -104,6 +106,67 @@ class FullSpectrumBenchmarkTests(unittest.TestCase):
 
         args.components = True
         self.assertEqual(bench._normalize_timing_kinds(args), ("level-fluxes", "components"))
+
+    def test_native_level_flux_timing_uses_flux_only_scene_path(self) -> None:
+        bench = load_script(
+            "benchmark_full_spectrum_rt_native_flux", "scripts/benchmark_full_spectrum_rt.py"
+        )
+
+        class DummyTorch:
+            cuda = mock.Mock()
+
+            def set_num_threads(self, threads: int) -> None:
+                self.threads = threads
+
+        class DummyScene:
+            def __init__(self) -> None:
+                self.forward_called = False
+                self.forward_flux_options = None
+
+            def forward(self, **kwargs):
+                self.forward_called = True
+                return mock.Mock(radiance_total=np.zeros(4))
+
+            def forward_flux(self, **kwargs):
+                self.forward_flux_options = kwargs
+                return mock.Mock(flux_up=np.zeros((4, 3)), flux_down=np.zeros((4, 3)))
+
+        scene = DummyScene()
+        inputs = mock.Mock(
+            wavelengths=np.arange(4),
+            kwargs={"tau": np.zeros((4, 2))},
+            mode="solar",
+            reference_total=np.zeros(4),
+        )
+        config = bench.BackendConfig(
+            backend="native",
+            label="native",
+            device="cpu",
+            dtype="float64",
+        )
+        with (
+            mock.patch.object(bench, "_torch_module", return_value=DummyTorch()),
+            mock.patch.object(bench, "native_backend_supports_device", return_value=True),
+        ):
+            row = bench._run_scene_forward_once(
+                scene,
+                inputs,
+                config,
+                torch_threads=4,
+                torch_bvp_engine="auto",
+                numpy_bvp_engine="auto",
+                output_levels=True,
+                output_fluxes=True,
+                fo_flux_n_mu=8,
+            )
+        self.assertFalse(scene.forward_called)
+        self.assertIsNotNone(scene.forward_flux_options)
+        self.assertFalse(scene.forward_flux_options["output_levels"])
+        self.assertFalse(scene.forward_flux_options["output_fluxes"])
+        self.assertTrue(scene.forward_flux_options["plane_parallel"])
+        self.assertTrue(scene.forward_flux_options["include_fo"])
+        self.assertTrue(scene.forward_flux_options["return_net"])
+        self.assertEqual(row["max_abs_diff"], "")
 
     def test_pydisort_flux_export_requires_portable_input_root(self) -> None:
         exporter = load_script(
