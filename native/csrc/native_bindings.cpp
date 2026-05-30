@@ -73,6 +73,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "use_surface_leaving", &py2sess_native::TwoStreamEssNativeOptions::use_surface_leaving)
       .def_readwrite("sl_isotropic", &py2sess_native::TwoStreamEssNativeOptions::sl_isotropic)
       .def_readwrite("flip_layers", &py2sess_native::TwoStreamEssNativeOptions::flip_layers)
+      .def_readwrite(
+          "plane_parallel_chapman",
+          &py2sess_native::TwoStreamEssNativeOptions::plane_parallel_chapman)
       .def("__repr__", [](const py2sess_native::TwoStreamEssNativeOptions& options) {
         std::ostringstream ss;
         ss << "TwoStreamEssNativeOptions("
@@ -86,6 +89,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            << ", use_brdf=" << options.use_brdf
            << ", use_surface_leaving=" << options.use_surface_leaving
            << ", flip_layers=" << options.flip_layers
+           << ", plane_parallel_chapman=" << options.plane_parallel_chapman
            << ")";
         return ss.str();
       });
@@ -224,7 +228,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       pybind11::arg("azmfac"),
       pybind11::arg("px11"),
       pybind11::arg("ulp"),
-      pybind11::arg("return_profile") = false);
+      pybind11::arg("return_profile") = false,
+      pybind11::arg("plane_parallel_chapman") = false);
   m.def(
       "solar_fo",
       &py2sess_native::solar_fo,
@@ -303,7 +308,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       pybind11::arg("do_dnwelling") = false,
       pybind11::arg("use_brdf") = false,
       pybind11::arg("use_surface_leaving") = false,
-      pybind11::arg("sl_isotropic") = true);
+      pybind11::arg("sl_isotropic") = true,
+      pybind11::arg("plane_parallel_chapman") = false);
   m.def(
       "solar_2s_flux",
       &py2sess_native::solar_2s_flux,
@@ -332,5 +338,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       pybind11::arg("do_dnwelling") = false,
       pybind11::arg("use_brdf") = false,
       pybind11::arg("use_surface_leaving") = false,
-      pybind11::arg("sl_isotropic") = true);
+      pybind11::arg("sl_isotropic") = true,
+      pybind11::arg("plane_parallel_chapman") = false);
 }

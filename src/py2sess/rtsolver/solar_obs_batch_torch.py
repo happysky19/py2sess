@@ -188,6 +188,84 @@ def _qsprep_obs_batch_torch(delta_tau, chapman, user_secant: float):
     }
 
 
+def _qsprep_obs_batch_plane_parallel_torch(delta_tau, secant: float, user_secant: float):
+    """Builds plane-parallel solar transmittance terms without a Chapman matrix."""
+    batch, nlayers = delta_tau.shape
+    dtype = delta_tau.dtype
+    device = delta_tau.device
+    secant_t = torch.as_tensor(secant, dtype=dtype, device=device)
+    tauslant_all = torch.cumsum(delta_tau, dim=1) * secant_t
+    delta_tauslant = delta_tau * secant_t
+    average_secant_raw = torch.empty_like(delta_tau)
+    average_secant_raw.fill_(secant)
+    too_deep = tauslant_all > MAX_TAU_PATH
+    if not bool(torch.any(too_deep)):
+        average_secant = average_secant_raw
+        initial_trans = torch.empty_like(tauslant_all)
+        initial_trans[:, 0] = 1.0
+        initial_trans[:, 1:] = torch.exp(-tauslant_all[:, :-1])
+        t_delt_mubar = torch.exp(-delta_tauslant)
+        itrans_userm = initial_trans * user_secant
+        trans_solar_beam = torch.exp(-tauslant_all[:, -1])
+        user_spher = delta_tau * user_secant
+        t_delt_userm = _exp_cutoff_torch(user_spher, MAX_TAU_PATH)
+        sigma_p = average_secant + user_secant
+        emult_up = itrans_userm * (1.0 - t_delt_mubar * t_delt_userm) / sigma_p
+        return {
+            "layer_pis_cutoff": torch.full((batch,), nlayers, dtype=torch.int64, device=device),
+            "initial_trans": initial_trans,
+            "average_secant": average_secant,
+            "trans_solar_beam": trans_solar_beam,
+            "t_delt_mubar": t_delt_mubar,
+            "itrans_userm": itrans_userm,
+            "t_delt_userm": t_delt_userm,
+            "sigma_p": sigma_p,
+            "emult_up": emult_up,
+            "all_active": True,
+        }
+    has_too_deep = torch.any(too_deep, dim=1)
+    first_too_deep = torch.argmax(too_deep.to(torch.int64), dim=1) + 1
+    cutoff = torch.where(
+        has_too_deep,
+        first_too_deep,
+        torch.full((batch,), nlayers, dtype=torch.int64, device=device),
+    )
+    active = torch.arange(1, nlayers + 1, device=device).unsqueeze(0) <= cutoff.unsqueeze(1)
+    zero = torch.zeros((batch, nlayers), dtype=dtype, device=device)
+    tauslant_previous = torch.empty_like(tauslant_all)
+    tauslant_previous[:, 0] = 0.0
+    tauslant_previous[:, 1:] = tauslant_all[:, :-1]
+    initial_trans_raw = torch.exp(-tauslant_previous)
+    initial_trans = torch.where(active, initial_trans_raw, zero)
+    average_secant = torch.where(active, average_secant_raw, zero)
+    t_delt_mubar = torch.where(
+        active & (delta_tauslant <= MAX_TAU_PATH), torch.exp(-delta_tauslant), zero
+    )
+    itrans_userm = initial_trans * user_secant
+    trans_solar_beam = _exp_cutoff_torch(tauslant_all[:, -1], MAX_TAU_PATH)
+    user_spher = delta_tau * user_secant
+    t_delt_userm = _exp_cutoff_torch(user_spher, MAX_TAU_PATH)
+    sigma_p_raw = average_secant_raw + user_secant
+    sigma_p = torch.where(active, sigma_p_raw, zero)
+    emult_up = torch.where(
+        active,
+        itrans_userm * (1.0 - t_delt_mubar * t_delt_userm) / sigma_p_raw,
+        zero,
+    )
+    return {
+        "layer_pis_cutoff": cutoff,
+        "initial_trans": initial_trans,
+        "average_secant": average_secant,
+        "trans_solar_beam": trans_solar_beam,
+        "t_delt_mubar": t_delt_mubar,
+        "itrans_userm": itrans_userm,
+        "t_delt_userm": t_delt_userm,
+        "sigma_p": sigma_p,
+        "emult_up": emult_up,
+        "all_active": False,
+    }
+
+
 def _hom_solution_solar_obs_batch_torch(
     *,
     fourier: int,
@@ -535,7 +613,7 @@ def solve_solar_obs_batch_torch(
     albedo,
     flux_factor,
     stream_value: float,
-    chapman,
+    chapman=None,
     x0: float,
     user_stream: float,
     user_secant: float,
@@ -553,6 +631,7 @@ def solve_solar_obs_batch_torch(
     return_fluxes: bool = False,
     do_upwelling: bool = True,
     do_dnwelling: bool = False,
+    plane_parallel_secant: float | None = None,
 ):
     """Solves batched solar-observation 2S radiance with torch tensors.
 
@@ -604,7 +683,6 @@ def solve_solar_obs_batch_torch(
     scaling_t = _as_tensor(scaling, dtype=dtype, device=device)
     albedo_t = _as_tensor(albedo, dtype=dtype, device=device)
     flux_t = _as_tensor(flux_factor, dtype=dtype, device=device)
-    chapman_t = _as_tensor(chapman, dtype=dtype, device=device)
     pxsq_values = _static_float_tuple(pxsq)
     px0x_values = _static_float_tuple(px0x)
     pxsq_t = None if pxsq_values is not None else _as_tensor(pxsq, dtype=dtype, device=device)
@@ -616,7 +694,15 @@ def solve_solar_obs_batch_torch(
         asymm_t,
         scaling_t,
     )
-    misc = _qsprep_obs_batch_torch(delta_tau, chapman_t, user_secant)
+    if plane_parallel_secant is None:
+        if chapman is None:
+            raise ValueError("chapman is required unless plane_parallel_secant is supplied")
+        chapman_t = _as_tensor(chapman, dtype=dtype, device=device)
+        misc = _qsprep_obs_batch_torch(delta_tau, chapman_t, user_secant)
+    else:
+        misc = _qsprep_obs_batch_plane_parallel_torch(
+            delta_tau, float(plane_parallel_secant), user_secant
+        )
     pi4 = 4.0 * np.pi
     omega_asymm_3 = 3.0 * omega_total * asymm_total
     all_layers_active = bool(misc["all_active"])

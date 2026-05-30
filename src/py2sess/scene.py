@@ -26,6 +26,30 @@ from .optical.scene import (
 )
 from .optical.scene_io import build_benchmark_scene_inputs, load_scene_yaml
 
+_FORWARD_FLUX_INPUT_KEYS = frozenset(
+    {
+        "tau",
+        "ssa",
+        "g",
+        "z",
+        "angles",
+        "stream",
+        "fbeam",
+        "albedo",
+        "delta_m_truncation_factor",
+        "planck",
+        "surface_planck",
+        "emissivity",
+        "brdf",
+        "surface_leaving",
+        "view_angles",
+        "beam_szas",
+        "relazms",
+        "earth_radius",
+        "geometry",
+    }
+)
+
 
 @dataclass(frozen=True)
 class SceneForwardInputs:
@@ -102,6 +126,51 @@ class SceneRun:
                 **option_overrides,
             )
         return TwoStreamEss(options).forward(**inputs.kwargs, include_fo=include_fo)
+
+    def forward_flux(
+        self,
+        *,
+        backend: str | None = None,
+        include_fo: bool = True,
+        return_net: bool = False,
+        options: TwoStreamEssOptions | None = None,
+        **option_overrides: Any,
+    ):
+        """Run the scene through ``TwoStreamEss.forward_flux``."""
+        if options is not None:
+            if options.mode != self.mode:
+                raise ValueError(
+                    f"scene mode {self.mode!r} does not match options mode {options.mode!r}"
+                )
+            if backend is not None and backend != options.backend:
+                raise ValueError("backend override does not match options.backend")
+            if option_overrides:
+                raise ValueError("pass either options or option overrides, not both")
+        inputs = self.to_forward_inputs()
+        nlyr = int(np.asarray(inputs.kwargs["tau"]).shape[-1])
+        if options is None:
+            option_overrides = dict(option_overrides)
+            if bool(option_overrides.pop("output_levels", False)):
+                raise ValueError("scene.forward_flux requires output_levels=False")
+            option_overrides.pop("output_fluxes", None)
+            options = TwoStreamEssOptions(
+                nlyr=nlyr,
+                mode=self.mode,
+                backend="native" if backend is None else backend,
+                output_levels=False,
+                output_fluxes=False,
+                **option_overrides,
+            )
+        elif options.output_levels:
+            raise ValueError("scene.forward_flux requires options.output_levels=False")
+        flux_kwargs = {
+            key: value for key, value in inputs.kwargs.items() if key in _FORWARD_FLUX_INPUT_KEYS
+        }
+        return TwoStreamEss(options).forward_flux(
+            **flux_kwargs,
+            include_fo=include_fo,
+            return_net=return_net,
+        )
 
     def _bundle_from_objects(self) -> dict[str, Any]:
         profile = _profile_from_object(self.profile)

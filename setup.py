@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from setuptools import setup
@@ -24,7 +25,12 @@ def _native_extension():
     include_dirs = ["native/csrc"]
     build_cuda = os.environ.get("PY2SESS_BUILD_CUDA", "0") == "1"
     define_macros = []
-    extra_compile_args = {"cxx": ["-std=c++17"]}
+    cxx_args = ["-std=c++17"]
+    if sys.platform == "darwin":
+        cxx_args.append("-Wno-invalid-specialization")
+    if os.environ.get("PY2SESS_NATIVE_DEBUG", "0") != "1":
+        cxx_args.append("/O2" if os.name == "nt" else "-O3")
+    extra_compile_args = {"cxx": cxx_args}
     extra_link_args = []
     if build_cuda and cpp_extension.CUDA_HOME is None:
         raise RuntimeError("PY2SESS_BUILD_CUDA=1 requested, but torch could not find CUDA_HOME")
@@ -33,6 +39,8 @@ def _native_extension():
         extension_cls = cpp_extension.CUDAExtension
         define_macros.append(("PY2SESS_WITH_CUDA", "1"))
         extra_compile_args["nvcc"] = ["-std=c++17", "--extended-lambda"]
+        if os.environ.get("PY2SESS_NATIVE_DEBUG", "0") != "1":
+            extra_compile_args["nvcc"].append("-O3")
         torch_lib = Path(cpp_extension.__file__).resolve().parents[1] / "lib"
         extra_link_args.append(f"-Wl,-rpath,{torch_lib}")
     else:

@@ -493,6 +493,10 @@ def _run_scene_forward_once(
         "output_fluxes": output_fluxes,
         "fo_flux_n_mu": fo_flux_n_mu,
     }
+    native_flux_only = config.backend == "native" and output_fluxes
+    if native_flux_only:
+        common_options.pop("output_levels")
+        common_options.pop("output_fluxes")
     if output_fluxes:
         common_options["plane_parallel"] = True
     if config.backend in {"torch", "native"}:
@@ -520,11 +524,18 @@ def _run_scene_forward_once(
         }
     _sync_if_cuda(config)
     start = time.perf_counter()
-    result = scene.forward(**options, include_fo=True)
+    if native_flux_only:
+        result = scene.forward_flux(**options, include_fo=True, return_net=True)
+    else:
+        result = scene.forward(**options, include_fo=True)
     _sync_if_cuda(config)
     seconds = time.perf_counter() - start
-    radiance = np.asarray(to_numpy(result.radiance_total), dtype=float)
-    max_abs, max_rel = accuracy_summary(radiance, inputs.reference_total)
+    if native_flux_only:
+        max_abs = ""
+        max_rel = ""
+    else:
+        radiance = np.asarray(to_numpy(result.radiance_total), dtype=float)
+        max_abs, max_rel = accuracy_summary(radiance, inputs.reference_total)
     return {
         "seconds": seconds,
         "wall_seconds": seconds,

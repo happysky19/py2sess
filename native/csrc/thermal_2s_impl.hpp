@@ -191,6 +191,16 @@ PY2SESS_HD std::size_t solar_2s_workspace_bytes(std::int64_t nlay) {
 }
 
 template <typename T>
+PY2SESS_HD std::size_t solar_2s_flux_workspace_bytes(std::int64_t nlay) {
+  const auto layers = nlay > 0 ? static_cast<std::size_t>(nlay) : 1;
+  const auto ntotal = 2 * layers;
+  const auto layer_arrays = 11 * layers;
+  const auto bvp_arrays = ntotal + (ntotal > 1 ? ntotal - 1 : 1) +
+                          (ntotal > 2 ? ntotal - 2 : 1);
+  return (layer_arrays + bvp_arrays + 8) * sizeof(T);
+}
+
+template <typename T>
 PY2SESS_HD std::size_t solar_fo_workspace_bytes(std::int64_t nlay, bool return_profile) {
   const auto layers = nlay > 0 ? static_cast<std::size_t>(nlay) : 1;
   const auto profile_arrays = return_profile ? 2 * layers : 0;
@@ -1227,6 +1237,7 @@ PY2SESS_HD void solar_2s_row(
     bool use_brdf,
     bool use_surface_leaving,
     bool sl_isotropic_flag,
+    bool plane_parallel_chapman,
     char* work) {
   const int nlev = nlay + 1;
   const int radiance_count = return_profile ? nlev : 1;
@@ -1311,18 +1322,27 @@ PY2SESS_HD void solar_2s_row(
   }
 
   T previous_tauslant = T(0);
+  T cumulative_delta_tau = T(0);
+  const T plane_secant = plane_parallel_chapman ? T(1) / x0 : T(0);
   int layer_pis_cutoff = nlay;
   for (int layer = 0; layer < nlay; ++layer) {
+    cumulative_delta_tau += delta_tau[layer];
     T tauslant = T(0);
-    for (int k = 0; k <= layer; ++k) {
-      tauslant += delta_tau[k] * chapman[k * nlay + layer];
+    if (plane_parallel_chapman) {
+      tauslant = cumulative_delta_tau * plane_secant;
+    } else {
+      for (int k = 0; k <= layer; ++k) {
+        tauslant += delta_tau[k] * chapman[k * nlay + layer];
+      }
     }
     const T delta_tauslant = tauslant - previous_tauslant;
     const T user_path = delta_tau[layer] * user_secant;
     const T t_user = exp_cutoff(user_path, T(88));
     if (layer + 1 <= layer_pis_cutoff) {
-      const T average =
-          delta_tau[layer] == T(0) ? T(0) : delta_tauslant / delta_tau[layer];
+      const T average = plane_parallel_chapman
+                            ? plane_secant
+                            : (delta_tau[layer] == T(0) ? T(0)
+                                                         : delta_tauslant / delta_tau[layer]);
       const T initial = layer == 0 ? T(1) : exp(-previous_tauslant);
       const T t_mubar = exp_cutoff(delta_tauslant, T(88));
       const T sigma = average + user_secant;
@@ -1569,6 +1589,23 @@ PY2SESS_HD void solar_2s_row(
       out[0] += add_factor * delta_factor * cumsource;
     }
   }
+  if (return_profile) {
+    for (int level = nlay - 1; level >= 0; --level) {
+      if (delta_tau[level] == T(0)) {
+        out[level] = out[level + 1];
+      }
+    }
+  }
+  if (return_fluxes) {
+    for (int level = nlay - 1; level >= 0; --level) {
+      if (delta_tau[level] == T(0)) {
+        flux_up[level] = flux_up[level + 1];
+        flux_down[level] = flux_down[level + 1];
+        flux_net[level] = flux_net[level + 1];
+        flux_mean[level] = flux_mean[level + 1];
+      }
+    }
+  }
 }
 
 template <typename T>
@@ -1750,41 +1787,219 @@ PY2SESS_HD void solar_2s_flux_pair_row(
     bool use_brdf,
     bool use_surface_leaving,
     bool sl_isotropic_flag,
+    bool plane_parallel_chapman,
     char* work) {
-  T* packed = alloc_from<T>(work, two_stream_flux_pair_packed_cols<T>(nlay));
-  solar_2s_row<T>(
+  (void)user_stream;
+  (void)user_secant;
+  (void)azmfac;
+  (void)px11;
+  (void)ulp;
+
+  T* delta_tau = alloc_from<T>(work, nlay);
+  T* initial_trans = alloc_from<T>(work, nlay);
+  T* eigentrans = alloc_from<T>(work, nlay);
+  T* xpos1 = alloc_from<T>(work, nlay);
+  T* xpos2 = alloc_from<T>(work, nlay);
+  T* wupper0 = alloc_from<T>(work, nlay);
+  T* wupper1 = alloc_from<T>(work, nlay);
+  T* wlower0 = alloc_from<T>(work, nlay);
+  T* wlower1 = alloc_from<T>(work, nlay);
+  T* lcon = alloc_from<T>(work, nlay);
+  T* mcon = alloc_from<T>(work, nlay);
+  T* col = alloc_from<T>(work, 2 * nlay);
+  T* elm1 = alloc_from<T>(work, 2 * nlay > 1 ? 2 * nlay - 1 : 1);
+  T* elm2 = alloc_from<T>(work, 2 * nlay > 2 ? 2 * nlay - 2 : 1);
+
+  const int nlev = nlay + 1;
+  const T pi = T(3.141592653589793238462643383279502884);
+  const T pi2 = T(2) * pi;
+  const T pi4 = T(4) * pi;
+  const T xinv = T(1) / stream_value;
+  const T row_flux = *flux_factor;
+  const T row_albedo = *albedo;
+  const T scaled_flux = row_flux / pi4;
+
+  bool transparent = true;
+  bool has_scattering = false;
+  for (int i = 0; i < nlay; ++i) {
+    if (omega[i] != T(0)) {
+      has_scattering = true;
+    }
+    const T omfac = T(1) - omega[i] * scaling[i];
+    delta_tau[i] = tau[i] * omfac;
+    if (delta_tau[i] != T(0)) {
+      transparent = false;
+    }
+  }
+
+  if (transparent) {
+    const T down_value = do_dnwelling ? row_flux * x0 : T(0);
+    for (int level = 0; level < nlev; ++level) {
+      out[2 * level] = T(0);
+      out[2 * level + 1] = down_value;
+    }
+    return;
+  }
+
+  T previous_tauslant = T(0);
+  T cumulative_delta_tau = T(0);
+  const T plane_secant = plane_parallel_chapman ? T(1) / x0 : T(0);
+  int layer_pis_cutoff = nlay;
+  for (int layer = 0; layer < nlay; ++layer) {
+    cumulative_delta_tau += delta_tau[layer];
+    T tauslant = T(0);
+    if (plane_parallel_chapman) {
+      tauslant = cumulative_delta_tau * plane_secant;
+    } else {
+      for (int k = 0; k <= layer; ++k) {
+        tauslant += delta_tau[k] * chapman[k * nlay + layer];
+      }
+    }
+    const T delta_tauslant = tauslant - previous_tauslant;
+    const bool active = layer + 1 <= layer_pis_cutoff;
+    const T average =
+        active ? (plane_parallel_chapman
+                      ? plane_secant
+                      : (delta_tau[layer] == T(0) ? T(0) : delta_tauslant / delta_tau[layer]))
+               : T(0);
+    const T initial = active ? (layer == 0 ? T(1) : exp(-previous_tauslant)) : T(0);
+    const T t_mubar = active ? exp_cutoff(delta_tauslant, T(88)) : T(0);
+    initial_trans[layer] = initial;
+    if (active) {
+      if (tauslant > T(88)) {
+        layer_pis_cutoff = layer + 1;
+      }
+    }
+    previous_tauslant = tauslant;
+
+    if (!has_scattering) {
+      continue;
+    }
+    const T omfac = T(1) - omega[layer] * scaling[layer];
+    const T m1fac = T(1) - scaling[layer];
+    const T omega_total =
+        clamp_value((m1fac * omega[layer]) / omfac, T(1.0e-9), T(0.999999999));
+    T asymm_total =
+        clamp_value((asymm[layer] - scaling[layer]) / m1fac, T(-0.999999999), T(0.999999999));
+    if (asymm_total >= T(0) && asymm_total < T(1.0e-9)) {
+      asymm_total = T(1.0e-9);
+    } else if (asymm_total < T(0) && asymm_total > T(-1.0e-9)) {
+      asymm_total = T(-1.0e-9);
+    }
+    const T omega_asymm_3 = T(3) * omega_total * asymm_total;
+    const T sab = xinv * (omega_total - T(1));
+    const T dab = xinv * (pxsq[0] * omega_asymm_3 - T(1));
+    const T eigenvalue = sqrt(sab * dab);
+    eigentrans[layer] = exp_cutoff(eigenvalue * delta_tau[layer], T(88));
+    const T difvec = -sab / eigenvalue;
+    xpos1[layer] = T(0.5) * (T(1) + difvec);
+    xpos2[layer] = T(0.5) * (T(1) - difvec);
+    const T norm_saved =
+        stream_value * (xpos1[layer] * xpos1[layer] - xpos2[layer] * xpos2[layer]);
+
+    const T gamma_p = average + eigenvalue;
+    const T gamma_m = average - eigenvalue;
+    T cfunc = T(0);
+    T dfunc = T(0);
+    if (active) {
+      if (fabs(gamma_m) < T(1.0e-3)) {
+        cfunc = taylor_series_1(3, gamma_m, delta_tau[layer], t_mubar, T(1));
+      } else {
+        cfunc = (eigentrans[layer] - t_mubar) / gamma_m;
+      }
+      dfunc = (T(1) - eigentrans[layer] * t_mubar) / gamma_p;
+    }
+    const T common = omega_total * scaled_flux;
+    const T scatter = (px0x[0] * omega_asymm_3) * (xpos1[layer] - xpos2[layer]) * scaled_flux;
+    const T aterm = active ? (common + scatter) / norm_saved : T(0);
+    const T bterm = active ? (common - scatter) / norm_saved : T(0);
+    const T gfunc_dn = cfunc * aterm * initial;
+    const T gfunc_up = dfunc * bterm * initial;
+    wupper0[layer] = gfunc_up * xpos2[layer];
+    wupper1[layer] = gfunc_up * xpos1[layer];
+    wlower0[layer] = gfunc_dn * xpos1[layer];
+    wlower1[layer] = gfunc_dn * xpos2[layer];
+  }
+  const T trans_solar_beam = previous_tauslant > T(88) ? T(0) : exp(-previous_tauslant);
+
+  if (!has_scattering) {
+    for (int level = 0; level < nlay; ++level) {
+      out[2 * level] = T(0);
+      out[2 * level + 1] = do_dnwelling ? row_flux * initial_trans[level] * x0 : T(0);
+    }
+    out[2 * nlay] = T(0);
+    out[2 * nlay + 1] = do_dnwelling ? row_flux * trans_solar_beam * x0 : T(0);
+    return;
+  }
+
+  T direct_beam;
+  T bvp_albedo;
+  if (use_brdf) {
+    direct_beam = row_flux * x0 / pi * trans_solar_beam * brdf_f0[0];
+    bvp_albedo = brdf_f[0];
+  } else {
+    direct_beam = row_flux * x0 / pi * trans_solar_beam * row_albedo;
+    bvp_albedo = row_albedo;
+  }
+  if (use_surface_leaving) {
+    if (sl_isotropic_flag) {
+      direct_beam += (*slterm_isotropic) * row_flux;
+    } else {
+      direct_beam += slterm_f0[0] * row_flux;
+    }
+  }
+  solve_bvp_row(
       nlay,
+      bvp_albedo,
+      direct_beam,
+      T(2),
       stream_value,
-      x0,
-      user_stream,
-      user_secant,
-      azmfac,
-      px11,
-      ulp,
-      chapman,
-      pxsq,
-      px0x,
-      tau,
-      omega,
-      asymm,
-      scaling,
-      albedo,
-      flux_factor,
-      brdf_f0,
-      brdf_f,
-      ubrdf_f,
-      slterm_isotropic,
-      slterm_f0,
-      packed,
-      false,
-      true,
-      do_upwelling,
-      do_dnwelling,
-      use_brdf,
-      use_surface_leaving,
-      sl_isotropic_flag,
-      work);
-  copy_flux_pair_from_packed(packed, out, nlay);
+      xpos1,
+      xpos2,
+      eigentrans,
+      wupper0,
+      wupper1,
+      wlower0,
+      wlower1,
+      lcon,
+      mcon,
+      col,
+      elm1,
+      elm2);
+
+  for (int level = 0; level < nlay; ++level) {
+    const T down_quad =
+        wupper0[level] + lcon[level] * xpos1[level] +
+        mcon[level] * xpos2[level] * eigentrans[level];
+    const T up_quad =
+        wupper1[level] + lcon[level] * xpos2[level] +
+        mcon[level] * xpos1[level] * eigentrans[level];
+    const T up_value = do_upwelling ? pi2 * stream_value * up_quad : T(0);
+    T down_value = do_dnwelling ? pi2 * stream_value * down_quad : T(0);
+    if (do_dnwelling) {
+      down_value += row_flux * initial_trans[level] * x0;
+    }
+    out[2 * level] = up_value;
+    out[2 * level + 1] = down_value;
+  }
+  const int last = nlay - 1;
+  const T down_quad =
+      wlower0[last] + lcon[last] * xpos1[last] * eigentrans[last] + mcon[last] * xpos2[last];
+  const T up_quad =
+      wlower1[last] + lcon[last] * xpos2[last] * eigentrans[last] + mcon[last] * xpos1[last];
+  const T up_value = do_upwelling ? pi2 * stream_value * up_quad : T(0);
+  T down_value = do_dnwelling ? pi2 * stream_value * down_quad : T(0);
+  if (do_dnwelling) {
+    down_value += row_flux * trans_solar_beam * x0;
+  }
+  out[2 * nlay] = up_value;
+  out[2 * nlay + 1] = down_value;
+  for (int level = nlay - 1; level >= 0; --level) {
+    if (delta_tau[level] == T(0)) {
+      out[2 * level] = out[2 * (level + 1)];
+      out[2 * level + 1] = out[2 * (level + 1) + 1];
+    }
+  }
 }
 
 template <typename T>
@@ -1816,6 +2031,7 @@ PY2SESS_HD void solar_2s_prop_flux_pair_row(
     bool use_brdf,
     bool use_surface_leaving,
     bool sl_isotropic_flag,
+    bool plane_parallel_chapman,
     char* work) {
   T* tau = alloc_from<T>(work, nlay);
   T* omega = alloc_from<T>(work, nlay);
@@ -1851,6 +2067,7 @@ PY2SESS_HD void solar_2s_prop_flux_pair_row(
       use_brdf,
       use_surface_leaving,
       sl_isotropic_flag,
+      plane_parallel_chapman,
       work);
 }
 

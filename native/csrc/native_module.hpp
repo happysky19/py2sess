@@ -25,6 +25,7 @@ struct TwoStreamEssNativeOptions {
   bool use_surface_leaving = false;
   bool sl_isotropic = true;
   bool flip_layers = false;
+  bool plane_parallel_chapman = false;
 };
 
 class TwoStreamEssNativeImpl : public torch::nn::Cloneable<TwoStreamEssNativeImpl> {
