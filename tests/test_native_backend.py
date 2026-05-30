@@ -72,6 +72,30 @@ class NativeBackendTests(unittest.TestCase):
                 cuda_extension,
             )
 
+    def test_cuda_capable_unified_extension_is_selected_for_cuda(self) -> None:
+        unified_extension = _FakeNativeExtension(cuda=True)
+        fake_torch = mock.Mock()
+        fake_torch.cuda.is_available.return_value = True
+        with (
+            mock.patch.object(
+                native_backend_module, "_load_native_extension", return_value=unified_extension
+            ),
+            mock.patch("py2sess.rtsolver.backend._load_torch", return_value=fake_torch),
+            mock.patch.object(native_backend_module, "import_module", side_effect=ImportError),
+        ):
+            native_backend_module._load_native_cuda_extension.cache_clear()
+            try:
+                info = native_backend_module.native_backend_info()
+                self.assertTrue(info["available"])
+                self.assertTrue(info["cuda"])
+                self.assertTrue(info["cuda_extension_available"])
+                self.assertIs(
+                    native_backend_module._require_native_extension_for_tensor(_FakeTensor("cuda")),
+                    unified_extension,
+                )
+            finally:
+                native_backend_module._load_native_cuda_extension.cache_clear()
+
     @unittest.skipUnless(has_torch(), "torch is not installed")
     def test_forward_flux_uses_native_flux_pair_path(self) -> None:
         torch = _load_torch()

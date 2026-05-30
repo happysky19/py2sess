@@ -29,7 +29,13 @@ def _load_native_cuda_extension() -> Any | None:
         torch = _load_torch()
         if torch is None or not torch.cuda.is_available():
             return None
-        return import_module("py2sess._native_cuda")
+        try:
+            return import_module("py2sess._native_cuda")
+        except ImportError:
+            extension = _load_native_extension()
+            if extension is not None and bool(dict(extension.backend_info()).get("cuda", False)):
+                return extension
+            return None
     except (ImportError, RuntimeError, OSError):
         return None
 
