@@ -83,8 +83,16 @@ def _torch_inputs(inputs: dict[str, Any], *, device: str, dtype: str) -> dict[st
 def _checksum(result: Any) -> float:
     total = 0.0
     for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
-        total += float(np.asarray(to_numpy(getattr(result, field))).sum())
+        value = getattr(result, field)
+        if value is not None:
+            total += float(np.asarray(to_numpy(value)).sum())
     return total
+
+
+def _run_level_flux_solver(solver: TwoStreamEss, run_inputs: dict[str, Any], *, include_fo: bool):
+    if solver.options.backend == "native" and solver.options.mode == "solar" and not include_fo:
+        return solver.forward_flux(**run_inputs)
+    return solver.forward(**run_inputs, include_fo=include_fo, fo_n_moments=3)
 
 
 def _sample_indices(rows: int, count: int) -> np.ndarray:
@@ -163,20 +171,20 @@ def _time_backend(
         torch_device=device if backend in {"torch", "native"} else None,
         torch_dtype=dtype,
         plane_parallel=True,
-        output_levels=True,
+        output_levels=not (backend == "native" and mode == "solar" and not include_fo),
         output_fluxes=True,
         fo_flux_n_mu=fo_flux_n_mu,
     )
     solver = TwoStreamEss(options)
     rows = []
     for _ in range(warmup):
-        result = solver.forward(**run_inputs, include_fo=include_fo, fo_n_moments=3)
+        result = _run_level_flux_solver(solver, run_inputs, include_fo=include_fo)
         _sync(device)
         _checksum(result)
     for rep in range(repeats):
         _sync(device)
         start = time.perf_counter()
-        result = solver.forward(**run_inputs, include_fo=include_fo, fo_n_moments=3)
+        result = _run_level_flux_solver(solver, run_inputs, include_fo=include_fo)
         _sync(device)
         elapsed = time.perf_counter() - start
         rows.append(
@@ -231,14 +239,14 @@ def _run_backend_once(
         torch_device=device if backend in {"torch", "native"} else None,
         torch_dtype=dtype,
         plane_parallel=True,
-        output_levels=True,
+        output_levels=not (backend == "native" and mode == "solar" and not include_fo),
         output_fluxes=True,
         fo_flux_n_mu=fo_flux_n_mu,
     )
     solver = TwoStreamEss(options)
     _sync(device)
     start = time.perf_counter()
-    result = solver.forward(**run_inputs, include_fo=include_fo, fo_n_moments=3)
+    result = _run_level_flux_solver(solver, run_inputs, include_fo=include_fo)
     _sync(device)
     return result, time.perf_counter() - start
 
@@ -314,7 +322,10 @@ def _pydisort_same_input_comparison(
             result, py2sess_seconds = run
             for local_row, (source_row, reference, pydisort_seconds) in enumerate(references):
                 for field in ("flux_up", "flux_down", "flux_net", "flux_mean"):
-                    actual = _level_values(getattr(result, field), row=local_row)
+                    field_value = getattr(result, field)
+                    if field_value is None:
+                        continue
+                    actual = _level_values(field_value, row=local_row)
                     expected = _level_values(reference[field])
                     rows.append(
                         {

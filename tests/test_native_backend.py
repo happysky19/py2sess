@@ -12,7 +12,7 @@ from py2sess import (
     native_extension_available,
 )
 from py2sess.rtsolver import native_backend as native_backend_module
-from py2sess.rtsolver.backend import has_torch, to_numpy
+from py2sess.rtsolver.backend import _load_torch, has_torch, to_numpy
 from py2sess.rtsolver.native_backend import native_backend_supports_device
 
 
@@ -73,6 +73,119 @@ class NativeBackendTests(unittest.TestCase):
             )
 
     @unittest.skipUnless(has_torch(), "torch is not installed")
+    def test_forward_flux_uses_native_flux_pair_path(self) -> None:
+        torch = _load_torch()
+        assert torch is not None
+
+        def fake_solve_solar_2s_flux_pair(**kwargs):
+            tau = kwargs["tau"]
+            rows = int(tau.shape[0])
+            nlev = int(tau.shape[1]) + 1
+            flux_up = torch.ones((rows, nlev), dtype=tau.dtype, device=tau.device)
+            flux_down = 2.0 * flux_up
+            return {
+                "flux_up": flux_up,
+                "flux_down": flux_down,
+                "flux_net": flux_up - flux_down,
+            }
+
+        kwargs = dict(
+            tau=np.array([[0.01, 0.02], [0.04, 0.03]]),
+            ssa=np.array([[0.2, 0.15], [0.1, 0.2]]),
+            g=np.array([[0.1, 0.2], [0.2, 0.1]]),
+            z=np.array([2.0, 1.0, 0.0]),
+            angles=[30.0, 20.0, 0.0],
+            albedo=np.array([0.1, 0.2]),
+            fbeam=np.array([1.0, 0.8]),
+        )
+        with (
+            mock.patch.object(
+                native_backend_module, "native_backend_supports_device", return_value=True
+            ),
+            mock.patch.object(
+                native_backend_module,
+                "solve_solar_2s_flux_pair",
+                side_effect=fake_solve_solar_2s_flux_pair,
+            ),
+        ):
+            result = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=2,
+                    mode="solar",
+                    backend="native",
+                    torch_dtype="float64",
+                )
+            ).forward_flux(**kwargs)
+
+        self.assertEqual(tuple(result.flux_up.shape), (2, 3))
+        self.assertIsNone(result.flux_net)
+        self.assertIsNone(result.flux_mean)
+        np.testing.assert_allclose(to_numpy(result.flux_down), 2.0 * to_numpy(result.flux_up))
+
+        with (
+            mock.patch.object(
+                native_backend_module, "native_backend_supports_device", return_value=True
+            ),
+            mock.patch.object(
+                native_backend_module,
+                "solve_solar_2s_flux_pair",
+                side_effect=fake_solve_solar_2s_flux_pair,
+            ),
+        ):
+            result_with_net = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=2,
+                    mode="solar",
+                    backend="native",
+                    torch_dtype="float64",
+                )
+            ).forward_flux(**kwargs, return_net=True)
+        np.testing.assert_allclose(
+            to_numpy(result_with_net.flux_net),
+            -to_numpy(result_with_net.flux_up),
+        )
+
+    @unittest.skipUnless(has_torch(), "torch is not installed")
+    @unittest.skipUnless(native_extension_available(), "py2sess._native is not built")
+    def test_forward_flux_matches_native_forward_level_fluxes(self) -> None:
+        kwargs = dict(
+            tau=np.array([[0.01, 0.02, 0.03], [0.04, 0.03, 0.02]]),
+            ssa=np.array([[0.2, 0.15, 0.1], [0.1, 0.2, 0.15]]),
+            g=np.array([[0.1, 0.2, 0.3], [0.2, 0.1, 0.3]]),
+            z=np.array([3.0, 2.0, 1.0, 0.0]),
+            angles=[30.0, 20.0, 0.0],
+            albedo=np.array([0.1, 0.2]),
+            fbeam=np.array([1.0, 0.8]),
+        )
+        flux_only = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="native",
+                plane_parallel=True,
+                torch_dtype="float64",
+            )
+        ).forward_flux(**kwargs, return_net=True)
+        full = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="native",
+                plane_parallel=True,
+                output_fluxes=True,
+                torch_dtype="float64",
+            )
+        ).forward(**kwargs)
+        for field in ("flux_up", "flux_down", "flux_net"):
+            np.testing.assert_allclose(
+                to_numpy(getattr(flux_only, field)),
+                to_numpy(getattr(full, field)),
+                rtol=0.0,
+                atol=0.0,
+            )
+        self.assertIsNone(flux_only.flux_mean)
+
+    @unittest.skipUnless(has_torch(), "torch is not installed")
     @unittest.skipUnless(native_extension_available(), "py2sess._native is not built")
     def test_native_solar_two_stream_matches_torch(self) -> None:
         kwargs = dict(
@@ -93,6 +206,101 @@ class NativeBackendTests(unittest.TestCase):
         np.testing.assert_allclose(
             to_numpy(native.radiance_total),
             to_numpy(torch_result.radiance_total),
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+
+    @unittest.skipUnless(has_torch(), "torch is not installed")
+    @unittest.skipUnless(native_extension_available(), "py2sess._native is not built")
+    def test_native_plane_parallel_zero_layer_matches_torch(self) -> None:
+        kwargs = dict(
+            tau=np.array([[0.01, 0.0, 0.02], [0.0, 0.03, 0.04]]),
+            ssa=np.array([[0.2, 0.15, 0.1], [0.1, 0.2, 0.15]]),
+            g=np.array([[0.1, 0.2, 0.3], [0.2, 0.1, 0.3]]),
+            z=np.array([3.0, 2.0, 1.0, 0.0]),
+            angles=[30.0, 20.0, 0.0],
+            albedo=np.array([0.1, 0.2]),
+            fbeam=np.array([1.0, 0.8]),
+        )
+        native = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="native",
+                plane_parallel=True,
+                torch_dtype="float64",
+            )
+        ).forward(**kwargs)
+        torch_result = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="torch",
+                plane_parallel=True,
+                torch_dtype="float64",
+            )
+        ).forward(**kwargs)
+        np.testing.assert_allclose(
+            to_numpy(native.radiance_total),
+            to_numpy(torch_result.radiance_total),
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+        native_profile = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="native",
+                plane_parallel=True,
+                output_levels=True,
+                torch_dtype="float64",
+            )
+        ).forward(**kwargs)
+        torch_profile = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="torch",
+                plane_parallel=True,
+                output_levels=True,
+                torch_dtype="float64",
+            )
+        ).forward(**kwargs)
+        np.testing.assert_allclose(
+            to_numpy(native_profile.radiance_profile),
+            to_numpy(torch_profile.radiance_profile),
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+        native_flux = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="native",
+                plane_parallel=True,
+                output_fluxes=True,
+                torch_dtype="float64",
+            )
+        ).forward(**kwargs)
+        torch_flux = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=3,
+                mode="solar",
+                backend="torch",
+                plane_parallel=True,
+                output_fluxes=True,
+                torch_dtype="float64",
+            )
+        ).forward(**kwargs)
+        np.testing.assert_allclose(
+            to_numpy(native_flux.flux_up),
+            to_numpy(torch_flux.flux_up),
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            to_numpy(native_flux.flux_down),
+            to_numpy(torch_flux.flux_down),
             rtol=1.0e-12,
             atol=1.0e-12,
         )

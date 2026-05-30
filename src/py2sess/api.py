@@ -266,6 +266,31 @@ class TwoStreamEssBatchResult:
 
 
 @dataclass(frozen=True)
+class TwoStreamEssFluxResult:
+    """Flux-only outputs from a native batched level-flux call."""
+
+    flux_up: Any
+    flux_down: Any
+    flux_net: Any | None = None
+    flux_mean: Any | None = None
+    batch_shape: tuple[int, ...] = ()
+    geometry_shape: tuple[int, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        """Returns canonical level-flux fields plus short aliases."""
+        return {
+            "flux_up": self.flux_up,
+            "flux_down": self.flux_down,
+            "flux_net": self.flux_net,
+            "flux_mean": self.flux_mean,
+            "up": self.flux_up,
+            "down": self.flux_down,
+            "net": self.flux_net,
+            "mean": self.flux_mean,
+        }
+
+
+@dataclass(frozen=True)
 class TwoStreamEssResult:
     """Forward-model outputs plus convenience accessors.
 
@@ -2459,9 +2484,10 @@ class TwoStreamEss:
         flux_net_by_geometry: list[np.ndarray] = []
         flux_mean_by_geometry: list[np.ndarray] = []
         for geom_index, user_obsgeom in enumerate(prepared.user_obsgeoms):
+            plane_parallel_secant = None
             if self.options.plane_parallel:
-                secant = float(geometry.average_secant_pp[geom_index])
-                chapman = np.triu(np.full((n_layers, n_layers), secant, dtype=float))
+                plane_parallel_secant = float(geometry.average_secant_pp[geom_index])
+                chapman = None
             else:
                 chapman = geometry.chapman_factors[:, :, geom_index]
             n_rows = tau.shape[0]
@@ -2532,6 +2558,7 @@ class TwoStreamEss:
                     return_fluxes=want_fluxes,
                     do_upwelling=self.options.upwelling or want_fluxes,
                     do_dnwelling=self.options.downwelling or want_fluxes,
+                    plane_parallel_secant=plane_parallel_secant,
                 )
                 if want_fluxes:
                     flux_up_rows[row_slice] = two_stream_chunk["flux_up"]
@@ -2867,12 +2894,23 @@ class TwoStreamEss:
                     device=context.device,
                 )
             for geom_index, user_obsgeom in enumerate(prepared.user_obsgeoms):
+                plane_parallel_secant = None
                 if self.options.plane_parallel:
-                    secant = float(geometry.average_secant_pp[geom_index])
-                    chapman = np.triu(np.full((n_layers, n_layers), secant, dtype=float))
+                    plane_parallel_secant = float(geometry.average_secant_pp[geom_index])
+                    chapman = (
+                        np.triu(
+                            np.full(
+                                (n_layers, n_layers),
+                                plane_parallel_secant,
+                                dtype=float,
+                            )
+                        )
+                        if use_native_2s
+                        else None
+                    )
                 else:
                     chapman = geometry.chapman_factors[:, :, geom_index]
-                chapman_t = value_to_torch(chapman, context)
+                chapman_t = None if chapman is None else value_to_torch(chapman, context)
                 pxsq_t = value_to_torch(geometry.pxsq, context)
                 px0x_t = value_to_torch(geometry.px0x[geom_index], context)
                 n_rows = int(tau.shape[0])
@@ -2969,6 +3007,7 @@ class TwoStreamEss:
                             use_brdf=brdf_rows is not None,
                             use_surface_leaving=surface_leaving_rows is not None,
                             sl_isotropic=self.options.sl_isotropic,
+                            plane_parallel_chapman=self.options.plane_parallel,
                         )
                         if want_fluxes:
                             two_chunk = native_chunk["radiance"]
@@ -3003,6 +3042,7 @@ class TwoStreamEss:
                             return_fluxes=want_fluxes,
                             do_upwelling=self.options.upwelling or want_fluxes,
                             do_dnwelling=self.options.downwelling or want_fluxes,
+                            plane_parallel_secant=plane_parallel_secant,
                         )
                         if want_fluxes:
                             flux_up_chunks.append(two_chunk["flux_up"])
@@ -4609,6 +4649,292 @@ class TwoStreamEss:
             lattice_axes=prepared.lattice_axes,
             **flux_kwargs,
             **self._fo_result_kwargs(fo_result),
+        )
+
+    def forward_flux(
+        self,
+        *,
+        tau: Any,
+        ssa: Any,
+        g: Any,
+        z: Any | None = None,
+        angles: Any | None = None,
+        stream: float | None = None,
+        fbeam: Any = 1.0,
+        albedo: Any = 0.0,
+        delta_m_truncation_factor: Any | None = None,
+        brdf: Any | None = None,
+        surface_leaving: Any | None = None,
+        view_angles: Any | None = None,
+        beam_szas: Any | None = None,
+        relazms: Any | None = None,
+        earth_radius: float = 6371.0,
+        geometry: str = "pseudo_spherical",
+        return_net: bool = False,
+    ) -> TwoStreamEssFluxResult:
+        """Runs the native solar level-flux path without radiance assembly.
+
+        This focused inference path is meant for flux benchmarks. It currently
+        supports solar observation geometry with ``backend="native"`` and
+        returns regular level ``flux_up`` and ``flux_down`` by default. Set
+        ``return_net=True`` to also materialize ``flux_net`` as another
+        full level-sized tensor. ``flux_mean`` is intentionally omitted because
+        the native flux-only kernel does not write the mean-flux moments.
+        """
+        from .rtsolver.backend import _load_torch
+        from .rtsolver.native_backend import (
+            native_backend_supports_device,
+            solve_solar_2s_flux_pair,
+        )
+
+        if self.options.backend != "native":
+            raise NotImplementedError("forward_flux currently requires backend='native'")
+        if self._source_mode != "solar_obs":
+            raise NotImplementedError("forward_flux currently supports mode='solar' only")
+        if self.options.output_levels:
+            raise ValueError("forward_flux always returns level fluxes; set output_levels=False")
+        if brdf is not None and not self.options.brdf_surface:
+            raise ValueError("BRDF input requires brdf_surface=True")
+        if self.options.brdf_surface and brdf is None:
+            raise ValueError("brdf_surface=True requires brdf coefficients")
+        if surface_leaving is not None and not self.options.surface_leaving:
+            raise ValueError("surface_leaving input requires surface_leaving=True")
+        if self.options.surface_leaving and surface_leaving is None:
+            raise ValueError("surface_leaving=True requires surface-leaving coefficients")
+
+        torch = _load_torch()
+        if torch is None:  # pragma: no cover
+            raise RuntimeError("backend='native' requires torch to be installed")
+
+        mapped = self._translate_public_forward_args(
+            tau=tau,
+            ssa=ssa,
+            g=g,
+            z=z,
+            angles=angles,
+            stream=stream,
+            fbeam=fbeam,
+            fisot=0.0,
+            delta_m_truncation_factor=delta_m_truncation_factor,
+            view_angles=view_angles,
+            beam_szas=beam_szas,
+            relazms=relazms,
+            planck=None,
+            surface_planck=0.0,
+            geometry=geometry,
+        )
+        context = self._select_torch_context(
+            detect_torch_context(
+                mapped["tau_arr"],
+                mapped["omega_arr"],
+                mapped["asymm_arr"],
+                mapped["d2s_scaling"],
+                albedo,
+                mapped["flux_factor"],
+            )
+        )
+        native_device_type = str(context.device.type)
+        if not native_backend_supports_device(native_device_type):
+            raise RuntimeError(
+                f"backend='native' does not support torch device {native_device_type!r}"
+            )
+
+        n_layers = self.options.nlyr
+        tau_arr = value_to_torch(mapped["tau_arr"], context)
+        if tau_arr.ndim < 1 or int(tau_arr.shape[-1]) != n_layers:
+            raise ValueError(f"tau must have shape (..., {n_layers}) for forward_flux")
+        batch_shape = tuple(int(dim) for dim in tau_arr.shape[:-1])
+        tau_rows = tau_arr.reshape(-1, n_layers).contiguous()
+        omega_rows = self._broadcast_batch_layers_torch(
+            "ssa",
+            mapped["omega_arr"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+        )
+        asymm_rows = self._broadcast_batch_layers_torch(
+            "g",
+            mapped["asymm_arr"],
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+        )
+        scaling_rows = self._broadcast_truncation_factor_torch(
+            mapped["d2s_scaling"],
+            asymm=asymm_rows,
+            omega=omega_rows,
+            context=context,
+            batch_shape=batch_shape,
+            width=n_layers,
+        )
+        albedo_rows = self._broadcast_batch_scalar_torch(
+            "albedo", albedo, context=context, batch_shape=batch_shape
+        )
+        fbeam_rows = self._broadcast_batch_scalar_torch(
+            "fbeam", mapped["flux_factor"], context=context, batch_shape=batch_shape
+        )
+        self._require_finite_torch("tau", tau_rows)
+
+        height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
+        user_obsgeoms_arr = np.asarray(to_numpy(mapped["user_obsgeoms"]), dtype=float)
+        n_geoms_input = 1 if user_obsgeoms_arr.ndim == 1 else int(user_obsgeoms_arr.shape[0])
+        prepared = self._prepare_forward(
+            tau_arr=np.zeros(n_layers, dtype=float),
+            omega_arr=np.zeros(n_layers, dtype=float),
+            asymm_arr=np.zeros(n_layers, dtype=float),
+            height_grid=height_grid,
+            user_obsgeoms=mapped["user_obsgeoms"],
+            stream_value=mapped["stream_value"],
+            flux_factor=1.0,
+            fisot=0.0,
+            albedo=0.0,
+            d2s_scaling=np.zeros(n_layers, dtype=float),
+            brdf=(
+                {"kernel_specs": [{"which_brdf": 1, "factor": 0.0}]}
+                if self.options.brdf_surface
+                else None
+            ),
+            surface_leaving=(
+                {
+                    "slterm_isotropic": np.zeros(n_geoms_input, dtype=float),
+                    "slterm_f_0": np.zeros((n_geoms_input, 2), dtype=float),
+                }
+                if self.options.surface_leaving
+                else None
+            ),
+            earth_radius=earth_radius,
+        )
+        brdf_rows = None
+        if self.options.brdf_surface:
+            brdf_rows = self._broadcast_batch_brdf(
+                brdf,
+                batch_shape=batch_shape,
+                n_geoms=prepared.user_obsgeoms.shape[0],
+                user_obsgeoms=prepared.user_obsgeoms,
+                stream_value=prepared.stream_value,
+            )
+        surface_leaving_rows = None
+        if self.options.surface_leaving:
+            surface_leaving_rows = self._broadcast_batch_surface_leaving(
+                surface_leaving,
+                batch_shape=batch_shape,
+                n_geoms=prepared.user_obsgeoms.shape[0],
+            )
+
+        n_rows = int(tau_rows.shape[0])
+        chunk_size = max(1, n_rows)
+        geometry_data = prepared.geometry
+        flux_up_by_geometry = []
+        flux_down_by_geometry = []
+        flux_net_by_geometry = [] if return_net else None
+
+        with self._torch_grad_context():
+            for geom_index, _user_obsgeom in enumerate(prepared.user_obsgeoms):
+                if self.options.plane_parallel:
+                    secant = float(geometry_data.average_secant_pp[geom_index])
+                    chapman = np.triu(np.full((n_layers, n_layers), secant, dtype=float))
+                else:
+                    chapman = geometry_data.chapman_factors[:, :, geom_index]
+                chapman_t = value_to_torch(chapman, context)
+                pxsq_t = value_to_torch(geometry_data.pxsq, context)
+                px0x_t = value_to_torch(geometry_data.px0x[geom_index], context)
+                flux_up_chunks = []
+                flux_down_chunks = []
+                flux_net_chunks = [] if return_net else None
+                for start in range(0, n_rows, chunk_size):
+                    stop = min(start + chunk_size, n_rows)
+                    row_slice = slice(start, stop)
+                    flux_chunk = solve_solar_2s_flux_pair(
+                        tau=tau_rows[row_slice],
+                        omega=omega_rows[row_slice],
+                        asymm=asymm_rows[row_slice],
+                        scaling=scaling_rows[row_slice],
+                        albedo=albedo_rows[row_slice],
+                        flux_factor=fbeam_rows[row_slice],
+                        chapman=chapman_t,
+                        pxsq=pxsq_t,
+                        px0x=px0x_t,
+                        brdf_f0=(
+                            None
+                            if brdf_rows is None
+                            else value_to_torch(
+                                brdf_rows["brdf_f_0"][row_slice, geom_index, :], context
+                            )
+                        ),
+                        brdf_f=(
+                            None
+                            if brdf_rows is None
+                            else value_to_torch(brdf_rows["brdf_f"][row_slice, :], context)
+                        ),
+                        ubrdf_f=(
+                            None
+                            if brdf_rows is None
+                            else value_to_torch(
+                                brdf_rows["ubrdf_f"][row_slice, geom_index, :], context
+                            )
+                        ),
+                        slterm_isotropic=(
+                            None
+                            if surface_leaving_rows is None
+                            else value_to_torch(
+                                surface_leaving_rows["slterm_isotropic"][row_slice, geom_index],
+                                context,
+                            )
+                        ),
+                        slterm_f0=(
+                            None
+                            if surface_leaving_rows is None
+                            else value_to_torch(
+                                surface_leaving_rows["slterm_f_0"][row_slice, geom_index, :],
+                                context,
+                            )
+                        ),
+                        stream_value=prepared.stream_value,
+                        x0=float(geometry_data.x0[geom_index]),
+                        user_stream=float(geometry_data.user_streams[geom_index]),
+                        user_secant=float(geometry_data.user_secants[geom_index]),
+                        azmfac=float(geometry_data.azmfac[geom_index]),
+                        px11=float(geometry_data.px11),
+                        ulp=float(geometry_data.ulp[geom_index]),
+                        do_upwelling=True,
+                        do_dnwelling=True,
+                        use_brdf=brdf_rows is not None,
+                        use_surface_leaving=surface_leaving_rows is not None,
+                        sl_isotropic=self.options.sl_isotropic,
+                        return_net=return_net,
+                        plane_parallel_chapman=self.options.plane_parallel,
+                    )
+                    flux_up_chunks.append(flux_chunk["flux_up"])
+                    flux_down_chunks.append(flux_chunk["flux_down"])
+                    if return_net and flux_net_chunks is not None:
+                        flux_net_chunks.append(flux_chunk["flux_net"])
+                flux_up_by_geometry.append(self._cat_torch_chunks(flux_up_chunks, dim=0))
+                flux_down_by_geometry.append(self._cat_torch_chunks(flux_down_chunks, dim=0))
+                if return_net and flux_net_by_geometry is not None and flux_net_chunks is not None:
+                    flux_net_by_geometry.append(self._cat_torch_chunks(flux_net_chunks, dim=0))
+
+        flux_up, geometry_shape = self._reshape_profile_torch(
+            flux_up_by_geometry,
+            batch_shape=batch_shape,
+        )
+        flux_down, _ = self._reshape_profile_torch(
+            flux_down_by_geometry,
+            batch_shape=batch_shape,
+        )
+        if return_net and flux_net_by_geometry is not None:
+            flux_net, _ = self._reshape_profile_torch(
+                flux_net_by_geometry,
+                batch_shape=batch_shape,
+            )
+        else:
+            flux_net = None
+        return TwoStreamEssFluxResult(
+            flux_up=flux_up,
+            flux_down=flux_down,
+            flux_net=flux_net,
+            flux_mean=None,
+            batch_shape=batch_shape,
+            geometry_shape=geometry_shape,
         )
 
     def forward(

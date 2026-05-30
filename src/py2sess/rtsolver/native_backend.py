@@ -393,6 +393,7 @@ def solve_solar_2s(
     use_brdf: bool = False,
     use_surface_leaving: bool = False,
     sl_isotropic: bool = True,
+    plane_parallel_chapman: bool = False,
 ):
     """Runs the compiled solar-observation 2S native kernel."""
     extension = _require_native_extension_for_tensor(tau)
@@ -442,6 +443,7 @@ def solve_solar_2s(
             bool(use_brdf),
             bool(use_surface_leaving),
             bool(sl_isotropic),
+            bool(plane_parallel_chapman),
         )
         if return_fluxes:
             return _split_packed_2s(packed, nlay=int(tau.shape[-1]), return_profile=return_profile)
@@ -464,7 +466,100 @@ def solve_solar_2s(
         float(px11),
         float(ulp),
         bool(return_profile),
+        bool(plane_parallel_chapman),
     )
+
+
+def solve_solar_2s_flux_pair(
+    *,
+    tau,
+    omega,
+    asymm,
+    scaling,
+    albedo,
+    flux_factor,
+    chapman,
+    pxsq,
+    px0x,
+    brdf_f0=None,
+    brdf_f=None,
+    ubrdf_f=None,
+    slterm_isotropic=None,
+    slterm_f0=None,
+    stream_value: float,
+    x0: float,
+    user_stream: float,
+    user_secant: float,
+    azmfac: float,
+    px11: float,
+    ulp: float,
+    do_upwelling: bool = True,
+    do_dnwelling: bool = True,
+    use_brdf: bool = False,
+    use_surface_leaving: bool = False,
+    sl_isotropic: bool = True,
+    return_net: bool = False,
+    plane_parallel_chapman: bool = False,
+):
+    """Runs the compiled solar 2S native level-flux pair kernel.
+
+    The native extension returns only regular up/down level fluxes with shape
+    ``(rows, nlay + 1, 2)``. ``flux_net`` is assembled in Python to avoid
+    writing another full level array from the CUDA kernel.
+    """
+    extension = _require_native_extension_for_tensor(tau)
+    row_pair = (tau.shape[0], 2)
+    optional_pair = _optional_pair_like(albedo)
+    if use_brdf:
+        brdf_f0 = _zero_if_none(brdf_f0, tau, row_pair)
+        brdf_f = _zero_if_none(brdf_f, tau, row_pair)
+        ubrdf_f = _zero_if_none(ubrdf_f, tau, row_pair)
+    else:
+        brdf_f0 = optional_pair
+        brdf_f = optional_pair
+        ubrdf_f = optional_pair
+    if use_surface_leaving:
+        slterm_isotropic = _zero_if_none(slterm_isotropic, tau, (tau.shape[0],))
+        slterm_f0 = _zero_if_none(slterm_f0, tau, row_pair)
+    else:
+        slterm_isotropic = albedo
+        slterm_f0 = optional_pair
+    pair = extension.solar_2s_flux(
+        tau,
+        omega,
+        asymm,
+        scaling,
+        albedo,
+        flux_factor,
+        brdf_f0,
+        brdf_f,
+        ubrdf_f,
+        slterm_isotropic,
+        slterm_f0,
+        chapman,
+        pxsq,
+        px0x,
+        float(stream_value),
+        float(x0),
+        float(user_stream),
+        float(user_secant),
+        float(azmfac),
+        float(px11),
+        float(ulp),
+        bool(do_upwelling),
+        bool(do_dnwelling),
+        bool(use_brdf),
+        bool(use_surface_leaving),
+        bool(sl_isotropic),
+        bool(plane_parallel_chapman),
+    )
+    flux_up = pair[..., 0]
+    flux_down = pair[..., 1]
+    return {
+        "flux_up": flux_up,
+        "flux_down": flux_down,
+        "flux_net": flux_up - flux_down if return_net else None,
+    }
 
 
 def solve_solar_fo(

@@ -45,6 +45,7 @@ struct Solar2sParams {
   bool use_brdf;
   bool use_surface_leaving;
   bool sl_isotropic;
+  bool plane_parallel_chapman;
   const void* chapman;
   const void* pxsq;
   const void* px0x;
@@ -66,6 +67,7 @@ struct Solar2sPropParams {
   bool use_surface_leaving;
   bool sl_isotropic;
   bool flip_layers;
+  bool plane_parallel_chapman;
   const void* chapman;
   const void* pxsq;
   const void* px0x;
@@ -258,7 +260,8 @@ at::Tensor solar_2s_packed(
     bool do_dnwelling,
     bool use_brdf,
     bool use_surface_leaving,
-    bool sl_isotropic);
+    bool sl_isotropic,
+    bool plane_parallel_chapman = false);
 
 at::Tensor solar_2s_flux(
     at::Tensor tau,
@@ -286,7 +289,8 @@ at::Tensor solar_2s_flux(
     bool do_dnwelling,
     bool use_brdf,
     bool use_surface_leaving,
-    bool sl_isotropic);
+    bool sl_isotropic,
+    bool plane_parallel_chapman = false);
 
 at::Tensor solar_2s_prop_flux(
     at::Tensor prop,
@@ -312,7 +316,8 @@ at::Tensor solar_2s_prop_flux(
     bool use_brdf,
     bool use_surface_leaving,
     bool sl_isotropic,
-    bool flip_layers);
+    bool flip_layers,
+    bool plane_parallel_chapman = false);
 
 at::Tensor solar_2s(
     at::Tensor tau,
@@ -331,7 +336,8 @@ at::Tensor solar_2s(
     double azmfac,
     double px11,
     double ulp,
-    bool return_profile);
+    bool return_profile,
+    bool plane_parallel_chapman = false);
 
 at::Tensor solar_fo(
     at::Tensor tau,

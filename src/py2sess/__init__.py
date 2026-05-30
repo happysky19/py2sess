@@ -9,7 +9,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .api import TwoStreamEss, TwoStreamEssBatchResult, TwoStreamEssOptions, TwoStreamEssResult
+    from .api import (
+        TwoStreamEss,
+        TwoStreamEssBatchResult,
+        TwoStreamEssFluxResult,
+        TwoStreamEssOptions,
+        TwoStreamEssResult,
+    )
     from .rtsolver.native_backend import native_backend_info, native_extension_available
     from .scene import SceneForwardInputs, SceneRun, load_scene
     from .rtsolver.fo_solar_obs import FoSolarObsResult, fo_scatter_term_henyey_greenstein
@@ -50,6 +56,7 @@ __all__ = [
     "TwoStreamEssOptions",
     "TwoStreamEssResult",
     "TwoStreamEssBatchResult",
+    "TwoStreamEssFluxResult",
     "native_backend_info",
     "native_extension_available",
     "SceneForwardInputs",
@@ -90,6 +97,7 @@ def __getattr__(name: str):
         "TwoStreamEssOptions",
         "TwoStreamEssResult",
         "TwoStreamEssBatchResult",
+        "TwoStreamEssFluxResult",
     }:
         from . import api
 

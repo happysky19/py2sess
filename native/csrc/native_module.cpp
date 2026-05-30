@@ -239,7 +239,8 @@ at::Tensor TwoStreamEssNativeImpl::solar_2s_flux(
       options.use_brdf,
       options.use_surface_leaving,
       options.sl_isotropic,
-      options.flip_layers);
+      options.flip_layers,
+      options.plane_parallel_chapman);
 }
 
 }  // namespace py2sess_native

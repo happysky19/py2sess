@@ -360,11 +360,7 @@ void solar_2s_flux_cuda(at::TensorIterator& iter, const Solar2sParams& params) {
   at::cuda::CUDAGuard device_guard(iter.device());
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "py2sess_solar_2s_flux_cuda", [&] {
     const int nlay = last_dim_size(iter.input(0));
-    const int nlev = nlay + 1;
-    const int packed_cols = 1 + 4 * nlev;
-    const int packed_bytes = static_cast<int>(packed_cols * sizeof(scalar_t));
-    const int workspace_size =
-        packed_bytes + static_cast<int>(solar_2s_workspace_bytes<scalar_t>(nlay));
+    const int workspace_size = static_cast<int>(solar_2s_flux_workspace_bytes<scalar_t>(nlay));
     const auto* chapman = reinterpret_cast<const scalar_t*>(params.chapman);
     const auto* pxsq = reinterpret_cast<const scalar_t*>(params.pxsq);
     const auto* px0x = reinterpret_cast<const scalar_t*>(params.px0x);
@@ -384,9 +380,7 @@ void solar_2s_flux_cuda(at::TensorIterator& iter, const Solar2sParams& params) {
           auto* ubrdf_f = reinterpret_cast<const scalar_t*>(data[9] + offsets[9]);
           auto* slterm_isotropic = reinterpret_cast<const scalar_t*>(data[10] + offsets[10]);
           auto* slterm_f0 = reinterpret_cast<const scalar_t*>(data[11] + offsets[11]);
-          auto* packed = reinterpret_cast<scalar_t*>(work);
-          char* row_work = work + packed_bytes;
-          solar_2s_row<scalar_t>(
+          solar_2s_flux_pair_row<scalar_t>(
               nlay,
               static_cast<scalar_t>(params.stream_value),
               static_cast<scalar_t>(params.x0),
@@ -409,21 +403,14 @@ void solar_2s_flux_cuda(at::TensorIterator& iter, const Solar2sParams& params) {
               ubrdf_f,
               slterm_isotropic,
               slterm_f0,
-              packed,
-              false,
-              true,
+              out,
               params.do_upwelling,
               params.do_dnwelling,
               params.use_brdf,
               params.use_surface_leaving,
               params.sl_isotropic,
-              row_work);
-          const scalar_t* flux_up = packed + 1;
-          const scalar_t* flux_down = flux_up + nlev;
-          for (int level = 0; level < nlev; ++level) {
-            out[2 * level] = flux_up[level];
-            out[2 * level + 1] = flux_down[level];
-          }
+              params.plane_parallel_chapman,
+              work);
         });
   });
 }
@@ -435,9 +422,7 @@ void solar_2s_prop_flux_cuda(at::TensorIterator& iter, const Solar2sPropParams& 
     const int nprop = static_cast<int>(params.nprop);
     const int staging_size = static_cast<int>(4 * nlay * sizeof(scalar_t));
     const int workspace_size =
-        staging_size +
-        static_cast<int>(two_stream_flux_pair_packed_cols<scalar_t>(nlay) * sizeof(scalar_t)) +
-        static_cast<int>(solar_2s_workspace_bytes<scalar_t>(nlay));
+        staging_size + static_cast<int>(solar_2s_flux_workspace_bytes<scalar_t>(nlay));
     const auto* chapman = reinterpret_cast<const scalar_t*>(params.chapman);
     const auto* pxsq = reinterpret_cast<const scalar_t*>(params.pxsq);
     const auto* px0x = reinterpret_cast<const scalar_t*>(params.px0x);
@@ -482,6 +467,7 @@ void solar_2s_prop_flux_cuda(at::TensorIterator& iter, const Solar2sPropParams& 
               params.use_brdf,
               params.use_surface_leaving,
               params.sl_isotropic,
+              params.plane_parallel_chapman,
               work);
         });
   });

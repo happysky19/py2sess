@@ -21,6 +21,7 @@ TAYLOR_SMALL = 1.0e-3
 TAYLOR_ORDER = 3
 _NUMBA_QSPREP_MIN_BATCH = 4096
 _QSPREP_KERNEL = None
+_QSPREP_PLANE_PARALLEL_KERNEL = None
 _QSPREP_IMPORT_FAILED = False
 
 
@@ -137,6 +138,88 @@ def _get_qsprep_kernel():
         return None
 
 
+def _get_qsprep_plane_parallel_kernel():
+    global _QSPREP_PLANE_PARALLEL_KERNEL, _QSPREP_IMPORT_FAILED
+    if _QSPREP_PLANE_PARALLEL_KERNEL is not None:
+        return _QSPREP_PLANE_PARALLEL_KERNEL
+    if _QSPREP_IMPORT_FAILED:
+        return None
+    try:  # pragma: no cover - optional acceleration dependency
+        from numba import njit, prange
+
+        @njit(parallel=True, cache=True)
+        def _kernel(delta_tau, secant, user_secant):
+            batch, nlayers = delta_tau.shape
+            layer_pis_cutoff = np.empty(batch, np.int64)
+            initial_trans = np.empty((batch, nlayers), np.float64)
+            average_secant = np.empty((batch, nlayers), np.float64)
+            trans_solar_beam = np.empty(batch, np.float64)
+            t_delt_mubar = np.empty((batch, nlayers), np.float64)
+            itrans_userm = np.empty((batch, nlayers), np.float64)
+            t_delt_userm = np.empty((batch, nlayers), np.float64)
+            sigma_p = np.empty((batch, nlayers), np.float64)
+            emult_up = np.empty((batch, nlayers), np.float64)
+
+            for row in prange(batch):
+                previous_tauslant = 0.0
+                taugrid = 0.0
+                cutoff = nlayers
+                sigma = secant + user_secant
+                for layer in range(nlayers):
+                    deltau = delta_tau[row, layer]
+                    taugrid += deltau
+                    tauslant = taugrid * secant
+                    delta_tauslant = deltau * secant
+                    user_path = deltau * user_secant
+                    t_user = 0.0 if user_path > MAX_TAU_PATH else np.exp(-user_path)
+                    if layer + 1 <= cutoff:
+                        initial = 1.0 if layer == 0 else np.exp(-previous_tauslant)
+                        t_mubar = 0.0 if delta_tauslant > MAX_TAU_PATH else np.exp(-delta_tauslant)
+                        itrans = initial * user_secant
+
+                        initial_trans[row, layer] = initial
+                        average_secant[row, layer] = secant
+                        t_delt_mubar[row, layer] = t_mubar
+                        itrans_userm[row, layer] = itrans
+                        t_delt_userm[row, layer] = t_user
+                        sigma_p[row, layer] = sigma
+                        emult_up[row, layer] = itrans * (1.0 - t_mubar * t_user) / sigma
+
+                        if tauslant > MAX_TAU_PATH:
+                            cutoff = layer + 1
+                    else:
+                        initial_trans[row, layer] = 0.0
+                        average_secant[row, layer] = 0.0
+                        t_delt_mubar[row, layer] = 0.0
+                        itrans_userm[row, layer] = 0.0
+                        t_delt_userm[row, layer] = t_user
+                        sigma_p[row, layer] = 0.0
+                        emult_up[row, layer] = 0.0
+                    previous_tauslant = tauslant
+                trans_solar_beam[row] = (
+                    0.0 if previous_tauslant > MAX_TAU_PATH else np.exp(-previous_tauslant)
+                )
+                layer_pis_cutoff[row] = cutoff
+
+            return (
+                layer_pis_cutoff,
+                initial_trans,
+                average_secant,
+                trans_solar_beam,
+                t_delt_mubar,
+                itrans_userm,
+                t_delt_userm,
+                sigma_p,
+                emult_up,
+            )
+
+        _QSPREP_PLANE_PARALLEL_KERNEL = _kernel
+        return _QSPREP_PLANE_PARALLEL_KERNEL
+    except Exception:  # pragma: no cover - optional acceleration dependency
+        _QSPREP_IMPORT_FAILED = True
+        return None
+
+
 def _qsprep_obs_batch_numba(
     delta_tau: np.ndarray, chapman: np.ndarray, user_secant: float
 ) -> _QsPrepBatch | None:
@@ -162,6 +245,44 @@ def _qsprep_obs_batch_numba(
     )
     batch, nlayers = delta_tau.shape
     all_active = bool(np.all(layer_pis_cutoff == nlayers))
+    return {
+        "layer_pis_cutoff": layer_pis_cutoff,
+        "initial_trans": initial_trans,
+        "average_secant": average_secant,
+        "trans_solar_beam": trans_solar_beam,
+        "t_delt_mubar": t_delt_mubar,
+        "itrans_userm": itrans_userm,
+        "t_delt_userm": t_delt_userm,
+        "sigma_p": sigma_p,
+        "emult_up": emult_up,
+        "all_active": all_active,
+    }
+
+
+def _qsprep_obs_batch_plane_parallel_numba(
+    delta_tau: np.ndarray, secant: float, user_secant: float
+) -> _QsPrepBatch | None:
+    if delta_tau.shape[0] < _NUMBA_QSPREP_MIN_BATCH:
+        return None
+    kernel = _get_qsprep_plane_parallel_kernel()
+    if kernel is None:
+        return None
+    (
+        layer_pis_cutoff,
+        initial_trans,
+        average_secant,
+        trans_solar_beam,
+        t_delt_mubar,
+        itrans_userm,
+        t_delt_userm,
+        sigma_p,
+        emult_up,
+    ) = kernel(
+        np.ascontiguousarray(delta_tau, dtype=np.float64),
+        float(secant),
+        float(user_secant),
+    )
+    all_active = bool(np.all(layer_pis_cutoff == delta_tau.shape[1]))
     return {
         "layer_pis_cutoff": layer_pis_cutoff,
         "initial_trans": initial_trans,
@@ -226,6 +347,86 @@ def _qsprep_obs_batch(
     initial_trans_raw = np.exp(-tauslant_previous)
     initial_trans = np.where(active, initial_trans_raw, zero)
     average_secant_raw = delta_tauslant / delta_tau
+    average_secant = np.where(active, average_secant_raw, zero)
+    t_delt_mubar = np.where(
+        active & (delta_tauslant <= MAX_TAU_PATH), np.exp(-delta_tauslant), zero
+    )
+    itrans_userm = initial_trans * user_secant
+    trans_solar_beam = np.where(
+        tauslant_all[:, -1] > MAX_TAU_PATH, 0.0, np.exp(-tauslant_all[:, -1])
+    )
+    user_spher = delta_tau * user_secant
+    t_delt_userm = _exp_cutoff_owned(user_spher, MAX_TAU_PATH)
+    sigma_p_raw = average_secant_raw + user_secant
+    sigma_p = np.where(active, sigma_p_raw, zero)
+    emult_up = np.where(
+        active,
+        itrans_userm * (1.0 - t_delt_mubar * t_delt_userm) / sigma_p_raw,
+        zero,
+    )
+    return {
+        "layer_pis_cutoff": cutoff,
+        "initial_trans": initial_trans,
+        "average_secant": average_secant,
+        "trans_solar_beam": trans_solar_beam,
+        "t_delt_mubar": t_delt_mubar,
+        "itrans_userm": itrans_userm,
+        "t_delt_userm": t_delt_userm,
+        "sigma_p": sigma_p,
+        "emult_up": emult_up,
+        "all_active": False,
+    }
+
+
+def _qsprep_obs_batch_plane_parallel(
+    delta_tau: np.ndarray, secant: float, user_secant: float
+) -> _QsPrepBatch:
+    """Builds plane-parallel solar transmittance terms without a Chapman matrix."""
+    accelerated = _qsprep_obs_batch_plane_parallel_numba(delta_tau, secant, user_secant)
+    if accelerated is not None:
+        return accelerated
+    batch, nlayers = delta_tau.shape
+    tauslant_all = np.cumsum(delta_tau, axis=1)
+    tauslant_all *= secant
+    delta_tauslant = delta_tau * secant
+    average_secant_raw = np.full_like(delta_tau, secant)
+    too_deep = tauslant_all > MAX_TAU_PATH
+    if not np.any(too_deep):
+        average_secant = average_secant_raw
+        np.exp(-delta_tauslant, out=delta_tauslant)
+        t_delt_mubar = delta_tauslant
+        np.exp(-tauslant_all, out=tauslant_all)
+        trans_solar_beam = tauslant_all[:, -1].copy()
+        initial_trans = np.empty_like(tauslant_all)
+        initial_trans[:, 0] = 1.0
+        initial_trans[:, 1:] = tauslant_all[:, :-1]
+        itrans_userm = initial_trans * user_secant
+        user_spher = delta_tau * user_secant
+        t_delt_userm = _exp_cutoff_owned(user_spher, MAX_TAU_PATH)
+        sigma_p = average_secant + user_secant
+        emult_up = itrans_userm * (1.0 - t_delt_mubar * t_delt_userm) / sigma_p
+        return {
+            "layer_pis_cutoff": np.full(batch, nlayers, dtype=int),
+            "initial_trans": initial_trans,
+            "average_secant": average_secant,
+            "trans_solar_beam": trans_solar_beam,
+            "t_delt_mubar": t_delt_mubar,
+            "itrans_userm": itrans_userm,
+            "t_delt_userm": t_delt_userm,
+            "sigma_p": sigma_p,
+            "emult_up": emult_up,
+            "all_active": True,
+        }
+    has_too_deep = np.any(too_deep, axis=1)
+    first_too_deep = np.argmax(too_deep, axis=1) + 1
+    cutoff = np.where(has_too_deep, first_too_deep, nlayers).astype(int, copy=False)
+    active = _layer_cutoff_mask(nlayers, cutoff)
+    zero = np.zeros_like(delta_tau)
+    tauslant_previous = np.empty_like(tauslant_all)
+    tauslant_previous[:, 0] = 0.0
+    tauslant_previous[:, 1:] = tauslant_all[:, :-1]
+    initial_trans_raw = np.exp(-tauslant_previous)
+    initial_trans = np.where(active, initial_trans_raw, zero)
     average_secant = np.where(active, average_secant_raw, zero)
     t_delt_mubar = np.where(
         active & (delta_tauslant <= MAX_TAU_PATH), np.exp(-delta_tauslant), zero
@@ -640,7 +841,7 @@ def solve_solar_obs_batch_numpy(
     brdf_f: np.ndarray | None = None,
     ubrdf_f: np.ndarray | None = None,
     stream_value: float,
-    chapman: np.ndarray,
+    chapman: np.ndarray | None = None,
     x0: float,
     user_stream: float,
     user_secant: float,
@@ -654,6 +855,7 @@ def solve_solar_obs_batch_numpy(
     return_fluxes: bool = False,
     do_upwelling: bool = True,
     do_dnwelling: bool = False,
+    plane_parallel_secant: float | None = None,
 ) -> np.ndarray:
     """Solves the solar-observation 2S problem for a spectral batch.
 
@@ -667,6 +869,10 @@ def solve_solar_obs_batch_numpy(
         Two-stream quadrature stream value.
     chapman
         Geometry Chapman matrix for the selected solar observation geometry.
+    plane_parallel_secant
+        Optional plane-parallel solar secant. When supplied, the solar slant path is
+        computed from cumulative optical depth directly instead of multiplying by
+        an equivalent upper-triangular Chapman matrix.
     x0, user_stream, user_secant, azmfac, px11, pxsq, px0x, ulp
         Precomputed geometry and phase-function factors for the selected
         observation geometry.
@@ -688,7 +894,14 @@ def solve_solar_obs_batch_numpy(
         asymm,
         scaling,
     )
-    qsprep = _qsprep_obs_batch(delta_tau, chapman, user_secant)
+    if plane_parallel_secant is None:
+        if chapman is None:
+            raise ValueError("chapman is required unless plane_parallel_secant is supplied")
+        qsprep = _qsprep_obs_batch(delta_tau, chapman, user_secant)
+    else:
+        qsprep = _qsprep_obs_batch_plane_parallel(
+            delta_tau, float(plane_parallel_secant), user_secant
+        )
     pi4 = 4.0 * np.pi
     omega_asymm_3 = 3.0 * omega_total * asymm_total
     all_layers_active = bool(qsprep["all_active"])

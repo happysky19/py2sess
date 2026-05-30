@@ -1052,6 +1052,7 @@ void solar_2s_cpu(at::TensorIterator& iter, const Solar2sParams& params) {
                 params.use_brdf,
                 params.use_surface_leaving,
                 params.sl_isotropic,
+                params.plane_parallel_chapman,
                 work.get());
           }
         },
@@ -1064,9 +1065,7 @@ void solar_2s_flux_cpu(at::TensorIterator& iter, const Solar2sParams& params) {
     const int nlay = last_dim_size(iter.input(0));
     const auto grain_size =
         std::max<int64_t>(1, iter.numel() / std::max<int>(1, at::get_num_threads()));
-    const auto workspace_size =
-        two_stream_flux_pair_packed_cols<scalar_t>(nlay) * sizeof(scalar_t) +
-        solar_2s_workspace_bytes<scalar_t>(nlay);
+    const auto workspace_size = solar_2s_flux_workspace_bytes<scalar_t>(nlay);
     const auto* chapman = reinterpret_cast<const scalar_t*>(params.chapman);
     const auto* pxsq = reinterpret_cast<const scalar_t*>(params.pxsq);
     const auto* px0x = reinterpret_cast<const scalar_t*>(params.px0x);
@@ -1116,6 +1115,7 @@ void solar_2s_flux_cpu(at::TensorIterator& iter, const Solar2sParams& params) {
                 params.use_brdf,
                 params.use_surface_leaving,
                 params.sl_isotropic,
+                params.plane_parallel_chapman,
                 work.get());
           }
         },
@@ -1130,10 +1130,7 @@ void solar_2s_prop_flux_cpu(at::TensorIterator& iter, const Solar2sPropParams& p
     const auto grain_size =
         std::max<int64_t>(1, iter.numel() / std::max<int>(1, at::get_num_threads()));
     const auto staging_size = 4 * nlay * sizeof(scalar_t);
-    const auto workspace_size = staging_size +
-                                two_stream_flux_pair_packed_cols<scalar_t>(nlay) *
-                                    sizeof(scalar_t) +
-                                solar_2s_workspace_bytes<scalar_t>(nlay);
+    const auto workspace_size = staging_size + solar_2s_flux_workspace_bytes<scalar_t>(nlay);
     const auto* chapman = reinterpret_cast<const scalar_t*>(params.chapman);
     const auto* pxsq = reinterpret_cast<const scalar_t*>(params.pxsq);
     const auto* px0x = reinterpret_cast<const scalar_t*>(params.px0x);
@@ -1178,6 +1175,7 @@ void solar_2s_prop_flux_cpu(at::TensorIterator& iter, const Solar2sPropParams& p
                 params.use_brdf,
                 params.use_surface_leaving,
                 params.sl_isotropic,
+                params.plane_parallel_chapman,
                 work.get());
           }
         },
@@ -1725,7 +1723,8 @@ at::Tensor solar_2s_packed(
     bool do_dnwelling,
     bool use_brdf,
     bool use_surface_leaving,
-    bool sl_isotropic) {
+    bool sl_isotropic,
+    bool plane_parallel_chapman) {
   check_solar_required_inputs(tau, omega, asymm, scaling, albedo, flux_factor, chapman, pxsq, px0x);
   if (use_brdf) {
     check_matrix_min_cols(brdf_f0, tau.size(0), 2, "solar_2s brdf_f0 must have shape (rows, 2)");
@@ -1770,6 +1769,7 @@ at::Tensor solar_2s_packed(
       use_brdf,
       use_surface_leaving,
       sl_isotropic,
+      plane_parallel_chapman,
       chapman_c.data_ptr(),
       pxsq_c.data_ptr(),
       px0x_c.data_ptr(),
@@ -1815,7 +1815,8 @@ at::Tensor solar_2s_flux(
     bool do_dnwelling,
     bool use_brdf,
     bool use_surface_leaving,
-    bool sl_isotropic) {
+    bool sl_isotropic,
+    bool plane_parallel_chapman) {
   check_solar_required_inputs(tau, omega, asymm, scaling, albedo, flux_factor, chapman, pxsq, px0x);
   if (use_brdf) {
     check_matrix_min_cols(brdf_f0, tau.size(0), 2, "solar_2s brdf_f0 must have shape (rows, 2)");
@@ -1860,6 +1861,7 @@ at::Tensor solar_2s_flux(
       use_brdf,
       use_surface_leaving,
       sl_isotropic,
+      plane_parallel_chapman,
       chapman_c.data_ptr(),
       pxsq_c.data_ptr(),
       px0x_c.data_ptr(),
@@ -1903,7 +1905,8 @@ at::Tensor solar_2s_prop_flux(
     bool use_brdf,
     bool use_surface_leaving,
     bool sl_isotropic,
-    bool flip_layers) {
+    bool flip_layers,
+    bool plane_parallel_chapman) {
   check_prop_inputs(prop, "solar_2s_prop_flux");
   const auto rows = prop_rows(prop);
   const auto nlay = prop.size(2);
@@ -1954,6 +1957,7 @@ at::Tensor solar_2s_prop_flux(
       use_surface_leaving,
       sl_isotropic,
       flip_layers,
+      plane_parallel_chapman,
       chapman_c.data_ptr(),
       pxsq_c.data_ptr(),
       px0x_c.data_ptr(),
@@ -1987,7 +1991,8 @@ at::Tensor solar_2s(
     double azmfac,
     double px11,
     double ulp,
-    bool return_profile) {
+    bool return_profile,
+    bool plane_parallel_chapman) {
   check_solar_required_inputs(tau, omega, asymm, scaling, albedo, flux_factor, chapman, pxsq, px0x);
   auto tau_c = tau.contiguous();
   auto omega_c = omega.contiguous();
@@ -2014,6 +2019,7 @@ at::Tensor solar_2s(
       false,
       false,
       false,
+      plane_parallel_chapman,
       chapman_c.data_ptr(),
       pxsq_c.data_ptr(),
       px0x_c.data_ptr(),
