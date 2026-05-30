@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -109,6 +110,52 @@ opacity:
         self.assertEqual(inputs.mode, "solar")
         self.assertEqual(inputs.kwargs["tau"].shape, (2, 2))
         self.assertIn("fo_scatter_term", inputs.kwargs)
+
+    def test_scene_forward_flux_filters_scene_only_inputs_and_output_flags(self) -> None:
+        scene = SceneRun.from_bundle(
+            mode="solar",
+            bundle={
+                "wavelengths": np.array([500.0, 600.0]),
+                "tau": np.array([[0.01, 0.02], [0.02, 0.03]]),
+                "omega": np.array([[0.2, 0.1], [0.1, 0.2]]),
+                "g": np.array([[0.3, 0.2], [0.2, 0.3]]),
+                "delta_m_truncation_factor": np.zeros((2, 2)),
+                "heights": np.array([2.0, 1.0, 0.0]),
+                "albedo": np.array([0.1, 0.2]),
+                "user_obsgeom": np.array([30.0, 20.0, 0.0]),
+                "flux_factor": np.array([1.0, 0.8]),
+                "fo_scatter_term": np.array([[0.15, 0.1], [0.08, 0.11]]),
+            },
+        )
+        captured = {}
+
+        class DummySolver:
+            def __init__(self, options):
+                captured["options"] = options
+
+            def forward_flux(self, **kwargs):
+                captured["kwargs"] = kwargs
+                return "ok"
+
+        with mock.patch("py2sess.scene.TwoStreamEss", DummySolver):
+            result = scene.forward_flux(
+                backend="native",
+                output_levels=False,
+                output_fluxes=True,
+                include_fo=True,
+                return_net=True,
+            )
+
+        self.assertEqual(result, "ok")
+        self.assertFalse(captured["options"].output_levels)
+        self.assertFalse(captured["options"].output_fluxes)
+        self.assertNotIn("fo_scatter_term", captured["kwargs"])
+        self.assertIn("tau", captured["kwargs"])
+        self.assertTrue(captured["kwargs"]["include_fo"])
+        self.assertTrue(captured["kwargs"]["return_net"])
+
+        with self.assertRaisesRegex(ValueError, "output_levels=False"):
+            scene.forward_flux(output_levels=True)
 
     def test_scene_api_rejects_mode_mismatch(self) -> None:
         scene = SceneRun.from_bundle(

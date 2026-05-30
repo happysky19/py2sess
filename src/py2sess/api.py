@@ -2914,10 +2914,11 @@ class TwoStreamEss:
                 pxsq_t = value_to_torch(geometry.pxsq, context)
                 px0x_t = value_to_torch(geometry.px0x[geom_index], context)
                 n_rows = int(tau.shape[0])
+                chunk_backend = "native" if use_native_2s else "torch"
                 chunk_size = (
                     n_rows
                     if use_native_2s and native_device_type == "cpu"
-                    else self._solar_batch_chunk_size(n_rows, n_layers, backend="torch")
+                    else self._solar_batch_chunk_size(n_rows, n_layers, backend=chunk_backend)
                 )
                 two_chunks = []
                 fo_chunks = []
@@ -3635,10 +3636,11 @@ class TwoStreamEss:
         use_native_2s = self.options.backend == "native" and native_backend_supports_device(
             native_device_type
         )
+        chunk_backend = "native" if use_native_2s else "torch"
         chunk_size = (
             n_rows
             if use_native_2s and native_device_type == "cpu"
-            else self._thermal_batch_chunk_size(n_rows, n_layers, backend="torch")
+            else self._thermal_batch_chunk_size(n_rows, n_layers, backend=chunk_backend)
         )
         if thermal_brdf_rows is not None and not use_native_2s:
             raise RuntimeError(

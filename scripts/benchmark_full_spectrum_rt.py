@@ -495,8 +495,8 @@ def _run_scene_forward_once(
     }
     native_flux_only = config.backend == "native" and output_fluxes
     if native_flux_only:
-        common_options["output_levels"] = False
-        common_options["output_fluxes"] = False
+        common_options.pop("output_levels")
+        common_options.pop("output_fluxes")
     if output_fluxes:
         common_options["plane_parallel"] = True
     if config.backend in {"torch", "native"}:

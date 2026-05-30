@@ -26,6 +26,30 @@ from .optical.scene import (
 )
 from .optical.scene_io import build_benchmark_scene_inputs, load_scene_yaml
 
+_FORWARD_FLUX_INPUT_KEYS = frozenset(
+    {
+        "tau",
+        "ssa",
+        "g",
+        "z",
+        "angles",
+        "stream",
+        "fbeam",
+        "albedo",
+        "delta_m_truncation_factor",
+        "planck",
+        "surface_planck",
+        "emissivity",
+        "brdf",
+        "surface_leaving",
+        "view_angles",
+        "beam_szas",
+        "relazms",
+        "earth_radius",
+        "geometry",
+    }
+)
+
 
 @dataclass(frozen=True)
 class SceneForwardInputs:
@@ -125,6 +149,10 @@ class SceneRun:
         inputs = self.to_forward_inputs()
         nlyr = int(np.asarray(inputs.kwargs["tau"]).shape[-1])
         if options is None:
+            option_overrides = dict(option_overrides)
+            if bool(option_overrides.pop("output_levels", False)):
+                raise ValueError("scene.forward_flux requires output_levels=False")
+            option_overrides.pop("output_fluxes", None)
             options = TwoStreamEssOptions(
                 nlyr=nlyr,
                 mode=self.mode,
@@ -135,8 +163,11 @@ class SceneRun:
             )
         elif options.output_levels:
             raise ValueError("scene.forward_flux requires options.output_levels=False")
+        flux_kwargs = {
+            key: value for key, value in inputs.kwargs.items() if key in _FORWARD_FLUX_INPUT_KEYS
+        }
         return TwoStreamEss(options).forward_flux(
-            **inputs.kwargs,
+            **flux_kwargs,
             include_fo=include_fo,
             return_net=return_net,
         )
