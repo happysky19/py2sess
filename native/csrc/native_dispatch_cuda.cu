@@ -351,6 +351,7 @@ void solar_2s_cuda(at::TensorIterator& iter, const Solar2sParams& params) {
               params.use_brdf,
               params.use_surface_leaving,
               params.sl_isotropic,
+              params.plane_parallel_chapman,
               work);
         });
   });
