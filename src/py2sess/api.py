@@ -4823,7 +4823,7 @@ class TwoStreamEss:
             chunk_size = (
                 n_rows
                 if native_device_type == "cpu"
-                else self._thermal_batch_chunk_size(n_rows, n_layers, backend="torch")
+                else self._thermal_batch_chunk_size(n_rows, n_layers, backend="native")
             )
             flux_up_by_geometry = []
             flux_down_by_geometry = []
@@ -4958,7 +4958,11 @@ class TwoStreamEss:
             )
 
         n_rows = int(tau_rows.shape[0])
-        chunk_size = max(1, n_rows)
+        chunk_size = (
+            n_rows
+            if native_device_type == "cpu"
+            else self._solar_batch_chunk_size(n_rows, n_layers, backend="native")
+        )
         geometry_data = prepared.geometry
         flux_up_by_geometry = []
         flux_down_by_geometry = []
