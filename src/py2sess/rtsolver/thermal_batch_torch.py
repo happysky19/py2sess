@@ -218,16 +218,19 @@ def _transparent_thermal_flux_batch(
     stream_value: float,
     return_profile: bool,
     return_fluxes: bool,
+    return_radiance: bool,
     do_upwelling: bool,
     do_dnwelling: bool,
 ):
     nrows, nlay = tau.shape
     nlev = nlay + 1
-    radiance = torch.zeros(
-        (nrows, nlev) if return_profile else (nrows,),
-        dtype=tau.dtype,
-        device=tau.device,
-    )
+    radiance = None
+    if return_radiance:
+        radiance = torch.zeros(
+            (nrows, nlev) if return_profile else (nrows,),
+            dtype=tau.dtype,
+            device=tau.device,
+        )
     if not return_fluxes:
         return radiance
 
@@ -248,13 +251,15 @@ def _transparent_thermal_flux_batch(
         flux_mean = flux_mean + 0.5 * surface_source[:, None]
     if do_dnwelling:
         flux_down = flux_down + 0.0
-    return {
-        "radiance": radiance,
+    result = {
         "flux_up": flux_up,
         "flux_down": flux_down,
         "flux_net": flux_up - flux_down,
         "flux_mean": flux_mean,
     }
+    if return_radiance:
+        result["radiance"] = radiance
+    return result
 
 
 def _flux_profile_thermal_batch_torch(
@@ -326,6 +331,7 @@ def _two_stream_thermal_toa_batch(
     bvp_engine: str = "auto",
     return_profile: bool = False,
     return_fluxes: bool = False,
+    return_radiance: bool = True,
     do_upwelling: bool = True,
     do_dnwelling: bool = False,
 ):
@@ -345,6 +351,7 @@ def _two_stream_thermal_toa_batch(
             stream_value=stream_value,
             return_profile=return_profile,
             return_fluxes=return_fluxes,
+            return_radiance=return_radiance,
             do_upwelling=do_upwelling,
             do_dnwelling=do_dnwelling,
         )
@@ -372,6 +379,7 @@ def _two_stream_thermal_toa_batch(
             bvp_engine=bvp_engine,
             return_profile=return_profile,
             return_fluxes=return_fluxes,
+            return_radiance=return_radiance,
             do_upwelling=do_upwelling,
             do_dnwelling=do_dnwelling,
         )
@@ -382,11 +390,13 @@ def _two_stream_thermal_toa_batch(
             stream_value=stream_value,
             return_profile=return_profile,
             return_fluxes=return_fluxes,
+            return_radiance=return_radiance,
             do_upwelling=do_upwelling,
             do_dnwelling=do_dnwelling,
         )
         if return_fluxes:
-            result["radiance"][active_rows] = subset["radiance"]
+            if return_radiance:
+                result["radiance"][active_rows] = subset["radiance"]
             for key in ("flux_up", "flux_down", "flux_net", "flux_mean"):
                 result[key][active_rows] = subset[key]
             return result
@@ -403,23 +413,6 @@ def _two_stream_thermal_toa_batch(
         asymm=asymm_total,
         delta_tau=delta_tau,
     )
-    user_secant = 1.0 / user_stream
-    t_delt_userm = torch.exp(-delta_tau * user_secant)
-    u_xpos, u_xneg = _thermal_user_solution_batch(
-        stream_value=stream_value,
-        user_stream=user_stream,
-        xpos1=xpos1,
-        xpos2=xpos2,
-        omega=omega_total,
-        asymm=asymm_total,
-    )
-    hmult_1, hmult_2 = _homogeneous_multipliers_batch(
-        delta_tau=delta_tau,
-        user_secant=user_secant,
-        eigenvalue=eigenvalue,
-        eigentrans=eigentrans,
-        t_delt_userm=t_delt_userm,
-    )
     t_c_plus, t_c_minus, tterm_save, t_wupper, t_wlower = _thermal_green_function_batch(
         omega=omega_total,
         delta_tau=delta_tau,
@@ -431,19 +424,6 @@ def _two_stream_thermal_toa_batch(
         xpos1=xpos1,
         xpos2=xpos2,
         norm_saved=norm_saved,
-    )
-    layer_tsup_up = _thermal_layer_sources_up_batch(
-        user_stream=user_stream,
-        tcutoff=thermal_tcutoff,
-        t_delt_userm=t_delt_userm,
-        delta_tau=delta_tau,
-        u_xpos=u_xpos,
-        u_xneg=u_xneg,
-        hmult_1=hmult_1,
-        hmult_2=hmult_2,
-        t_c_plus=t_c_plus,
-        t_c_minus=t_c_minus,
-        tterm_save=tterm_save,
     )
     bvp_engine = _canonical_torch_bvp_engine(bvp_engine)
     if bvp_engine == "pentadiagonal":
@@ -491,6 +471,43 @@ def _two_stream_thermal_toa_batch(
             wupper=t_wupper,
             wlower=t_wlower,
         )
+        if not return_radiance:
+            return {
+                "flux_up": flux_up,
+                "flux_down": flux_down,
+                "flux_net": flux_net,
+                "flux_mean": flux_mean,
+            }
+    user_secant = 1.0 / user_stream
+    t_delt_userm = torch.exp(-delta_tau * user_secant)
+    u_xpos, u_xneg = _thermal_user_solution_batch(
+        stream_value=stream_value,
+        user_stream=user_stream,
+        xpos1=xpos1,
+        xpos2=xpos2,
+        omega=omega_total,
+        asymm=asymm_total,
+    )
+    hmult_1, hmult_2 = _homogeneous_multipliers_batch(
+        delta_tau=delta_tau,
+        user_secant=user_secant,
+        eigenvalue=eigenvalue,
+        eigentrans=eigentrans,
+        t_delt_userm=t_delt_userm,
+    )
+    layer_tsup_up = _thermal_layer_sources_up_batch(
+        user_stream=user_stream,
+        tcutoff=thermal_tcutoff,
+        t_delt_userm=t_delt_userm,
+        delta_tau=delta_tau,
+        u_xpos=u_xpos,
+        u_xneg=u_xneg,
+        hmult_1=hmult_1,
+        hmult_2=hmult_2,
+        t_c_plus=t_c_plus,
+        t_c_minus=t_c_minus,
+        tterm_save=tterm_save,
+    )
     wlower0, _wlower1 = t_wlower
     idownsurf = (
         wlower0[:, -1] + lcon[:, -1] * xpos1[:, -1] * eigentrans[:, -1] + mcon[:, -1] * xpos2[:, -1]

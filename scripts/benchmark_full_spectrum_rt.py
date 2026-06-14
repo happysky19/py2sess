@@ -493,8 +493,8 @@ def _run_scene_forward_once(
         "output_fluxes": output_fluxes,
         "fo_flux_n_mu": fo_flux_n_mu,
     }
-    native_flux_only = config.backend == "native" and output_fluxes
-    if native_flux_only:
+    flux_only = config.backend in {"native", "torch"} and output_fluxes
+    if flux_only:
         common_options.pop("output_levels")
         common_options.pop("output_fluxes")
     if output_fluxes:
@@ -524,13 +524,13 @@ def _run_scene_forward_once(
         }
     _sync_if_cuda(config)
     start = time.perf_counter()
-    if native_flux_only:
+    if flux_only:
         result = scene.forward_flux(**options, include_fo=True, return_net=True)
     else:
         result = scene.forward(**options, include_fo=True)
     _sync_if_cuda(config)
     seconds = time.perf_counter() - start
-    if native_flux_only:
+    if flux_only:
         max_abs = ""
         max_rel = ""
     else:
