@@ -249,6 +249,34 @@ class ApiTests(unittest.TestCase):
         self.assertIsNotNone(tau.grad)
         self.assertTrue(torch.isfinite(tau.grad).all().item())
 
+    @unittest.skipUnless(has_torch(), "torch is not installed")
+    def test_torch_forward_flux_keeps_tau_gradients(self) -> None:
+        import torch
+
+        tau = torch.tensor([[0.01, 0.02]], dtype=torch.float64, requires_grad=True)
+        solver = TwoStreamEss(
+            TwoStreamEssOptions(
+                nlyr=2,
+                mode="solar",
+                backend="torch",
+                plane_parallel=True,
+                torch_dtype="float64",
+            )
+        )
+        result = solver.forward_flux(
+            tau=tau,
+            ssa=torch.tensor([[0.2, 0.1]], dtype=torch.float64),
+            g=torch.tensor([[0.1, 0.2]], dtype=torch.float64),
+            z=np.array([2.0, 1.0, 0.0]),
+            angles=[30.0, 20.0, 0.0],
+            albedo=torch.tensor([0.1], dtype=torch.float64),
+            include_fo=True,
+            return_net=True,
+        )
+        result.flux_net.sum().backward()
+        self.assertIsNotNone(tau.grad)
+        self.assertTrue(torch.isfinite(tau.grad).all().item())
+
 
 if __name__ == "__main__":
     unittest.main()

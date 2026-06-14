@@ -629,6 +629,7 @@ def solve_solar_obs_batch_torch(
     bvp_engine: str = "auto",
     return_profile: bool = False,
     return_fluxes: bool = False,
+    return_radiance: bool = True,
     do_upwelling: bool = True,
     do_dnwelling: bool = False,
     plane_parallel_secant: float | None = None,
@@ -733,24 +734,27 @@ def solve_solar_obs_batch_torch(
             omega_asymm_3=omega_asymm_3,
             delta_tau=delta_tau,
         )
-        u_xpos, u_xneg = _hom_user_solution_solar_obs_batch_torch(
-            fourier=fourier,
-            stream_value=stream_value,
-            px11=px11,
-            user_stream=user_stream,
-            ulp=ulp,
-            xpos1=xpos1,
-            xpos2=xpos2,
-            omega=omega_total,
-            omega_asymm_3=omega_asymm_3,
-        )
-        hmult_1, hmult_2 = _hmult_master_batch_torch(
-            delta_tau=delta_tau,
-            user_secant=user_secant,
-            eigenvalue=eigenvalue,
-            eigentrans=eigentrans,
-            t_delt_userm=misc["t_delt_userm"],
-        )
+        if return_radiance:
+            u_xpos, u_xneg = _hom_user_solution_solar_obs_batch_torch(
+                fourier=fourier,
+                stream_value=stream_value,
+                px11=px11,
+                user_stream=user_stream,
+                ulp=ulp,
+                xpos1=xpos1,
+                xpos2=xpos2,
+                omega=omega_total,
+                omega_asymm_3=omega_asymm_3,
+            )
+            hmult_1, hmult_2 = _hmult_master_batch_torch(
+                delta_tau=delta_tau,
+                user_secant=user_secant,
+                eigenvalue=eigenvalue,
+                eigentrans=eigentrans,
+                t_delt_userm=misc["t_delt_userm"],
+            )
+        else:
+            u_xpos = u_xneg = hmult_1 = hmult_2 = None
         gamma_m, gamma_p, aterm, bterm, wupper, wlower = _gbeam_solution_batch_torch(
             fourier=fourier,
             pi4=pi4,
@@ -841,6 +845,15 @@ def solve_solar_obs_batch_torch(
                 wupper=wupper,
                 wlower=wlower,
             )
+            if not return_radiance:
+                return {
+                    "flux_up": flux_up,
+                    "flux_down": flux_down,
+                    "flux_net": flux_net,
+                    "flux_mean": flux_mean,
+                }
+        if not return_radiance:
+            continue
         contribution = _upuser_intensity_batch_torch(
             layer_pis_cutoff=misc["layer_pis_cutoff"],
             surface_factor=surface_factor,

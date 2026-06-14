@@ -4678,17 +4678,17 @@ class TwoStreamEss:
         include_fo: bool = False,
         return_net: bool = False,
     ) -> TwoStreamEssFluxResult:
-        """Runs the native level-flux path without radiance assembly.
+        """Runs the level-flux path without radiance assembly.
 
         This focused inference path is meant for flux benchmarks. It currently
-        supports native solar and thermal observation geometries with
-        ``backend="native"`` and returns regular level ``flux_up`` and
-        ``flux_down`` by default. Set ``return_net=True`` to also materialize
-        ``flux_net`` as another full level-sized tensor. ``flux_mean`` is
-        intentionally omitted because the native flux-only kernels do not write
-        the mean-flux moments.
+        supports native and torch solar/thermal observation geometries and
+        returns regular level ``flux_up`` and ``flux_down`` by default. Set
+        ``return_net=True`` to also materialize ``flux_net`` as another full
+        level-sized tensor. ``flux_mean`` is intentionally omitted to keep the
+        flux-only output contract aligned across native and torch backends.
         """
         from .rtsolver.backend import _load_torch
+        from .rtsolver.fo_solar_obs_batch_torch import solar_fo_flux_correction_torch
         from .rtsolver.native_backend import (
             native_backend_supports_device,
             solve_solar_2s_flux_pair,
@@ -4696,9 +4696,15 @@ class TwoStreamEss:
             solve_thermal_2s_flux_pair,
             solve_thermal_fo_flux_correction,
         )
+        from .rtsolver.solar_obs_batch_torch import solve_solar_obs_batch_torch
+        from .rtsolver.thermal_batch_torch import (
+            _two_stream_thermal_toa_batch,
+            thermal_fo_flux_correction_torch,
+        )
 
-        if self.options.backend != "native":
-            raise NotImplementedError("forward_flux currently requires backend='native'")
+        if self.options.backend not in {"native", "torch"}:
+            raise NotImplementedError("forward_flux currently supports backend='native' or 'torch'")
+        backend_is_native = self.options.backend == "native"
         if self._source_mode not in {"solar_obs", "thermal"}:
             raise NotImplementedError("forward_flux currently supports mode='solar' or 'thermal'")
         if self.options.output_levels:
@@ -4711,6 +4717,10 @@ class TwoStreamEss:
             raise ValueError("surface_leaving input requires surface_leaving=True")
         if self.options.surface_leaving and surface_leaving is None:
             raise ValueError("surface_leaving=True requires surface-leaving coefficients")
+        if not backend_is_native and (self.options.brdf_surface or self.options.surface_leaving):
+            raise NotImplementedError(
+                "forward_flux backend='torch' currently supports Lambertian surfaces only"
+            )
         if include_fo:
             if not self.options.plane_parallel:
                 raise NotImplementedError(
@@ -4723,7 +4733,7 @@ class TwoStreamEss:
 
         torch = _load_torch()
         if torch is None:  # pragma: no cover
-            raise RuntimeError("backend='native' requires torch to be installed")
+            raise RuntimeError(f"backend={self.options.backend!r} requires torch to be installed")
 
         mapped = self._translate_public_forward_args(
             tau=tau,
@@ -4755,11 +4765,9 @@ class TwoStreamEss:
                 emissivity,
             )
         )
-        native_device_type = str(context.device.type)
-        if not native_backend_supports_device(native_device_type):
-            raise RuntimeError(
-                f"backend='native' does not support torch device {native_device_type!r}"
-            )
+        device_type = str(context.device.type)
+        if backend_is_native and not native_backend_supports_device(device_type):
+            raise RuntimeError(f"backend='native' does not support torch device {device_type!r}")
 
         n_layers = self.options.nlyr
         tau_arr = value_to_torch(mapped["tau_arr"], context)
@@ -4792,9 +4800,6 @@ class TwoStreamEss:
         albedo_rows = self._broadcast_batch_scalar_torch(
             "albedo", albedo, context=context, batch_shape=batch_shape
         )
-        fbeam_rows = self._broadcast_batch_scalar_torch(
-            "fbeam", mapped["flux_factor"], context=context, batch_shape=batch_shape
-        )
         self._require_finite_torch("tau", tau_rows)
 
         if self._source_mode == "thermal":
@@ -4820,23 +4825,22 @@ class TwoStreamEss:
                 batch_shape=batch_shape,
             )
             n_rows = int(tau_rows.shape[0])
+            chunk_backend = self.options.backend
             chunk_size = (
                 n_rows
-                if native_device_type == "cpu"
-                else self._thermal_batch_chunk_size(n_rows, n_layers, backend="native")
+                if backend_is_native and device_type == "cpu"
+                else self._thermal_batch_chunk_size(n_rows, n_layers, backend=chunk_backend)
             )
-            flux_up_by_geometry = []
-            flux_down_by_geometry = []
-            flux_net_by_geometry = [] if return_net else None
             with self._torch_grad_context():
-                for angle in self._thermal_angles(mapped["user_angles"]):
-                    user_stream = float(np.cos(np.deg2rad(float(angle))))
-                    flux_up_chunks = []
-                    flux_down_chunks = []
-                    flux_net_chunks = [] if return_net else None
-                    for start in range(0, n_rows, chunk_size):
-                        stop = min(start + chunk_size, n_rows)
-                        row_slice = slice(start, stop)
+                thermal_angles = self._thermal_angles(mapped["user_angles"])
+                user_stream = float(np.cos(np.deg2rad(float(thermal_angles[0]))))
+                flux_up_chunks = []
+                flux_down_chunks = []
+                flux_net_chunks = [] if return_net else None
+                for start in range(0, n_rows, chunk_size):
+                    stop = min(start + chunk_size, n_rows)
+                    row_slice = slice(start, stop)
+                    if backend_is_native:
                         flux_chunk = solve_thermal_2s_flux_pair(
                             tau=tau_rows[row_slice],
                             omega=omega_rows[row_slice],
@@ -4853,7 +4857,28 @@ class TwoStreamEss:
                             do_dnwelling=True,
                             return_net=return_net,
                         )
-                        if include_fo:
+                    else:
+                        flux_chunk = _two_stream_thermal_toa_batch(
+                            tau=tau_rows[row_slice],
+                            omega=omega_rows[row_slice],
+                            asymm=asymm_rows[row_slice],
+                            scaling=scaling_rows[row_slice],
+                            thermal_bb_input=planck_rows[row_slice],
+                            surfbb=surfbb_rows[row_slice],
+                            emissivity=emissivity_rows[row_slice],
+                            albedo=albedo_rows[row_slice],
+                            stream_value=mapped["stream_value"],
+                            user_stream=user_stream,
+                            pxsq=mapped["stream_value"] * mapped["stream_value"],
+                            thermal_tcutoff=self.options.thermal_tcutoff,
+                            bvp_engine=self._torch_batch_bvp_engine(),
+                            return_fluxes=True,
+                            return_radiance=False,
+                            do_upwelling=True,
+                            do_dnwelling=True,
+                        )
+                    if include_fo:
+                        if backend_is_native:
                             correction = solve_thermal_fo_flux_correction(
                                 tau=tau_rows[row_slice],
                                 omega=omega_rows[row_slice],
@@ -4870,22 +4895,43 @@ class TwoStreamEss:
                                 ),
                                 n_mu=self.options.fo_flux_n_mu,
                             )
-                            flux_chunk["flux_up"] = flux_chunk["flux_up"] + correction["flux_up"]
-                            flux_chunk["flux_down"] = (
-                                flux_chunk["flux_down"] + correction["flux_down"]
+                        else:
+                            correction = thermal_fo_flux_correction_torch(
+                                tau=tau_rows[row_slice],
+                                omega=omega_rows[row_slice],
+                                scaling=scaling_rows[row_slice],
+                                thermal_bb_input=planck_rows[row_slice],
+                                surfbb=surfbb_rows[row_slice],
+                                emissivity=emissivity_rows[row_slice],
+                                stream_value=mapped["stream_value"],
+                                do_optical_deltam_scaling=(
+                                    self.options.effective_fo_optical_deltam_scaling
+                                ),
+                                do_source_deltam_scaling=(
+                                    self.options.effective_fo_thermal_source_deltam_scaling
+                                ),
+                                n_mu=self.options.fo_flux_n_mu,
+                                n_phi=self.options.fo_flux_n_phi,
                             )
-                            if return_net:
-                                flux_chunk["flux_net"] = (
-                                    flux_chunk["flux_up"] - flux_chunk["flux_down"]
-                                )
-                        flux_up_chunks.append(flux_chunk["flux_up"])
-                        flux_down_chunks.append(flux_chunk["flux_down"])
-                        if return_net and flux_net_chunks is not None:
-                            flux_net_chunks.append(flux_chunk["flux_net"])
-                    flux_up_by_geometry.append(self._cat_torch_chunks(flux_up_chunks, dim=0))
-                    flux_down_by_geometry.append(self._cat_torch_chunks(flux_down_chunks, dim=0))
-                    if return_net and flux_net_by_geometry is not None:
-                        flux_net_by_geometry.append(self._cat_torch_chunks(flux_net_chunks, dim=0))
+                        flux_chunk["flux_up"] = flux_chunk["flux_up"] + correction["flux_up"]
+                        flux_chunk["flux_down"] = flux_chunk["flux_down"] + correction["flux_down"]
+                    if return_net:
+                        flux_chunk["flux_net"] = flux_chunk["flux_up"] - flux_chunk["flux_down"]
+                    flux_up_chunks.append(flux_chunk["flux_up"])
+                    flux_down_chunks.append(flux_chunk["flux_down"])
+                    if return_net and flux_net_chunks is not None:
+                        flux_net_chunks.append(flux_chunk["flux_net"])
+                flux_up = self._cat_torch_chunks(flux_up_chunks, dim=0)
+                flux_down = self._cat_torch_chunks(flux_down_chunks, dim=0)
+                flux_net = (
+                    self._cat_torch_chunks(flux_net_chunks, dim=0)
+                    if return_net and flux_net_chunks is not None
+                    else None
+                )
+                n_geometries = int(thermal_angles.size)
+                flux_up_by_geometry = [flux_up] * n_geometries
+                flux_down_by_geometry = [flux_down] * n_geometries
+                flux_net_by_geometry = [flux_net] * n_geometries if return_net else None
 
             flux_up, geometry_shape = self._reshape_profile_torch(
                 flux_up_by_geometry,
@@ -4911,6 +4957,9 @@ class TwoStreamEss:
                 geometry_shape=geometry_shape,
             )
 
+        fbeam_rows = self._broadcast_batch_scalar_torch(
+            "fbeam", mapped["flux_factor"], context=context, batch_shape=batch_shape
+        )
         height_grid = np.asarray(to_numpy(mapped["height_grid"]), dtype=float)
         user_obsgeoms_arr = np.asarray(to_numpy(mapped["user_obsgeoms"]), dtype=float)
         n_geoms_input = 1 if user_obsgeoms_arr.ndim == 1 else int(user_obsgeoms_arr.shape[0])
@@ -4958,10 +5007,11 @@ class TwoStreamEss:
             )
 
         n_rows = int(tau_rows.shape[0])
+        chunk_backend = self.options.backend
         chunk_size = (
             n_rows
-            if native_device_type == "cpu"
-            else self._solar_batch_chunk_size(n_rows, n_layers, backend="native")
+            if backend_is_native and device_type == "cpu"
+            else self._solar_batch_chunk_size(n_rows, n_layers, backend=chunk_backend)
         )
         geometry_data = prepared.geometry
         flux_up_by_geometry = []
@@ -4970,12 +5020,17 @@ class TwoStreamEss:
 
         with self._torch_grad_context():
             for geom_index, _user_obsgeom in enumerate(prepared.user_obsgeoms):
+                plane_parallel_secant = None
                 if self.options.plane_parallel:
-                    secant = float(geometry_data.average_secant_pp[geom_index])
-                    chapman = np.triu(np.full((n_layers, n_layers), secant, dtype=float))
+                    plane_parallel_secant = float(geometry_data.average_secant_pp[geom_index])
+                    chapman = (
+                        np.triu(np.full((n_layers, n_layers), plane_parallel_secant, dtype=float))
+                        if backend_is_native
+                        else None
+                    )
                 else:
                     chapman = geometry_data.chapman_factors[:, :, geom_index]
-                chapman_t = value_to_torch(chapman, context)
+                chapman_t = None if chapman is None else value_to_torch(chapman, context)
                 pxsq_t = value_to_torch(geometry_data.pxsq, context)
                 px0x_t = value_to_torch(geometry_data.px0x[geom_index], context)
                 flux_up_chunks = []
@@ -4984,83 +5039,127 @@ class TwoStreamEss:
                 for start in range(0, n_rows, chunk_size):
                     stop = min(start + chunk_size, n_rows)
                     row_slice = slice(start, stop)
-                    flux_chunk = solve_solar_2s_flux_pair(
-                        tau=tau_rows[row_slice],
-                        omega=omega_rows[row_slice],
-                        asymm=asymm_rows[row_slice],
-                        scaling=scaling_rows[row_slice],
-                        albedo=albedo_rows[row_slice],
-                        flux_factor=fbeam_rows[row_slice],
-                        chapman=chapman_t,
-                        pxsq=pxsq_t,
-                        px0x=px0x_t,
-                        brdf_f0=(
-                            None
-                            if brdf_rows is None
-                            else value_to_torch(
-                                brdf_rows["brdf_f_0"][row_slice, geom_index, :], context
-                            )
-                        ),
-                        brdf_f=(
-                            None
-                            if brdf_rows is None
-                            else value_to_torch(brdf_rows["brdf_f"][row_slice, :], context)
-                        ),
-                        ubrdf_f=(
-                            None
-                            if brdf_rows is None
-                            else value_to_torch(
-                                brdf_rows["ubrdf_f"][row_slice, geom_index, :], context
-                            )
-                        ),
-                        slterm_isotropic=(
-                            None
-                            if surface_leaving_rows is None
-                            else value_to_torch(
-                                surface_leaving_rows["slterm_isotropic"][row_slice, geom_index],
-                                context,
-                            )
-                        ),
-                        slterm_f0=(
-                            None
-                            if surface_leaving_rows is None
-                            else value_to_torch(
-                                surface_leaving_rows["slterm_f_0"][row_slice, geom_index, :],
-                                context,
-                            )
-                        ),
-                        stream_value=prepared.stream_value,
-                        x0=float(geometry_data.x0[geom_index]),
-                        user_stream=float(geometry_data.user_streams[geom_index]),
-                        user_secant=float(geometry_data.user_secants[geom_index]),
-                        azmfac=float(geometry_data.azmfac[geom_index]),
-                        px11=float(geometry_data.px11),
-                        ulp=float(geometry_data.ulp[geom_index]),
-                        do_upwelling=True,
-                        do_dnwelling=True,
-                        use_brdf=brdf_rows is not None,
-                        use_surface_leaving=surface_leaving_rows is not None,
-                        sl_isotropic=self.options.sl_isotropic,
-                        return_net=return_net,
-                        plane_parallel_chapman=self.options.plane_parallel,
-                    )
-                    if include_fo:
-                        correction = solve_solar_fo_flux_correction(
+                    if backend_is_native:
+                        flux_chunk = solve_solar_2s_flux_pair(
                             tau=tau_rows[row_slice],
                             omega=omega_rows[row_slice],
+                            asymm=asymm_rows[row_slice],
                             scaling=scaling_rows[row_slice],
-                            surface_reflectance=albedo_rows[row_slice],
+                            albedo=albedo_rows[row_slice],
+                            flux_factor=fbeam_rows[row_slice],
+                            chapman=chapman_t,
+                            pxsq=pxsq_t,
+                            px0x=px0x_t,
+                            brdf_f0=(
+                                None
+                                if brdf_rows is None
+                                else value_to_torch(
+                                    brdf_rows["brdf_f_0"][row_slice, geom_index, :], context
+                                )
+                            ),
+                            brdf_f=(
+                                None
+                                if brdf_rows is None
+                                else value_to_torch(brdf_rows["brdf_f"][row_slice, :], context)
+                            ),
+                            ubrdf_f=(
+                                None
+                                if brdf_rows is None
+                                else value_to_torch(
+                                    brdf_rows["ubrdf_f"][row_slice, geom_index, :], context
+                                )
+                            ),
+                            slterm_isotropic=(
+                                None
+                                if surface_leaving_rows is None
+                                else value_to_torch(
+                                    surface_leaving_rows["slterm_isotropic"][row_slice, geom_index],
+                                    context,
+                                )
+                            ),
+                            slterm_f0=(
+                                None
+                                if surface_leaving_rows is None
+                                else value_to_torch(
+                                    surface_leaving_rows["slterm_f_0"][row_slice, geom_index, :],
+                                    context,
+                                )
+                            ),
+                            stream_value=prepared.stream_value,
+                            x0=float(geometry_data.x0[geom_index]),
+                            user_stream=float(geometry_data.user_streams[geom_index]),
+                            user_secant=float(geometry_data.user_secants[geom_index]),
+                            azmfac=float(geometry_data.azmfac[geom_index]),
+                            px11=float(geometry_data.px11),
+                            ulp=float(geometry_data.ulp[geom_index]),
+                            do_upwelling=True,
+                            do_dnwelling=True,
+                            use_brdf=brdf_rows is not None,
+                            use_surface_leaving=surface_leaving_rows is not None,
+                            sl_isotropic=self.options.sl_isotropic,
+                            return_net=return_net,
+                            plane_parallel_chapman=self.options.plane_parallel,
+                        )
+                    else:
+                        flux_chunk = solve_solar_obs_batch_torch(
+                            tau=tau_rows[row_slice],
+                            omega=omega_rows[row_slice],
+                            asymm=asymm_rows[row_slice],
+                            scaling=scaling_rows[row_slice],
+                            albedo=albedo_rows[row_slice],
                             flux_factor=fbeam_rows[row_slice],
                             stream_value=prepared.stream_value,
-                            mu0=float(geometry_data.x0[geom_index]),
-                            do_optical_deltam_scaling=(
-                                self.options.effective_fo_optical_deltam_scaling
-                            ),
+                            chapman=chapman_t,
+                            x0=float(geometry_data.x0[geom_index]),
+                            user_stream=float(geometry_data.user_streams[geom_index]),
+                            user_secant=float(geometry_data.user_secants[geom_index]),
+                            azmfac=float(geometry_data.azmfac[geom_index]),
+                            px11=float(geometry_data.px11),
+                            pxsq=pxsq_t,
+                            px0x=px0x_t,
+                            ulp=float(geometry_data.ulp[geom_index]),
+                            dtype=context.dtype,
+                            device=context.device,
+                            bvp_engine=self._torch_batch_bvp_engine(),
+                            return_fluxes=True,
+                            return_radiance=False,
+                            do_upwelling=True,
+                            do_dnwelling=True,
+                            plane_parallel_secant=plane_parallel_secant,
                         )
+                    if include_fo:
+                        if backend_is_native:
+                            correction = solve_solar_fo_flux_correction(
+                                tau=tau_rows[row_slice],
+                                omega=omega_rows[row_slice],
+                                scaling=scaling_rows[row_slice],
+                                surface_reflectance=albedo_rows[row_slice],
+                                flux_factor=fbeam_rows[row_slice],
+                                stream_value=prepared.stream_value,
+                                mu0=float(geometry_data.x0[geom_index]),
+                                do_optical_deltam_scaling=(
+                                    self.options.effective_fo_optical_deltam_scaling
+                                ),
+                            )
+                        else:
+                            correction = solar_fo_flux_correction_torch(
+                                tau=tau_rows[row_slice],
+                                omega=omega_rows[row_slice],
+                                scaling=scaling_rows[row_slice],
+                                surface_reflectance=albedo_rows[row_slice],
+                                flux_factor=fbeam_rows[row_slice],
+                                stream_value=prepared.stream_value,
+                                mu0=float(geometry_data.x0[geom_index]),
+                                dtype=context.dtype,
+                                device=context.device,
+                                do_optical_deltam_scaling=(
+                                    self.options.effective_fo_optical_deltam_scaling
+                                ),
+                            )
                         flux_chunk["flux_up"] = flux_chunk["flux_up"] + correction["flux_up"]
                         flux_chunk["flux_down"] = flux_chunk["flux_down"] + correction["flux_down"]
-                        if return_net:
-                            flux_chunk["flux_net"] = flux_chunk["flux_up"] - flux_chunk["flux_down"]
+                    if return_net:
+                        flux_chunk["flux_net"] = flux_chunk["flux_up"] - flux_chunk["flux_down"]
                     flux_up_chunks.append(flux_chunk["flux_up"])
                     flux_down_chunks.append(flux_chunk["flux_down"])
                     if return_net and flux_net_chunks is not None:
