@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref to build, for example main, a release branch, or v0.4.2"
+        description: "Git ref to build, for example main, a release branch, or v1.0.0"
         required: true
         default: "main"
       tag:
-        description: "Tag to publish, for example v0.4.2"
+        description: "Tag to publish, for example v1.0.0"
         required: false
       version:
-        description: "Optional version override for dry-run builds, for example 0.4.2"
+        description: "Optional version override for dry-run builds, for example 1.0.0"
         required: false
       build_os:
         description: "Wheel OS target"

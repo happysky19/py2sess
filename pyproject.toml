@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["radiative transfer", "atmospheric science", "remote sensing", "two-stream", "pytorch"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
   "Natural Language :: English",
   "Programming Language :: Python :: 3",
@@ -67,7 +67,7 @@ wheel.packages = ["src/py2sess"]
 sdist.include = ["CMakeLists.txt", "native/**", "src/py2sess/data/benchmark/*.npz"]
 
 [tool.setuptools_scm]
-fallback_version = "0.4.2"
+fallback_version = "1.0.0"
 
 [tool.ruff]
 target-version = "py310"
