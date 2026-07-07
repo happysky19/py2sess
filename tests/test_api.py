@@ -277,6 +277,62 @@ class ApiTests(unittest.TestCase):
         self.assertIsNotNone(tau.grad)
         self.assertTrue(torch.isfinite(tau.grad).all().item())
 
+    @unittest.skipUnless(has_torch(), "torch is not installed")
+    def test_torch_forward_flux_autograd_preserves_forward_values(self) -> None:
+        import torch
+
+        rng = np.random.default_rng(1)
+        n_layers = 54
+        tau_abs_np = 10.0 ** rng.uniform(-12.0, np.log10(0.025), n_layers)
+        rayleigh_np = 10.0 ** rng.uniform(-7.0, np.log10(0.0015), n_layers)
+        tau_abs_np[rng.random(n_layers) < 0.18] = 1.0e-12
+
+        def run_case(requires_grad: bool):
+            tau_abs = torch.tensor(tau_abs_np[None, :], dtype=torch.float32).requires_grad_(
+                requires_grad
+            )
+            rayleigh = torch.tensor(rayleigh_np[None, :], dtype=torch.float32).requires_grad_(
+                requires_grad
+            )
+            fbeam = torch.tensor([21.487617], dtype=torch.float32).requires_grad_(requires_grad)
+            tau_total = torch.clamp(tau_abs + rayleigh, min=1.0e-12, max=700.0)
+            ssa = torch.clamp(rayleigh / tau_total, min=0.0, max=0.999999)
+            solver = TwoStreamEss(
+                TwoStreamEssOptions(
+                    nlyr=n_layers,
+                    mode="solar",
+                    backend="torch",
+                    upwelling=True,
+                    downwelling=True,
+                    plane_parallel=True,
+                    delta_scaling=False,
+                    torch_dtype="float32",
+                    fo_flux_n_mu=4,
+                )
+            )
+            result = solver.forward_flux(
+                tau=tau_total,
+                ssa=ssa,
+                g=torch.zeros_like(tau_total),
+                z=np.linspace(60.0, 0.0, n_layers + 1),
+                angles=[60.0, 0.0, 0.0],
+                stream=1.0 / np.sqrt(3.0),
+                fbeam=fbeam,
+                albedo=torch.tensor([0.15], dtype=torch.float32),
+                include_fo=True,
+                return_net=True,
+            )
+            if requires_grad:
+                result.flux_net.sum().backward()
+                self.assertIsNotNone(tau_abs.grad)
+                self.assertTrue(torch.isfinite(tau_abs.grad).all().item())
+            return result.flux_up.detach(), result.flux_down.detach(), result.flux_net.detach()
+
+        detached = run_case(False)
+        grad_enabled = run_case(True)
+        for detached_flux, grad_flux in zip(detached, grad_enabled):
+            np.testing.assert_allclose(to_numpy(grad_flux), to_numpy(detached_flux), atol=2e-5)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -56,11 +56,6 @@ def _static_float_tuple(value) -> tuple[float, ...] | None:
     return tuple(float(item) for item in arr)
 
 
-def _needs_autograd_safe_bvp(*values) -> bool:
-    """Returns true when the 2S BVP solve must preserve optical-property gradients."""
-    return bool(torch.is_grad_enabled() and any(value.requires_grad for value in values))
-
-
 def _taylor_series_2_vectorized_torch(
     order: int, small: float, eps, y, delta, fac1, fac2, sm: float
 ):
@@ -708,10 +703,6 @@ def solve_solar_obs_batch_torch(
     omega_asymm_3 = 3.0 * omega_total * asymm_total
     all_layers_active = bool(misc["all_active"])
     bvp_engine_for_call = bvp_engine
-    if _needs_autograd_safe_bvp(omega_t, asymm_t, scaling_t):
-        # The pentadiagonal wrapper has a custom VJP for optical-property gradients.
-        # Avoid the dense per-wavelength BVP solve, which is orders of magnitude slower.
-        bvp_engine_for_call = "pentadiagonal"
     total = torch.zeros(tau_t.shape[0], dtype=dtype, device=device)
     total_profile = None
     if return_profile:
