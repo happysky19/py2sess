@@ -66,9 +66,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build ninja scikit-build-core setuptools-scm wheel
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -e ".[torch,native,speed]"
+            python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+              --config-settings=cmake.define.PY2SESS_BUILD_NATIVE=ON \
+              -e ".[torch,native,speed]"
           else
-            python -m pip install -e ".[torch,native,speed]"
+            python -m pip install --config-settings=cmake.define.PY2SESS_BUILD_NATIVE=ON \
+              -e ".[torch,native,speed]"
           fi
 
       - name: Configure CMake
@@ -81,7 +84,7 @@ jobs:
         run: python -m build
 
       - name: Import smoke test
-        run: python -c "import py2sess"
+        run: python -c "import py2sess; assert py2sess.native_extension_available()"
 
       - name: Run test suite
         env:
