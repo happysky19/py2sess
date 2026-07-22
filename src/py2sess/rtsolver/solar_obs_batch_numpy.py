@@ -19,6 +19,7 @@ MAX_TAU_PATH = 88.0
 MAX_TAU_QPATH = 88.0
 TAYLOR_SMALL = 1.0e-3
 TAYLOR_ORDER = 3
+OPTICAL_THICKNESS_MIN = 1.0e-12
 _NUMBA_QSPREP_MIN_BATCH = 4096
 _QSPREP_KERNEL = None
 _QSPREP_PLANE_PARALLEL_KERNEL = None
@@ -894,6 +895,10 @@ def solve_solar_obs_batch_numpy(
         asymm,
         scaling,
     )
+    zero_delta_tau = delta_tau == 0.0
+    if np.any(zero_delta_tau):
+        delta_tau = delta_tau.copy()
+        delta_tau[zero_delta_tau] = OPTICAL_THICKNESS_MIN
     if plane_parallel_secant is None:
         if chapman is None:
             raise ValueError("chapman is required unless plane_parallel_secant is supplied")

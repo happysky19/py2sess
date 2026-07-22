@@ -151,7 +151,7 @@ add_library(py2sess_native_pybind MODULE
 target_compile_definitions(py2sess_native_pybind
   PRIVATE
     TORCH_EXTENSION_NAME=_native
-    PY2SESS_BIND_NATIVE_MODULE_CLASS=1
+    PY2SESS_BIND_NATIVE_MODULE_CLASS=0
 )
 
 py2sess_configure_pybind_module(py2sess_native_pybind "_native")

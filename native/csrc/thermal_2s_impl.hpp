@@ -30,6 +30,11 @@ PY2SESS_HD T exp_cutoff(T value, T cutoff) {
 }
 
 template <typename T>
+PY2SESS_HD T stabilize_optical_thickness(T value) {
+  return value == T(0) ? T(1.0e-12) : value;
+}
+
+template <typename T>
 PY2SESS_HD T exp1_positive(T x) {
   const T euler = T(0.577215664901532860606512090082402431);
   const T eps = T(1.0e-14);
@@ -1281,7 +1286,6 @@ PY2SESS_HD void solar_2s_row(
   const T row_albedo = *albedo;
   const T scaled_flux = row_flux / pi4;
 
-  bool transparent = true;
   bool has_scattering = false;
   for (int i = 0; i < nlay; ++i) {
     if (omega[i] != T(0)) {
@@ -1289,10 +1293,7 @@ PY2SESS_HD void solar_2s_row(
     }
     const T omfac = T(1) - omega[i] * scaling[i];
     const T m1fac = T(1) - scaling[i];
-    delta_tau[i] = tau[i] * omfac;
-    if (delta_tau[i] != T(0)) {
-      transparent = false;
-    }
+    delta_tau[i] = stabilize_optical_thickness(tau[i] * omfac);
     omega_total[i] = clamp_value((m1fac * omega[i]) / omfac, T(1.0e-9), T(0.999999999));
     T asymm_total = clamp_value((asymm[i] - scaling[i]) / m1fac, T(-0.999999999), T(0.999999999));
     if (asymm_total >= T(0) && asymm_total < T(1.0e-9)) {
@@ -1301,24 +1302,6 @@ PY2SESS_HD void solar_2s_row(
       asymm_total = T(-1.0e-9);
     }
     omega_asymm_3[i] = T(3) * omega_total[i] * asymm_total;
-  }
-
-  if (transparent) {
-    const int out_count = return_profile ? nlay + 1 : 1;
-    for (int i = 0; i < out_count; ++i) {
-      out[i] = T(0);
-    }
-    if (return_fluxes) {
-      const T down_value = do_dnwelling ? row_flux * x0 : T(0);
-      const T mean_value = do_dnwelling ? scaled_flux : T(0);
-      for (int i = 0; i < nlev; ++i) {
-        flux_up[i] = T(0);
-        flux_down[i] = down_value;
-        flux_net[i] = -down_value;
-        flux_mean[i] = mean_value;
-      }
-    }
-    return;
   }
 
   T previous_tauslant = T(0);
@@ -1339,10 +1322,8 @@ PY2SESS_HD void solar_2s_row(
     const T user_path = delta_tau[layer] * user_secant;
     const T t_user = exp_cutoff(user_path, T(88));
     if (layer + 1 <= layer_pis_cutoff) {
-      const T average = plane_parallel_chapman
-                            ? plane_secant
-                            : (delta_tau[layer] == T(0) ? T(0)
-                                                         : delta_tauslant / delta_tau[layer]);
+      const T average =
+          plane_parallel_chapman ? plane_secant : delta_tauslant / delta_tau[layer];
       const T initial = layer == 0 ? T(1) : exp(-previous_tauslant);
       const T t_mubar = exp_cutoff(delta_tauslant, T(88));
       const T sigma = average + user_secant;
@@ -1589,23 +1570,6 @@ PY2SESS_HD void solar_2s_row(
       out[0] += add_factor * delta_factor * cumsource;
     }
   }
-  if (return_profile) {
-    for (int level = nlay - 1; level >= 0; --level) {
-      if (delta_tau[level] == T(0)) {
-        out[level] = out[level + 1];
-      }
-    }
-  }
-  if (return_fluxes) {
-    for (int level = nlay - 1; level >= 0; --level) {
-      if (delta_tau[level] == T(0)) {
-        flux_up[level] = flux_up[level + 1];
-        flux_down[level] = flux_down[level + 1];
-        flux_net[level] = flux_net[level + 1];
-        flux_mean[level] = flux_mean[level + 1];
-      }
-    }
-  }
 }
 
 template <typename T>
@@ -1810,7 +1774,6 @@ PY2SESS_HD void solar_2s_flux_pair_row(
   T* elm1 = alloc_from<T>(work, 2 * nlay > 1 ? 2 * nlay - 1 : 1);
   T* elm2 = alloc_from<T>(work, 2 * nlay > 2 ? 2 * nlay - 2 : 1);
 
-  const int nlev = nlay + 1;
   const T pi = T(3.141592653589793238462643383279502884);
   const T pi2 = T(2) * pi;
   const T pi4 = T(4) * pi;
@@ -1819,26 +1782,13 @@ PY2SESS_HD void solar_2s_flux_pair_row(
   const T row_albedo = *albedo;
   const T scaled_flux = row_flux / pi4;
 
-  bool transparent = true;
   bool has_scattering = false;
   for (int i = 0; i < nlay; ++i) {
     if (omega[i] != T(0)) {
       has_scattering = true;
     }
     const T omfac = T(1) - omega[i] * scaling[i];
-    delta_tau[i] = tau[i] * omfac;
-    if (delta_tau[i] != T(0)) {
-      transparent = false;
-    }
-  }
-
-  if (transparent) {
-    const T down_value = do_dnwelling ? row_flux * x0 : T(0);
-    for (int level = 0; level < nlev; ++level) {
-      out[2 * level] = T(0);
-      out[2 * level + 1] = down_value;
-    }
-    return;
+    delta_tau[i] = stabilize_optical_thickness(tau[i] * omfac);
   }
 
   T previous_tauslant = T(0);
@@ -1858,9 +1808,7 @@ PY2SESS_HD void solar_2s_flux_pair_row(
     const T delta_tauslant = tauslant - previous_tauslant;
     const bool active = layer + 1 <= layer_pis_cutoff;
     const T average =
-        active ? (plane_parallel_chapman
-                      ? plane_secant
-                      : (delta_tau[layer] == T(0) ? T(0) : delta_tauslant / delta_tau[layer]))
+        active ? (plane_parallel_chapman ? plane_secant : delta_tauslant / delta_tau[layer])
                : T(0);
     const T initial = active ? (layer == 0 ? T(1) : exp(-previous_tauslant)) : T(0);
     const T t_mubar = active ? exp_cutoff(delta_tauslant, T(88)) : T(0);
@@ -1994,12 +1942,6 @@ PY2SESS_HD void solar_2s_flux_pair_row(
   }
   out[2 * nlay] = up_value;
   out[2 * nlay + 1] = down_value;
-  for (int level = nlay - 1; level >= 0; --level) {
-    if (delta_tau[level] == T(0)) {
-      out[2 * level] = out[2 * (level + 1)];
-      out[2 * level + 1] = out[2 * (level + 1) + 1];
-    }
-  }
 }
 
 template <typename T>

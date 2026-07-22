@@ -23,6 +23,7 @@ MAX_TAU_PATH = 88.0
 MAX_TAU_QPATH = 88.0
 TAYLOR_SMALL = 1.0e-3
 TAYLOR_ORDER = 3
+OPTICAL_THICKNESS_MIN = 1.0e-12
 
 
 def _exp_cutoff_torch(values, cutoff: float):
@@ -689,6 +690,11 @@ def solve_solar_obs_batch_torch(
         omega_t,
         asymm_t,
         scaling_t,
+    )
+    delta_tau = torch.where(
+        delta_tau == 0.0,
+        torch.full_like(delta_tau, OPTICAL_THICKNESS_MIN),
+        delta_tau,
     )
     if plane_parallel_secant is None:
         if chapman is None:
